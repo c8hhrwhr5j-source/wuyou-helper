@@ -15,9 +15,11 @@ options:
 
 settings:
   base:
-    SWIFT_VERSION: "5.0"
+    SWIFT_VERSION: "5.9"
     IPHONEOS_DEPLOYMENT_TARGET: "14.0"
     TARGETED_DEVICE_FAMILY: "1"
+    ARCHS: "arm64"
+    VALID_ARCHS: "arm64"
 
 targets:
   无忧辅助:

@@ -136,6 +136,8 @@ struct FeaturePlaceholder: View {
     }
 }
 
-#Preview {
-    ScriptControlView()
+struct ScriptControlView_Previews: PreviewProvider {
+    static var previews: some View {
+        ScriptControlView()
+    }
 }
