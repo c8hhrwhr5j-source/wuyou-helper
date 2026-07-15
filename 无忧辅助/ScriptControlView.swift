@@ -64,13 +64,13 @@ struct ScriptControlView: View {
                             icon: "text.insert",
                             title: "文字输入",
                             description: "模拟键盘输入",
-                            color: .teal
+                            color: .cyan
                         )
                         FeaturePlaceholder(
                             icon: "clock.arrow.2.circlepath",
                             title: "延时循环",
                             description: "脚本编排 / 循环执行",
-                            color: .indigo
+                            color: .blue
                         )
                     }
                     .padding(.horizontal)
@@ -80,14 +80,15 @@ struct ScriptControlView: View {
             }
             .navigationTitle("脚本控制")
             .navigationBarTitleDisplayMode(.inline)
-            .overlay(alignment: .bottom) {
+            .overlay(
                 VStack {
                     Text("🔧 更多功能开发中...")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .padding(.vertical, 8)
-                }
-            }
+                },
+                alignment: .bottom
+            )
         }
     }
 }

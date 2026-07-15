@@ -75,7 +75,7 @@ final class RootHelper {
             Log.shared.add("✅ posix_spawn 成功 (pid: \(pid))")
             var status: Int32 = 0
             waitpid(pid, &status, 0)
-            return WIFEXITED(status) && WEXITSTATUS(status) == 0
+            return wifexited(status) && wexitstatus(status) == 0
         } else {
             Log.shared.add("❌ posix_spawn 失败 (errno: \(ret))")
             return false
@@ -85,36 +85,47 @@ final class RootHelper {
     /// 带输出收集的 spawn
     private func spawnWithOutput(path: String, args: [String]) -> (output: String, success: Bool) {
         let pipe = Pipe()
-        let readHandle = pipe.fileHandleForReading
 
         var pid: pid_t = 0
         var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) } + [nil]
         defer { argv.forEach { $0.map { free($0) } } }
 
-        var attr = posix_spawnattr_t()
-        posix_spawnattr_init(&attr)
+        let attrPtr = UnsafeMutablePointer<posix_spawnattr_t>.allocate(capacity: 1)
+        let fileActionsPtr = UnsafeMutablePointer<posix_spawn_file_actions_t>.allocate(capacity: 1)
+        defer {
+            posix_spawn_file_actions_destroy(fileActionsPtr)
+            posix_spawnattr_destroy(attrPtr)
+            attrPtr.deallocate()
+            fileActionsPtr.deallocate()
+        }
 
-        // 设置 stdout 重定向到 pipe
-        var fileActions = posix_spawn_file_actions_t()
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+        posix_spawnattr_init(attrPtr)
+        posix_spawn_file_actions_init(fileActionsPtr)
+        posix_spawn_file_actions_adddup2(fileActionsPtr, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(fileActionsPtr, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
 
-        let ret = posix_spawn(&pid, path, &fileActions, &attr, &argv, environ)
-
-        posix_spawn_file_actions_destroy(&fileActions)
-        posix_spawnattr_destroy(&attr)
+        let ret = posix_spawn(&pid, path, fileActionsPtr, attrPtr, &argv, environ)
 
         pipe.fileHandleForWriting.closeFile()
 
         if ret == 0 {
-            let data = readHandle.readDataToEndOfFile()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
             var status: Int32 = 0
             waitpid(pid, &status, 0)
-            return (output, WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            return (output, wifexited(status) && wexitstatus(status) == 0)
         } else {
             return ("posix_spawn 失败: \(ret)", false)
         }
     }
+}
+
+// MARK: - C 宏兼容（Swift 6 下 sys/wait.h 宏不可直接调用）
+
+private func wifexited(_ status: Int32) -> Bool {
+    return (status & 0x7f) == 0
+}
+
+private func wexitstatus(_ status: Int32) -> Int32 {
+    return (status >> 8) & 0xff
 }
