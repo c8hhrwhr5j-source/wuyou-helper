@@ -67,12 +67,15 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath ./DerivedData \
             ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=YES \
+            VALID_ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             ENABLE_BITCODE=NO \
             DEPLOYMENT_POSTPROCESSING=NO \
+            STRIP_SWIFT_SYMBOLS=YES \
+            COPY_PHASE_STRIP=NO \
             2>&1 | tee build.log
 
           # 如果失败，输出错误摘要

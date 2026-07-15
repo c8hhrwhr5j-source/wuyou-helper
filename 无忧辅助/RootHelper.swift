@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import Darwin
 
 final class RootHelper {
     static let shared = RootHelper()
@@ -90,11 +91,11 @@ final class RootHelper {
         var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) } + [nil]
         defer { argv.forEach { $0.map { free($0) } } }
 
-        var attr: posix_spawnattr_t?
+        var attr = posix_spawnattr_t()
         posix_spawnattr_init(&attr)
 
         // 设置 stdout 重定向到 pipe
-        var fileActions: posix_spawn_file_actions_t?
+        var fileActions = posix_spawn_file_actions_t()
         posix_spawn_file_actions_init(&fileActions)
         posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
