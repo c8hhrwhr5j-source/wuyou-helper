@@ -93,14 +93,14 @@ final class RootHelper {
         let attrPtr = UnsafeMutablePointer<posix_spawnattr_t>.allocate(capacity: 1)
         let fileActionsPtr = UnsafeMutablePointer<posix_spawn_file_actions_t>.allocate(capacity: 1)
         defer {
-            posix_spawn_file_actions_destroy(fileActionsPtr)
-            posix_spawnattr_destroy(attrPtr)
+            posix_spawn_file_actions_destroy(UnsafeMutableRawPointer(fileActionsPtr).assumingMemoryBound(to: posix_spawn_file_actions_t?.self))
+            posix_spawnattr_destroy(UnsafeMutableRawPointer(attrPtr).assumingMemoryBound(to: posix_spawnattr_t?.self))
             attrPtr.deallocate()
             fileActionsPtr.deallocate()
         }
 
-        posix_spawnattr_init(attrPtr)
-        posix_spawn_file_actions_init(fileActionsPtr)
+        posix_spawnattr_init(UnsafeMutableRawPointer(attrPtr).assumingMemoryBound(to: posix_spawnattr_t?.self))
+        posix_spawn_file_actions_init(UnsafeMutableRawPointer(fileActionsPtr).assumingMemoryBound(to: posix_spawn_file_actions_t?.self))
         posix_spawn_file_actions_adddup2(fileActionsPtr, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(fileActionsPtr, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
 
