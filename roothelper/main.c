@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 extern char **environ;
 
@@ -29,14 +31,33 @@ static void print_info(void) {
            getpid(), getuid(), getgid(), geteuid());
 }
 
-/// 通过 system() 执行 shell 命令
+/// 通过 posix_spawn + /bin/sh -c 执行 shell 命令（等效 system()，但 iOS SDK 不允许直接调用 system）
 static int shell_command(const char *cmd) {
     printf("[roothelper] Shell: %s\n", cmd);
-    return system(cmd);
+
+    pid_t pid;
+    const char *sh_path = "/bin/sh";
+    char *const sh_argv[] = { "sh", "-c", (char *)cmd, NULL };
+
+    int ret = posix_spawn(&pid, sh_path, NULL, NULL, sh_argv, environ);
+    if (ret != 0) {
+        printf("[roothelper] posix_spawn 失败: errno=%d\n", ret);
+        return -1;
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        printf("[roothelper] 退出码: %d\n", WEXITSTATUS(status));
+        return WEXITSTATUS(status);
+    } else {
+        printf("[roothelper] 信号终止: %d\n", WTERMSIG(status));
+        return -1;
+    }
 }
 
 // ============================================================
-// 系统命令处理器（全部基于 system() 调用）
+// 系统命令处理器（全部通过 posix_spawn + /bin/sh -c 执行）
 // ============================================================
 
 /// 强制重启：shutdown -r now
@@ -55,9 +76,7 @@ static int cmd_reboot(void) {
     // 同步磁盘缓存后执行强制重启
     sync();
     printf("[roothelper] 执行: shutdown -r now\n");
-    int ret = system("shutdown -r now");
-    printf("[roothelper] shutdown -r now 返回: %d\n", ret);
-    return ret;
+    return shell_command("shutdown -r now");
 }
 
 /// 重启桌面（注销）：killall SpringBoard
@@ -74,9 +93,7 @@ static int cmd_respring(void) {
     printf("[roothelper] 提升后 uid=%d euid=%d\n", getuid(), geteuid());
 
     printf("[roothelper] 执行: killall SpringBoard\n");
-    int ret = system("killall SpringBoard");
-    printf("[roothelper] killall SpringBoard 返回: %d\n", ret);
-    return ret;
+    return shell_command("killall SpringBoard");
 }
 
 /// 关机：shutdown -h now
@@ -95,9 +112,7 @@ static int cmd_shutdown(void) {
     // 同步磁盘缓存后执行关机
     sync();
     printf("[roothelper] 执行: shutdown -h now\n");
-    int ret = system("shutdown -h now");
-    printf("[roothelper] shutdown -h now 返回: %d\n", ret);
-    return ret;
+    return shell_command("shutdown -h now");
 }
 
 /// 通用 Shell 命令执行
