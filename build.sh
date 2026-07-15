@@ -62,6 +62,17 @@ ldid -S"${ENTITLEMENTS}" "${APP_DIR}/roothelper" 2>/dev/null || {
     }
 }
 
+# 签名主应用（如果存在）
+if [ -f "${APP_DIR}/${PROJECT_NAME}" ]; then
+    echo "   🔐 签名主应用..."
+    ldid -S"${ENTITLEMENTS}" "${APP_DIR}/${PROJECT_NAME}" 2>/dev/null || {
+        echo "   ⚠️  主应用签名失败，尝试 codesign..."
+        codesign -s - --entitlements "${ENTITLEMENTS}" "${APP_DIR}/${PROJECT_NAME}" 2>/dev/null || {
+            echo "   ⚠️  主应用签名跳过（TrollStore 会处理签名）"
+        }
+    }
+fi
+
 # ========================================
 # Step 2: 编译 Swift (xcodebuild)
 # ========================================

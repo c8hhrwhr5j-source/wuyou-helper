@@ -101,9 +101,14 @@ jobs:
           echo "App: $APP_PATH"
           ls -la "$APP_PATH/"
 
-          # 签名
-          ldid -S entitlements.plist "$APP_PATH/无忧辅助" 2>/dev/null || echo "(签名跳过)"
-          ldid -S entitlements.plist "$APP_PATH/roothelper" 2>/dev/null || echo "(签名跳过)"
+          # 签名（ldid 必须成功，否则权限不生效）
+          ldid -S entitlements.plist "$APP_PATH/无忧辅助"
+          ldid -S entitlements.plist "$APP_PATH/roothelper" || echo "⚠️ roothelper 签名失败"
+
+          # 验证签名
+          echo "=== 验证主应用 entitlements ==="
+          ldid -e "$APP_PATH/无忧辅助" | head -20 || echo "无法读取 entitlements"
+
 
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/

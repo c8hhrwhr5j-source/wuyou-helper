@@ -16,8 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
+// RB_AUTOBOOT = 0, 不需要额外 include
 
 extern char **environ;
 
@@ -25,7 +27,13 @@ extern char **environ;
 // 工具函数
 // ============================================================
 
-/// 使用 posix_spawn 执行命令（完全 root 权限，兼容 iOS SDK）
+/// 打印当前进程信息
+static void print_info(void) {
+    printf("[roothelper] pid=%d, uid=%d, gid=%d, euid=%d\n",
+           getpid(), getuid(), getgid(), geteuid());
+}
+
+/// 使用 posix_spawn 执行命令（继承环境变量）
 static int spawn_command(const char *binary, char *const argv[]) {
     pid_t pid;
     int status;
@@ -41,7 +49,7 @@ static int spawn_command(const char *binary, char *const argv[]) {
     return WEXITSTATUS(status);
 }
 
-/// 通过 /bin/sh 执行 shell 命令（兼容 iOS，不用 system()）
+/// 通过 /bin/sh 执行 shell 命令
 static int shell_command(const char *cmd) {
     printf("[roothelper] Shell: %s\n", cmd);
     char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
@@ -54,44 +62,89 @@ static int shell_command(const char *cmd) {
 
 static int cmd_reboot(void) {
     printf("[roothelper] ===== 重启手机 =====\n");
-    // 方式1: /sbin/reboot (iOS 上通常可用)
-    char *argv[] = { "/sbin/reboot", NULL };
-    int ret = spawn_command("/sbin/reboot", argv);
+    print_info();
 
-    // 方式2: 如果 /sbin/reboot 不可用，尝试 reboot 系统调用
-    if (ret != 0) {
-        printf("[roothelper] /sbin/reboot 失败，尝试 reboot() 系统调用\n");
-        reboot(0);  // RB_AUTOBOOT
+    // 确保以 root 权限操作
+    if (getuid() != 0) {
+        printf("[roothelper] 当前 uid=%d，尝试 setuid(0)...\n", getuid());
+        setuid(0);
+        setgid(0);
     }
+    printf("[roothelper] 提升后 uid=%d euid=%d\n", getuid(), geteuid());
+
+    // 方式1: reboot() 系统调用（最可靠）
+    printf("[roothelper] 调用 reboot(RB_AUTOBOOT)...\n");
+    sync();           // 同步磁盘缓存
+    reboot(RB_AUTOBOOT);
+
+    // 如果 reboot() 返回（权限不足），打印错误
+    perror("[roothelper] reboot() 失败");
+
+    // 方式2: 尝试 /sbin/reboot
+    printf("[roothelper] 尝试 /sbin/reboot...\n");
+    char *rb_argv[] = { "/sbin/reboot", NULL };
+    int ret = spawn_command("/sbin/reboot", rb_argv);
+
+    // 方式3: shell 命令重启
+    if (ret != 0) {
+        printf("[roothelper] 尝试 shell reboot...\n");
+        shell_command("reboot");
+    }
+
     return ret;
 }
 
 static int cmd_respring(void) {
     printf("[roothelper] ===== 注销手机 =====\n");
+    print_info();
 
-    // 方式1: sbreload (iOS 11.3+, 最快)
+    // 确保以 root 权限操作
+    if (getuid() != 0) {
+        printf("[roothelper] 当前 uid=%d，尝试 setuid(0)...\n", getuid());
+        setuid(0);
+        setgid(0);
+    }
+    printf("[roothelper] 提升后 uid=%d euid=%d\n", getuid(), geteuid());
+
+    // 方式1: killall -9 SpringBoard（最直接有效）
+    printf("[roothelper] killall -9 SpringBoard...\n");
+    char *kill_argv1[] = { "/usr/bin/killall", "-9", "SpringBoard", NULL };
+    int ret = spawn_command("/usr/bin/killall", kill_argv1);
+
+    if (ret == 0) {
+        printf("[roothelper] killall SpringBoard 成功\n");
+        return 0;
+    }
+
+    // 方式2: sbreload（iOS 11.3+ 专用重启 SpringBoard 工具）
+    printf("[roothelper] 尝试 /usr/bin/sbreload...\n");
     char *sbreload_argv[] = { "/usr/bin/sbreload", NULL };
-    int ret = spawn_command("/usr/bin/sbreload", sbreload_argv);
+    ret = spawn_command("/usr/bin/sbreload", sbreload_argv);
 
-    if (ret != 0) {
-        // 方式2: killall SpringBoard
-        printf("[roothelper] sbreload 失败，尝试 killall SpringBoard\n");
-        char *killall_argv[] = { "/usr/bin/killall", "-9", "SpringBoard", NULL };
-        ret = spawn_command("/usr/bin/killall", killall_argv);
+    if (ret == 0) {
+        return 0;
     }
 
-    if (ret != 0) {
-        // 方式3: launchctl kickstart
-        printf("[roothelper] killall 失败，尝试 launchctl\n");
-        char *launchctl_argv[] = { "/usr/bin/launchctl", "kickstart", "-k", "system/com.apple.backboardd", NULL };
-        ret = spawn_command("/usr/bin/launchctl", launchctl_argv);
-    }
+    // 方式3: launchctl kickstart backboardd
+    printf("[roothelper] 尝试 launchctl kickstart backboardd...\n");
+    shell_command("launchctl kickstart -k system/com.apple.backboardd");
 
-    return ret;
+    // 方式4: kill -9 $(pgrep SpringBoard) 用 shell 兜底
+    printf("[roothelper] 尝试 pgrep + kill...\n");
+    shell_command("kill -9 $(pgrep SpringBoard 2>/dev/null) 2>/dev/null");
+
+    return 0;
 }
 
 static int cmd_shell(const char *command) {
     printf("[roothelper] ===== 执行 Shell: %s =====\n", command);
+    print_info();
+
+    if (getuid() != 0) {
+        setuid(0);
+        setgid(0);
+    }
+
     return shell_command(command);
 }
 
@@ -100,13 +153,19 @@ static int cmd_shell(const char *command) {
 // ============================================================
 
 int main(int argc, char *argv[]) {
-    printf("[roothelper] 启动 (pid: %d, uid: %d)\n", getpid(), getuid());
+    print_info();
+
+    // 尝试提升到 root
+    setuid(0);
+    setgid(0);
+
+    printf("[roothelper] 提升后 uid=%d euid=%d\n", getuid(), geteuid());
 
     if (argc < 2) {
         printf("用法: roothelper <command> [args...]\n");
         printf("命令:\n");
         printf("  reboot   - 重启手机\n");
-        printf("  respring - 注销手机\n");
+        printf("  respring - 注销手机 (重启 SpringBoard)\n");
         printf("  shell    - 执行 Shell 命令\n");
         return 1;
     }
