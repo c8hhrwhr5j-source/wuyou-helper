@@ -9,7 +9,7 @@ options:
   bundleIdPrefix: com.wuyou
   deploymentTarget:
     iOS: "14.0"
-  xcodeVersion: "15.0"
+  # xcodeVersion: "15.0"  # 让 XcodeGen 自动适配当前 Xcode 版本
   generateEmptyDirectories: true
   createIntermediateGroups: true
 

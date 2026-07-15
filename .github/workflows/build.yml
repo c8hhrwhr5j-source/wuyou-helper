@@ -52,7 +52,13 @@ jobs:
       # ========================================
       - name: Build App
         run: |
-          # 确保 release 产物路径可预测
+          # 检查必要文件是否存在
+          echo "=== 检查文件 ==="
+          ls -la 无忧辅助/Info.plist
+          ls -la 无忧辅助/Assets.xcassets/ 2>/dev/null || echo "(Assets.xcassets 不存在)"
+          ls -la 无忧辅助/LaunchScreen.storyboard 2>/dev/null || echo "(LaunchScreen.storyboard 不存在)"
+
+          # 编译并捕获完整日志
           xcodebuild build \
             -project "无忧辅助.xcodeproj" \
             -scheme "无忧辅助" \
@@ -63,7 +69,17 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             ENABLE_BITCODE=NO \
-            DEPLOYMENT_POSTPROCESSING=NO
+            DEPLOYMENT_POSTPROCESSING=NO \
+            2>&1 | tee build.log
+
+          # 如果失败，输出错误摘要
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo ""
+            echo "====== ERROR SUMMARY ======"
+            grep -i -E "(error:|warning:|undefined|duplicate)" build.log | head -30
+            echo "==========================="
+            exit 1
+          fi
 
       # ========================================
       # Step 5: 打包 IPA
