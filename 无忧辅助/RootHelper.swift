@@ -3,11 +3,10 @@
 //  无忧辅助
 //
 //  通过 posix_spawn 以 root 权限执行外部 helper 二进制
-//  helper 内部使用 system() 执行系统命令：
-//    - 强制重启: /usr/sbin/shutdown -r now
-//    - 关机:     /usr/sbin/shutdown -h now
+//  helper 内部执行系统命令：
+//    - 强制重启: reboot(RB_AUTOBOOT) syscall
+//    - 关机:     IOKit IOPMShutdownSystem
 //    - 重启桌面: killall -9 SpringBoard
-//    - 注销用户: killall -9 loginwindow
 //
 
 import Foundation
@@ -77,13 +76,6 @@ final class RootHelper {
         guard let path = helperPath else { return false }
         Log.shared.add("🔧 请求重启桌面 (killall -9 SpringBoard)...")
         return spawnRoot(path: path, command: "respring")
-    }
-
-    /// 注销用户 — roothelper 执行 killall -9 loginwindow
-    func logout() -> Bool {
-        guard let path = helperPath else { return false }
-        Log.shared.add("🔧 请求注销用户 (killall -9 loginwindow)...")
-        return spawnRoot(path: path, command: "logout")
     }
 
     // MARK: - posix_spawn 以 root 身份执行

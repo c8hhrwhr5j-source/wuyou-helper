@@ -21,6 +21,7 @@ clang -arch arm64 \
       -isysroot "$SDK" \
       -mios-version-min=14.0 \
       -O2 \
+      -framework IOKit \
       -o "$HELPER_OUT" \
       "$HELPER_SRC"
 

@@ -48,6 +48,7 @@ clang -arch arm64 \
       -isysroot "${SDK_PATH}" \
       -mios-version-min=14.0 \
       -O2 \
+      -framework IOKit \
       -o "${APP_DIR}/roothelper" \
       "${HELPER_SRC}"
 

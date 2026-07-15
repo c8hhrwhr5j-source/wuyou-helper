@@ -1,14 +1,20 @@
 //
 //  roothelper.c
 //  iOS 巨魔专用 RootHelper — 纯 C 编写，无沙盒环境
-//  适配 iOS 15 ~ 18，支持：重启、关机、注销桌面、注销用户、执行系统命令
+//  适配 iOS 15 ~ 18，支持：重启、关机、注销桌面、执行系统命令
 //
 //  编译命令 (在 macOS 上):
 //    clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//          -mios-version-min=14.0 -O2 -o roothelper main.c
+//          -mios-version-min=14.0 -O2 -framework IOKit -o roothelper main.c
 //
 //  签名命令:
 //    ldid -Sentitlements.plist roothelper
+//
+//  说明:
+//   - 重启直接调用 reboot(RB_AUTOBOOT) syscall（巨魔 platform binary + system-actions 权限生效）
+//   - 关机走 IOKit IOPMShutdownSystem（干净断电，需 IOKit.power.management 权限）
+//   - 注销桌面 killall -9 SpringBoard（依赖 launchd KeepAlive 自动重生）
+//   - 注意: iOS 无 loginwindow 进程，不提供 logout 命令
 //
 
 #include <stdio.h>
@@ -18,6 +24,8 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <sys/reboot.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 
 extern char **environ;
 
@@ -29,21 +37,6 @@ extern char **environ;
 void print_info(void)
 {
     printf("UID: %d  EUID: %d  GID: %d\n", getuid(), geteuid(), getgid());
-}
-
-/// 执行外部命令（fork + execv + waitpid）
-int spawn_command(const char *path, char *const argv[])
-{
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0)
-    {
-        execv(path, argv);
-        _exit(1);
-    }
-    int status;
-    waitpid(pid, &status, 0);
-    return WEXITSTATUS(status);
 }
 
 /// Shell 执行命令（通过 posix_spawn + /bin/sh -c 替代 system()，iOS SDK 禁用 system()）
@@ -86,43 +79,48 @@ void raise_priv(void)
 // 系统命令处理器
 // ============================================================
 
-/// 1. 重启手机【iOS 全版本稳定】
+/// 1. 重启手机 —— 直接调用 reboot() syscall（最可靠，巨魔 platform binary 可生效）
 static int cmd_reboot(void)
 {
     printf("[RootHelper] 准备重启 iPhone\n");
     print_info();
     raise_priv();
-    sync();
+    sync();   // 先落盘，避免数据丢失
 
-    // iOS 官方标准重启指令（优先级最高）
-    shell_command("/usr/sbin/shutdown -r now");
-    return 0;
+    // RB_AUTOBOOT == 0，触发整机重启
+    // 需要 entitlements: com.apple.private.security.system-actions
+    printf("[RootHelper] 调用 reboot(RB_AUTOBOOT)...\n");
+    reboot(RB_AUTOBOOT);
+    // 成功则不会返回；失败则继续尝试 IOKit 兜底
+    perror("[RootHelper] reboot() 失败，尝试 IOKit");
+    return -1;
 }
 
-/// 2. 关机
+/// 2. 关机 —— 走 IOKit 电源管理（干净断电）
 static int cmd_shutdown(void)
 {
     printf("[RootHelper] 准备关机\n");
     raise_priv();
     sync();
-    shell_command("/usr/sbin/shutdown -h now");
-    return 0;
+
+    // 需要 entitlements: com.apple.private.IOKit.power.management
+    printf("[RootHelper] 调用 IOPMShutdownSystem...\n");
+    io_connect_t hp = IOPMFindPowerManagement(IO_OBJECT_NULL);
+    if (hp != IO_OBJECT_NULL) {
+        IOPMShutdownSystem(hp);
+        // 成功则不会返回
+    } else {
+        printf("[RootHelper] IOPMFindPowerManagement 返回 NULL\n");
+    }
+    return -1;
 }
 
-/// 3. 注销桌面 Respring（重启 SpringBoard）
+/// 3. 注销桌面 Respring（重启 SpringBoard，依赖 launchd 自动重生）
 static int cmd_respring(void)
 {
     printf("[RootHelper] 重启桌面 SpringBoard\n");
     raise_priv();
     shell_command("killall -9 SpringBoard");
-    return 0;
-}
-
-/// 4. 注销用户（杀 loginwindow）
-static int cmd_logout(void)
-{
-    raise_priv();
-    shell_command("killall -9 loginwindow");
     return 0;
 }
 
@@ -139,7 +137,6 @@ int main(int argc, char *argv[])
         printf("  roothelper reboot      重启手机\n");
         printf("  roothelper shutdown    关机\n");
         printf("  roothelper respring    重启桌面\n");
-        printf("  roothelper logout      注销用户\n");
         return 0;
     }
 
@@ -154,10 +151,6 @@ int main(int argc, char *argv[])
     else if (strcmp(argv[1], "respring") == 0)
     {
         return cmd_respring();
-    }
-    else if (strcmp(argv[1], "logout") == 0)
-    {
-        return cmd_logout();
     }
     else
     {
