@@ -3,9 +3,8 @@
 //  无忧辅助
 //
 //  手机控制区域：【重启设备】【注销设备】
-//  Swift 只负责 UI，真正干活由 roothelper 二进制完成：
-//    - 重启: reboot() syscall
-//    - 注销设备: killall -9 SpringBoard
+//    - 重启: reboot() syscall + trollstorehelper 多策略回退
+//    - 注销: proc_listpids + kill(SpringBoard, SIGKILL)（参考 TrollServer）
 //
 
 import SwiftUI
@@ -48,7 +47,7 @@ struct PhoneControlView: View {
                         // 重启手机按钮
                         ControlButton(
                             title: "重启设备",
-                            subtitle: "强制重启设备 (reboot syscall)",
+                            subtitle: "强制重启设备 (reboot syscall + 多策略回退)",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
                             isExecuting: isExecuting
@@ -59,7 +58,7 @@ struct PhoneControlView: View {
                         // 注销设备按钮（Respring）
                         ControlButton(
                             title: "注销设备",
-                            subtitle: "重启 SpringBoard 桌面 (killall -9 SpringBoard)",
+                            subtitle: "重启 SpringBoard (proc_listpids + kill SIGKILL)",
                             icon: "arrow.clockwise",
                             color: .orange,
                             isExecuting: isExecuting
@@ -74,8 +73,8 @@ struct PhoneControlView: View {
 
                     // ========== 状态信息 ==========
                     VStack(alignment: .leading, spacing: 12) {
-                        InfoRow(label: "权限状态", value: "无沙盒 (no-sandbox)")
-                        InfoRow(label: "提权方式", value: "seteuid(0) + reboot syscall")
+                        InfoRow(label: "注销方式", value: "proc_listpids + kill(SIGKILL)")
+                        InfoRow(label: "重启方式", value: "reboot syscall + trollstorehelper")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
                         InfoRow(label: "适配版本", value: "iOS 15 ~ 18")
                     }
