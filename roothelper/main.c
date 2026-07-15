@@ -23,7 +23,10 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/types.h>
-#include <sys/reboot.h>
+
+// iOS SDK 没有 sys/reboot.h，手动声明 reboot() 与常量
+extern int reboot(int);
+#define RB_AUTOBOOT 0
 
 extern char **environ;
 
