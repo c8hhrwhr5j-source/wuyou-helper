@@ -15,8 +15,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+
+extern char **environ;
 
 // ============================================================
 // 工具函数
@@ -43,12 +46,30 @@ int spawn_command(const char *path, char *const argv[])
     return WEXITSTATUS(status);
 }
 
-/// Shell 执行命令（通过 system() 调用 /bin/sh -c）
+/// Shell 执行命令（通过 posix_spawn + /bin/sh -c 替代 system()，iOS SDK 禁用 system()）
 int shell_command(const char *cmd)
 {
-    char buf[512] = {0};
-    snprintf(buf, sizeof(buf), "/bin/sh -c \"%s\"", cmd);
-    return system(buf);
+    printf("[RootHelper] Shell: %s\n", cmd);
+
+    pid_t pid;
+    const char *sh_path = "/bin/sh";
+    char *const sh_argv[] = { "sh", "-c", (char *)cmd, NULL };
+
+    int ret = posix_spawn(&pid, sh_path, NULL, NULL, sh_argv, environ);
+    if (ret != 0) {
+        printf("[RootHelper] posix_spawn 失败: errno=%d\n", ret);
+        return -1;
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        printf("[RootHelper] 退出码: %d\n", WEXITSTATUS(status));
+        return WEXITSTATUS(status);
+    } else {
+        printf("[RootHelper] 信号终止: %d\n", WTERMSIG(status));
+        return -1;
+    }
 }
 
 /// 提升权限（巨魔无沙盒环境专用，seteuid(0) 即可生效）
