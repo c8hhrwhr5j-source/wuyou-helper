@@ -2,21 +2,125 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- ==================== 沙盒 ==================== -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
+	<key>com.apple.private.security.container-required</key>
+	<false/>
+
+	<!-- ==================== 功能（root + 二进制） ==================== -->
 	<key>platform-application</key>
 	<true/>
+	<key>get-task-allow</key>
+	<true/>
+	<key>com.apple.private.skip-library-validation</key>
+	<true/>
+	<key>com.apple.private.security.no-entitlements</key>
+	<true/>
+	<key>dynamic-codesigning</key>
+	<true/>
+	<!-- 重启/关机系统动作权限 -->
 	<key>com.apple.private.security.system-actions</key>
 	<true/>
+
+	<!-- ==================== 文件系统 ==================== -->
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.security.exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.security.exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/var/containers/Shared/SystemGroup/</string>
+		<string>/var/mobile/Library/</string>
+		<string>/usr/</string>
+		<string>/System/</string>
+	</array>
+
+	<!-- ==================== 隐私（TCC 免请求） ==================== -->
+	<key>com.apple.private.tcc.allow</key>
+	<array>
+		<string>kTCCServiceMicrophone</string>
+		<string>kTCCServiceTencentWeibo</string>
+		<string>kTCCServiceUbiquity</string>
+		<string>kTCCServiceCalls</string>
+		<string>kTCCServiceLiverpool</string>
+		<string>kTCCServiceAccessibility</string>
+		<string>kTCCServiceSpeechRecognition</string>
+		<string>kTCCServiceContacts</string>
+		<string>kTCCServiceLocation</string>
+		<string>kTCCServiceCamera</string>
+		<string>kTCCServiceAll</string>
+		<string>kTCCServiceMSO</string>
+		<string>kTCCServiceCalendars</string>
+		<string>kTCCServiceSiri</string>
+		<string>kTCCServiceBluetoothPeripheral</string>
+		<string>kTCCServiceSinaWeibo</string>
+		<string>kTCCServicePhotos</string>
+		<string>kTCCServiceFacebook</string>
+		<string>kTCCServiceShareKit</string>
+		<string>kTCCServiceReminders</string>
+		<string>kTCCServiceHomeKit</string>
+		<string>kTCCServiceMotion</string>
+		<string>kTCCServiceAppleMedia</string>
+		<string>kTCCServiceKeyboardNetwork</string>
+		<string>kTCCServiceTwitter</string>
+	</array>
+
+	<!-- ==================== 钥匙串 ==================== -->
+	<key>com.apple.hap.pairing</key>
+	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>*</string>
+	</array>
+
+	<!-- ==================== 其他系统级权限 ==================== -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.apple.security</string>
+	</array>
+
+	<!-- 进程间通信 -->
+	<key>com.apple.security.exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.apple.hap.pairing</string>
+		<string>com.apple.springboard</string>
+		<string>com.apple.backboardd</string>
+		<string>com.apple.frontboard</string>
+	</array>
+
+	<!-- 调试权限 -->
 	<key>com.apple.springboard.debugApplications</key>
 	<true/>
 	<key>com.apple.backboardd.debugApplications</key>
 	<true/>
 	<key>com.apple.frontboard.debugApplications</key>
 	<true/>
-	<key>com.apple.private.security.container-required</key>
-	<false/>
-	<key>dynamic-codesigning</key>
+
+	<!-- 辅助功能 -->
+	<key>com.apple.accessibility.AccessibilityControl</key>
 	<true/>
+
+	<!-- 蓝牙 -->
+	<key>com.apple.BluetoothServices</key>
+	<true/>
+
+	<!-- WiFi -->
+	<key>com.apple.wifi.manager-access</key>
+	<true/>
+
+	<!-- 定位 -->
+	<key>com.apple.locationd.usage</key>
+	<true/>
+
+	<!-- 通知 -->
+	<key>com.apple.private.usernotifications.bundle-identifiers</key>
+	<array>
+		<string>*</string>
+	</array>
 </dict>
 </plist>
