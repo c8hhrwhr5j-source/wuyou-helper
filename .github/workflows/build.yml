@@ -1,0 +1,100 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ========================================
+      # Step 1: 安装依赖
+      # ========================================
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Install ldid
+        run: |
+          git clone https://github.com/ProcursusTeam/ldid.git /tmp/ldid
+          cd /tmp/ldid
+          make -j$(sysctl -n hw.ncpu)
+          sudo cp ldid /usr/local/bin/
+          ldid || echo "ldid ready"
+
+      # ========================================
+      # Step 2: 编译 roothelper (C -> arm64)
+      # ========================================
+      - name: Build roothelper
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -arch arm64 \
+            -isysroot "$SDK" \
+            -mios-version-min=14.0 \
+            -O2 \
+            -o roothelper/roothelper \
+            roothelper/main.c
+          file roothelper/roothelper
+
+      # ========================================
+      # Step 3: 生成 Xcode 项目
+      # ========================================
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # ========================================
+      # Step 4: 编译 App (xcodebuild)
+      # ========================================
+      - name: Build App
+        run: |
+          # 确保 release 产物路径可预测
+          xcodebuild build \
+            -project "无忧辅助.xcodeproj" \
+            -scheme "无忧辅助" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_BITCODE=NO \
+            DEPLOYMENT_POSTPROCESSING=NO
+
+      # ========================================
+      # Step 5: 打包 IPA
+      # ========================================
+      - name: Package IPA
+        run: |
+          APP_PATH=$(find ./DerivedData -name "无忧辅助.app" -type d -maxdepth 6 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ 未找到 .app!"
+            find ./DerivedData -name "*.app" -type d
+            exit 1
+          fi
+          echo "App: $APP_PATH"
+          ls -la "$APP_PATH/"
+
+          # 签名
+          ldid -S entitlements.plist "$APP_PATH/无忧辅助" 2>/dev/null || echo "(签名跳过)"
+          ldid -S entitlements.plist "$APP_PATH/roothelper" 2>/dev/null || echo "(签名跳过)"
+
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r 无忧辅助.ipa Payload/
+          ls -lh 无忧辅助.ipa
+
+      # ========================================
+      # Step 6: 上传 IPA
+      # ========================================
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: 无忧辅助.ipa
+          path: 无忧辅助.ipa
