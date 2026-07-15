@@ -26,20 +26,20 @@ private func sys_sync()
 
 @_silgen_name("posix_spawnattr_set_persona_np")
 private func posix_spawnattr_set_persona_np(
-    _ attr: UnsafeMutablePointer<posix_spawnattr_t>?,
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>,
     _ persona_id: uid_t,
     _ flags: UInt32
 ) -> Int32
 
 @_silgen_name("posix_spawnattr_set_persona_uid_np")
 private func posix_spawnattr_set_persona_uid_np(
-    _ attr: UnsafeMutablePointer<posix_spawnattr_t>?,
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>,
     _ uid: uid_t
 ) -> Int32
 
 @_silgen_name("posix_spawnattr_set_persona_gid_np")
 private func posix_spawnattr_set_persona_gid_np(
-    _ attr: UnsafeMutablePointer<posix_spawnattr_t>?,
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>,
     _ gid: gid_t
 ) -> Int32
 
@@ -118,27 +118,24 @@ final class RootHelper {
         var argv: [UnsafeMutablePointer<CChar>?] = [pathC, cmdC, nil]
 
         // 初始化 spawn 属性
-        let attr = UnsafeMutablePointer<posix_spawnattr_t>.allocate(capacity: 1)
-        posix_spawnattr_init(attr)
-        defer {
-            posix_spawnattr_destroy(attr)
-            attr.deallocate()
-        }
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
 
         // ================================================================
         // 关键：设置 persona 以 root 身份执行（类似 TrollStore TSUtil）
         // ================================================================
-        let personaRet = posix_spawnattr_set_persona_np(attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
+        let personaRet = posix_spawnattr_set_persona_np(&attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
         Log.shared.add("   persona_np ret=\(personaRet)")
 
-        let uidRet = posix_spawnattr_set_persona_uid_np(attr, 0) // uid=0 (root)
+        let uidRet = posix_spawnattr_set_persona_uid_np(&attr, 0) // uid=0 (root)
         Log.shared.add("   persona_uid ret=\(uidRet)")
 
-        let gidRet = posix_spawnattr_set_persona_gid_np(attr, 0) // gid=0 (root)
+        let gidRet = posix_spawnattr_set_persona_gid_np(&attr, 0) // gid=0 (root)
         Log.shared.add("   persona_gid ret=\(gidRet)")
 
         // spawn 子进程（传递环境变量）
-        let ret = posix_spawn(&pid, path, nil, attr, &argv, environ)
+        let ret = posix_spawn(&pid, path, nil, &attr, &argv, environ)
 
         if ret == 0 {
             Log.shared.add("✅ posix_spawn 成功 (pid: \(pid))")
@@ -161,26 +158,24 @@ final class RootHelper {
         var cArgs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) } + [nil]
         defer { cArgs.forEach { $0.map { free($0) } } }
 
-        let attr = UnsafeMutablePointer<posix_spawnattr_t>.allocate(capacity: 1)
-        let fileActions = UnsafeMutablePointer<posix_spawn_file_actions_t>.allocate(capacity: 1)
-        posix_spawnattr_init(attr)
-        posix_spawn_file_actions_init(fileActions)
+        var attr: posix_spawnattr_t? = nil
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawnattr_init(&attr)
+        posix_spawn_file_actions_init(&fileActions)
         defer {
-            posix_spawn_file_actions_destroy(fileActions)
-            fileActions.deallocate()
-            posix_spawnattr_destroy(attr)
-            attr.deallocate()
+            posix_spawn_file_actions_destroy(&fileActions)
+            posix_spawnattr_destroy(&attr)
         }
 
         // 设置 root persona
-        posix_spawnattr_set_persona_np(attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
-        posix_spawnattr_set_persona_uid_np(attr, 0)
-        posix_spawnattr_set_persona_gid_np(attr, 0)
+        _ = posix_spawnattr_set_persona_np(&attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
+        _ = posix_spawnattr_set_persona_uid_np(&attr, 0)
+        _ = posix_spawnattr_set_persona_gid_np(&attr, 0)
 
-        posix_spawn_file_actions_adddup2(fileActions, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(fileActions, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
 
-        let ret = posix_spawn(&pid, path, fileActions, attr, &cArgs, environ)
+        let ret = posix_spawn(&pid, path, &fileActions, &attr, &cArgs, environ)
         pipe.fileHandleForWriting.closeFile()
 
         if ret == 0 {
@@ -209,17 +204,14 @@ final class RootHelper {
         var argv: [UnsafeMutablePointer<CChar>?] = [killall, flag, target, nil]
 
         // 尝试以 root persona 执行
-        let attr = UnsafeMutablePointer<posix_spawnattr_t>.allocate(capacity: 1)
-        posix_spawnattr_init(attr)
-        defer {
-            posix_spawnattr_destroy(attr)
-            attr.deallocate()
-        }
-        posix_spawnattr_set_persona_np(attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
-        posix_spawnattr_set_persona_uid_np(attr, 0)
-        posix_spawnattr_set_persona_gid_np(attr, 0)
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        _ = posix_spawnattr_set_persona_np(&attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
+        _ = posix_spawnattr_set_persona_uid_np(&attr, 0)
+        _ = posix_spawnattr_set_persona_gid_np(&attr, 0)
 
-        let ret = posix_spawn(&pid, "/usr/bin/killall", nil, attr, &argv, environ)
+        let ret = posix_spawn(&pid, "/usr/bin/killall", nil, &attr, &argv, environ)
         if ret == 0 {
             Log.shared.add("✅ killall 执行成功 (pid: \(pid))")
             return true
@@ -227,12 +219,9 @@ final class RootHelper {
 
         // 如果 root persona 不行，尝试不带 persona（mobile 用户）
         Log.shared.add("⚠️ root persona killall 失败，尝试 mobile killall...")
-        let attr2 = UnsafeMutablePointer<posix_spawnattr_t>.allocate(capacity: 1)
-        posix_spawnattr_init(attr2)
-        defer {
-            posix_spawnattr_destroy(attr2)
-            attr2.deallocate()
-        }
+        var attr2: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr2)
+        defer { posix_spawnattr_destroy(&attr2) }
 
         var pid2: pid_t = 0
         var argv2: [UnsafeMutablePointer<CChar>?] = [
@@ -243,7 +232,7 @@ final class RootHelper {
         ]
         defer { argv2.forEach { $0.map { free($0) } } }
 
-        let ret2 = posix_spawn(&pid2, "/usr/bin/killall", nil, attr2, &argv2, environ)
+        let ret2 = posix_spawn(&pid2, "/usr/bin/killall", nil, &attr2, &argv2, environ)
         if ret2 == 0 {
             Log.shared.add("✅ mobile killall 执行成功 (pid: \(pid2))")
             return true
