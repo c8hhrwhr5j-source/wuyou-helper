@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import Darwin
 
 struct PhoneControlView: View {
     @State private var showRebootAlert = false
@@ -127,6 +128,7 @@ struct PhoneControlView: View {
 
     private func performAction(name: String, successMsg: String, action: @escaping () -> Bool) {
         isExecuting = true
+        Log.shared.add("📱 UI触发: \(name)")
         DispatchQueue.global(qos: .userInitiated).async {
             let success = action()
             DispatchQueue.main.async {
@@ -136,7 +138,9 @@ struct PhoneControlView: View {
                     alertMessage = successMsg
                 } else {
                     alertTitle = "\(name)失败"
-                    alertMessage = "请确认 helper 二进制是否已正确部署。\n路径: \(RootHelper.shared.helperPath ?? "未知")"
+                    // 提取最近5条日志作为诊断信息
+                    let recentLogs = Log.shared.entries.suffix(5).map { $0.message }.joined(separator: "\n")
+                    alertMessage = "UID=\(getuid())\nHelper: \(RootHelper.shared.helperPath ?? "未找到")\n\n日志:\n\(recentLogs)"
                 }
                 showResultAlert = true
             }

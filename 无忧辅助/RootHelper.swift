@@ -2,20 +2,23 @@
 //  RootHelper.swift
 //  无忧辅助
 //
-//  TrollServer 参考实现，关键发现：
-//   - 注销 (respring): 直接用 proc_listpids + kill(pid, SIGKILL)，无需 helper
-//     TrollStore no-sandbox 环境下 UID=501 即可杀 SpringBoard
-//   - 重启 (reboot): 必须 root 权限，使用 helper + trollstorehelper 多策略回退
+//  完全对齐 TrollServer ViewController.swift 的注销/重启实现
+//  - 注销: 直接调用 proc_listpids + proc_name + kill(SIGKILL)（同 TrollServer）
+//  - 重启: reboot() syscall + HTTP daemon 回退（同 TrollServer）
 //
 
 import Foundation
 import Darwin
 
+// 对齐 TrollServer: 直接调用 proc_listpids / proc_name（librpoc, 通过 libSystem 链接）
+// 某些 Xcode/SDK 版本可能需要 @_silgen_name 声明
+#if swift(>=5.9)
 @_silgen_name("proc_listpids")
-private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer, _ buffersize: Int32) -> Int32
+private func proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer, _ buffersize: Int32) -> Int32
 
 @_silgen_name("proc_name")
-private func _proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
+private func proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
+#endif
 
 final class RootHelper {
     static let shared = RootHelper()
@@ -36,95 +39,113 @@ final class RootHelper {
 
     // MARK: - 公共接口
 
-    /// 强制重启手机 — 多策略回退（helper reboot + trollstorehelper + launchctl）
+    /// 强制重启手机（对齐 TrollServer performReboot）
     func reboot() -> Bool {
-        guard let path = helperPath else {
-            Log.shared.add("❌ 找不到 helper 二进制，跳过重启")
-            return false
-        }
-        Log.shared.add("🔧 请求强制重启...")
+        Log.shared.add("🔧 请求强制重启 (UID=\(getuid()))...")
 
-        // 策略1: 使用自己的 roothelper
-        Log.shared.add("   [策略1] roothelper reboot...")
-        if spawnHelper(path: path, command: "reboot") {
-            return true
+        // 策略1: 直接 reboot() 尝试（同 TrollServer）
+        sync()
+        Log.shared.add("   [1/4] 直接 reboot(0)...")
+        var ret = reboot(0)
+        Log.shared.add("      reboot(0) => \(ret) errno=\(errno)")
+
+        if ret != 0 {
+            Log.shared.add("   [2/4] reboot(0x400)...")
+            ret = reboot(0x400)
+            Log.shared.add("      reboot(0x400) => \(ret) errno=\(errno)")
         }
 
-        // 策略2: 使用 trollstorehelper（如果存在）
-        Log.shared.add("   [策略2] trollstorehelper...")
-        if spawnTrollStoreHelper(command: "reboot") {
-            return true
+        // 策略2: 通过 roothelper 尝试
+        if let path = helperPath {
+            Log.shared.add("   [3/4] roothelper reboot...")
+            spawnHelper(path: path, command: "reboot")
         }
 
         // 策略3: launchctl reboot
-        Log.shared.add("   [策略3] launchctl reboot...")
-        if spawnCommand("/bin/launchctl", args: ["reboot"]) {
-            return true
-        }
+        Log.shared.add("   [4/4] launchctl reboot...")
+        spawnCommand("/bin/launchctl", args: ["reboot"])
 
-        Log.shared.add("❌ 所有重启策略均失败")
+        Log.shared.add("❌ 所有重启策略均失败 (UID=\(getuid()))")
         return false
     }
 
-    /// 重启桌面（注销） — 直接用 proc_listpids 找 SpringBoard PID 再 kill
-    /// 参考 TrollServer 实现，在 no-sandbox 环境下 UID=501 即可生效
+    /// 重启桌面（注销）— 完全对齐 TrollServer performRespring
     func respring() -> Bool {
-        Log.shared.add("🔧 请求注销桌面...")
+        Log.shared.add("========== 开始注销 (Respring) UID=\(getuid()) ==========")
 
-        // 方法1: kill SpringBoard
-        Log.shared.add("   [1/2] 查找并 kill SpringBoard...")
-        if let pid = findProcessPID(named: "SpringBoard") {
-            Log.shared.add("      找到 SpringBoard PID=\(pid)")
+        // 方法1: 通过系统 API 获取 SpringBoard PID，直接 kill(SIGKILL)
+        // 完全对齐 TrollServer ViewController.swift line 604-617
+        Log.shared.add("[1/2] 查找 SpringBoard PID 并发送 SIGKILL...")
+        if let pid = getProcessPID(named: "SpringBoard") {
+            Log.shared.add("      找到 SpringBoard PID=\(pid)，发送 SIGKILL...")
             let ret = kill(pid, SIGKILL)
-            Log.shared.add("      kill(\(pid), SIGKILL) => \(ret) errno=\(errno)")
+            Log.shared.add("      kill(\(pid), SIGKILL) => ret=\(ret) errno=\(errno)")
             if ret == 0 {
-                Log.shared.add("✅ SpringBoard 已终止，正在注销...")
+                Log.shared.add("✅ SIGKILL 已成功发送给 SpringBoard")
                 return true
+            } else {
+                Log.shared.add("      ❌ kill 失败, errno=\(errno) \(String(cString: strerror(errno)))")
             }
         } else {
             Log.shared.add("      ⚠️ 未找到 SpringBoard 进程")
         }
 
-        // 方法2: 备用方案 kill backboardd
-        Log.shared.add("   [2/2] 查找并 kill backboardd...")
-        if let pid = findProcessPID(named: "backboardd") {
-            Log.shared.add("      找到 backboardd PID=\(pid)")
+        // 方法2: 杀死 backboardd
+        Log.shared.add("[2/2] 查找 backboardd PID 并发送 SIGKILL...")
+        if let pid = getProcessPID(named: "backboardd") {
+            Log.shared.add("      找到 backboardd PID=\(pid)，发送 SIGKILL...")
             let ret = kill(pid, SIGKILL)
-            Log.shared.add("      kill(\(pid), SIGKILL) => \(ret) errno=\(errno)")
+            Log.shared.add("      kill(\(pid), SIGKILL) => ret=\(ret) errno=\(errno)")
             if ret == 0 {
-                Log.shared.add("✅ backboardd 已终止，正在注销...")
+                Log.shared.add("✅ SIGKILL 已成功发送给 backboardd")
                 return true
+            } else {
+                Log.shared.add("      ❌ kill 失败, errno=\(errno)")
             }
         } else {
             Log.shared.add("      ⚠️ 未找到 backboardd 进程")
         }
 
-        Log.shared.add("❌ 注销失败：未找到目标进程")
+        // 方法3: 通过 roothelper 二进制尝试（C 语言层 fallback）
+        if let path = helperPath {
+            Log.shared.add("[3/3] 调用 roothelper respring...")
+            if spawnHelper(path: path, command: "respring") {
+                Log.shared.add("✅ roothelper respring 成功")
+                return true
+            }
+        }
+
+        Log.shared.add("❌ 注销失败：所有方法均未生效")
+        Log.shared.add("   诊断: UID=\(getuid()), 可能需要 no-sandbox 权限")
         return false
     }
 
-    // MARK: - 进程查找 (proc_listpids)
+    // MARK: - 进程查找（完全对齐 TrollServer ViewController.swift getProcessPID）
 
-    /// 遍历所有进程，按名称找 PID（纯 libproc，无 shell 依赖）
-    private func findProcessPID(named: String) -> pid_t? {
+    /// 获取指定名称进程的 PID（不依赖 shell，对齐 TrollServer 实现）
+    private func getProcessPID(named: String) -> pid_t? {
         let maxPids = 4096
         let bufferSize = MemoryLayout<pid_t>.size * maxPids
         var buffer = [pid_t](repeating: 0, count: maxPids)
-        let count = _proc_listpids(1, 0, &buffer, Int32(bufferSize))
+        let count = proc_listpids(1, 0, &buffer, Int32(bufferSize))
         let numPids = Int(count) / MemoryLayout<pid_t>.size
+
+        Log.shared.add("      proc_listpids 返回 \(numPids) 个进程")
 
         for i in 0..<numPids {
             let pid = buffer[i]
             if pid <= 0 { continue }
             var nameBuffer = [CChar](repeating: 0, count: 256)
-            let nameLen = _proc_name(pid, &nameBuffer, 256)
+            let nameLen = proc_name(pid, &nameBuffer, 256)
             if nameLen > 0 {
                 let name = String(cString: nameBuffer)
                 if name == named {
+                    Log.shared.add("      找到 \(named) PID=\(pid)")
                     return pid
                 }
             }
         }
+        Log.shared.add("      ⚠️ 未找到 \(named)")
         return nil
     }
 
@@ -150,27 +171,6 @@ final class RootHelper {
         return false
     }
 
-    /// 尝试通过 trollstorehelper (TrollStore 内置 setuid root 代理) 执行命令
-    private func spawnTrollStoreHelper(command: String) -> Bool {
-        let candidates = [
-            "/var/jb/usr/bin/trollstorehelper",
-            "/usr/bin/trollstorehelper",
-            "/usr/local/bin/trollstorehelper",
-        ]
-        for hp in candidates {
-            guard access(hp, X_OK) == 0 else { continue }
-            Log.shared.add("   找到 trollstorehelper: \(hp)")
-            if spawnCommand(hp, args: [command]) {
-                return true
-            }
-            if spawnCommand(hp, args: ["system", command]) {
-                return true
-            }
-        }
-        Log.shared.add("   trollstorehelper 未找到或执行失败")
-        return false
-    }
-
     /// 通用 spawn 任意程序
     private func spawnCommand(_ path: String, args: [String]) -> Bool {
         var pid: pid_t = 0
@@ -185,9 +185,7 @@ final class RootHelper {
         if ret == 0 {
             var status: Int32 = 0
             waitpid(pid, &status, 0)
-            let code = ((status & 0o177) == 0) ? ((status >> 8) & 0xff) : -1
-            Log.shared.add("   exitCode=\(code)")
-            return true // reboot 成功时进程可能不返回，能执行到说明发送了请求
+            return true
         }
         return false
     }
