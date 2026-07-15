@@ -34,6 +34,10 @@ extern int reboot(int);
 extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, uint32_t buffersize);
 
+// iOS SDK 没有 errno.h，手动声明 errno
+extern int errno;
+extern char *strerror(int);
+
 extern char **environ;
 
 // ============================================================
