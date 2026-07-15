@@ -2,23 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ============================================ -->
-	<!-- 1. 彻底关闭沙盒（最重要）                       -->
-	<!-- ============================================ -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.security.no-container</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 2. 标记为平台级应用（系统信任）                  -->
-	<!-- ============================================ -->
 	<key>platform-application</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 3. 文件系统完全访问（根目录读写）                 -->
-	<!-- ============================================ -->
 	<key>com.apple.security.exception.files.absolute-path.read-write</key>
 	<array>
 		<string>/</string>
@@ -35,36 +24,16 @@
 	<true/>
 	<key>com.apple.private.security.disk-device-access</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 4. 允许以 root 身份执行 / 生成二进制文件        -->
-	<!-- ============================================ -->
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 5. 容器管理 — 访问所有数据容器                  -->
-	<!-- ============================================ -->
 	<key>com.apple.private.security.container-manager</key>
 	<true/>
 	<key>com.apple.private.MobileContainerManager.allowed</key>
 	<true/>
 	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 6. 应用安装 / 卸载 / LS 数据库                  -->
-	<!-- ============================================ -->
 	<key>com.apple.private.coreservices.canmaplsdatabase</key>
 	<true/>
-	<key>com.apple.lsapplicationworkspace.rebuildappdatabases</key>
-	<true/>
-	<key>com.apple.private.uninstall.deletion</key>
-	<true/>
-
-	<!-- ============================================ -->
-	<!-- 7. 启动 / 终止其他应用                          -->
-	<!-- ============================================ -->
 	<key>com.apple.springboard.launchapplications</key>
 	<true/>
 	<key>com.apple.backboardd.launchapplications</key>
@@ -73,42 +42,18 @@
 	<true/>
 	<key>com.apple.multitasking.termination</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 8. 任务控制 / 调试                              -->
-	<!-- ============================================ -->
 	<key>com.apple.private.task-allow</key>
 	<true/>
 	<key>get-task-allow</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 9. 调试 / 注入（iOS 15 A12+ 上可能被禁用）       -->
-	<!-- ============================================ -->
 	<key>com.apple.private.cs.debugger</key>
 	<true/>
 	<key>com.apple.private.skip-library-validation</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 10. 访问所有进程（触摸/点击）                    -->
-	<!-- ============================================ -->
 	<key>com.apple.private.hid.client.event-dispatch</key>
 	<true/>
 	<key>com.apple.private.io-hidevents</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 11. 键盘/触摸事件注入                          -->
-	<!-- ============================================ -->
-	<key>com.apple.private.ios.endpoint.client</key>
-	<true/>
-	<key>com.apple.private.ioctldispatcher</key>
-	<true/>
-
-	<!-- ============================================ -->
-	<!-- 12. 截屏/取色 / 核心图形调试                     -->
-	<!-- ============================================ -->
 	<key>com.apple.private.coregraphics.debug</key>
 	<true/>
 	<key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
@@ -116,10 +61,6 @@
 		<string>IOKitDebug</string>
 		<string>IOHIDDebug</string>
 	</array>
-
-	<!-- ============================================ -->
-	<!-- 13. IOKit / 磁盘 / 硬件级操作                    -->
-	<!-- ============================================ -->
 	<key>com.apple.private.IOKit.power.management</key>
 	<true/>
 	<key>com.apple.security.exception.iokit-user-client-class</key>
@@ -127,10 +68,6 @@
 		<string>AGXDeviceUserClient</string>
 		<string>IOSurfaceRootUserClient</string>
 	</array>
-
-	<!-- ============================================ -->
-	<!-- 14. 网络权限全开                                -->
-	<!-- ============================================ -->
 	<key>com.apple.private.networkextension.host</key>
 	<true/>
 	<key>com.apple.developer.networking.multicast</key>
@@ -141,18 +78,10 @@
 	<array>
 		<string>data-allowed-write</string>
 	</array>
-
-	<!-- ============================================ -->
-	<!-- 15. 后台运行                                    -->
-	<!-- ============================================ -->
 	<key>com.apple.private.background-items</key>
 	<true/>
 	<key>com.apple.developer.background-processing</key>
 	<true/>
-
-	<!-- ============================================ -->
-	<!-- 16. 系统策略 / 隐私绕过（TrollAutoScript 风格）   -->
-	<!-- ============================================ -->
 	<key>com.apple.private.system-policy.all-files</key>
 	<true/>
 	<key>com.apple.private.tcc.allow</key>
@@ -173,10 +102,6 @@
 		<string>kTCCServiceFaceID</string>
 		<string>kTCCServiceAccessibility</string>
 	</array>
-
-	<!-- ============================================ -->
-	<!-- 17. 钥匙串访问组（匹配 TrollAutoScript）         -->
-	<!-- ============================================ -->
 	<key>keychain-access-groups</key>
 	<array>
 		<string>com.apple.hap.pairing</string>
