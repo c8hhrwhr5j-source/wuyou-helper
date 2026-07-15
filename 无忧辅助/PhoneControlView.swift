@@ -86,28 +86,30 @@ struct PhoneControlView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         // ========== 重启确认弹窗 ==========
-        .alert("确认重启手机？", isPresented: $showRebootAlert) {
-            Button("取消", role: .cancel) {}
-            Button("确认重启", role: .destructive) {
-                executeReboot()
-            }
-        } message: {
-            Text("手机将立即重启，未保存的数据可能丢失。")
+        .alert(isPresented: $showRebootAlert) {
+            Alert(
+                title: Text("确认重启手机？"),
+                message: Text("手机将立即重启，未保存的数据可能丢失。"),
+                primaryButton: .destructive(Text("确认重启"), action: executeReboot),
+                secondaryButton: .cancel(Text("取消"))
+            )
         }
         // ========== 注销确认弹窗 ==========
-        .alert("确认注销手机？", isPresented: $showRespringAlert) {
-            Button("取消", role: .cancel) {}
-            Button("确认注销", role: .destructive) {
-                executeRespring()
-            }
-        } message: {
-            Text("SpringBoard 将重新启动，回到锁屏界面。")
+        .alert(isPresented: $showRespringAlert) {
+            Alert(
+                title: Text("确认注销手机？"),
+                message: Text("SpringBoard 将重新启动，回到锁屏界面。"),
+                primaryButton: .destructive(Text("确认注销"), action: executeRespring),
+                secondaryButton: .cancel(Text("取消"))
+            )
         }
         // ========== 结果弹窗 ==========
-        .alert(alertTitle, isPresented: $showResultAlert) {
-            Button("确定", role: .cancel) {}
-        } message: {
-            Text(alertMessage)
+        .alert(isPresented: $showResultAlert) {
+            Alert(
+                title: Text(alertTitle),
+                message: Text(alertMessage),
+                dismissButton: .default(Text("确定"))
+            )
         }
     }
 
