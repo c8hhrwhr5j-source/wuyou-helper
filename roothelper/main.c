@@ -1,19 +1,19 @@
 //
 //  roothelper.c
 //  iOS 巨魔专用 RootHelper — 纯 C 编写，无沙盒环境
-//  适配 iOS 15 ~ 18，支持：重启、注销桌面
+//  适配 iOS 15 ~ 18
+//
+//  功能：
+//    - 重启手机: kfd 提权 → /usr/sbin/shutdown -r now
+//    - 注销桌面: proc_listpids + kill(SpringBoard, SIGKILL)
 //
 //  编译命令 (在 macOS 上):
 //    clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//          -mios-version-min=14.0 -O2 -o roothelper main.c
+//          -mios-version-min=14.0 -O2 -o roothelper main.c kfd.c offsets.c \
+//          -framework IOKit -framework CoreFoundation
 //
 //  签名命令:
 //    ldid -Sentitlements.plist roothelper
-//
-//  说明:
-//   - 重启: reboot() syscall + trollstorehelper fallback
-//   - 注销桌面: proc_listpids + kill(SpringBoard, SIGKILL)
-//     (参考 TrollServer 实现，不依赖 killall shell 命令)
 //
 
 #include <stdio.h>
@@ -25,63 +25,50 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 
-// iOS SDK 没有 sys/reboot.h，手动声明 reboot() 与常量
-extern int reboot(int);
-#define RB_AUTOBOOT 0
-
-// iOS SDK 可能没有 libproc.h，手动声明进程相关函数
-extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
-extern int proc_name(int pid, void *buffer, uint32_t buffersize);
-
-// iOS SDK 没有 errno.h，手动声明 errno
-extern int errno;
-extern char *strerror(int);
+#include "kfd.h"
+#include "offsets.h"
 
 extern char **environ;
+extern int reboot(int);
+#define RB_AUTOBOOT 0
 
 // ============================================================
 // 工具函数
 // ============================================================
 
-/// 打印当前进程权限信息
-void print_info(void)
-{
-    printf("UID: %d  EUID: %d  GID: %d\n", getuid(), geteuid(), getgid());
+static void print_info(void) {
+    printf("UID: %d  EUID: %d  GID: %d  EGID: %d\n",
+           getuid(), geteuid(), getgid(), getegid());
 }
 
-/// spawn 外部程序（不通过 shell）
-static int spawn_program(const char *path, char *const argv[])
-{
+static int spawn_program(const char *path, char *const argv[]) {
     pid_t pid;
     int ret = posix_spawn(&pid, path, NULL, NULL, argv, environ);
     if (ret != 0) {
-        printf("[RootHelper] posix_spawn(%s) 失败: %d\n", path, ret);
+        printf("[RootHelper] posix_spawn(%s) 失败: %d (errno=%d: %s)\n",
+               path, ret, errno, strerror(errno));
         return -1;
     }
     int status;
     waitpid(pid, &status, 0);
     if (WIFEXITED(status)) {
-        printf("[RootHelper] exit=%d\n", WEXITSTATUS(status));
-        return WEXITSTATUS(status);
+        int code = WEXITSTATUS(status);
+        printf("[RootHelper] exit=%d\n", code);
+        return code;
     }
     printf("[RootHelper] 信号终止: %d\n", WTERMSIG(status));
     return -1;
 }
 
-/// 提升权限（巨魔无沙盒环境专用，seteuid(0) 即可生效）
-void raise_priv(void)
-{
-    if (geteuid() != 0)
-    {
-        seteuid(0);
-        setegid(0);
-    }
-}
+// ============================================================
+// iOS SDK 可能没有 libproc.h，手动声明
+// ============================================================
+extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, uint32_t buffersize);
 
-/// 按名称查找进程 PID（proc_listpids + proc_name，纯系统调用无 shell 依赖）
-static int find_pid_by_name(const char *name)
-{
+static int find_pid_by_name(const char *name) {
     pid_t buffer[4096];
     int count = proc_listpids(1, 0, buffer, (int)sizeof(buffer));
     int num = count / (int)sizeof(pid_t);
@@ -102,59 +89,77 @@ static int find_pid_by_name(const char *name)
 }
 
 // ============================================================
-// 系统命令处理器
+// 1. 重启手机 — kfd 提权 → shutdown -r now
 // ============================================================
-
-/// 1. 重启手机 —— reboot() syscall + trollstorehelper 回退链
-static int cmd_reboot(void)
-{
-    printf("[RootHelper] === 开始重启流程 ===\n");
+static int cmd_reboot(void) {
+    printf("\n");
+    printf("========================================\n");
+    printf("  RootHelper: 重启手机\n");
+    printf("========================================\n");
     print_info();
-    sync();
 
-    // 策略1: 直接 reboot() syscall（需要 root UID 或 system-actions entitlement）
-    printf("[RootHelper] 策略1: reboot(RB_AUTOBOOT)...\n");
-    raise_priv();
-    reboot(RB_AUTOBOOT);
-    printf("[RootHelper] reboot() 返回了 (EUID=%d, errno=%d: %s)\n", geteuid(), errno, strerror(errno));
+    // ---- 步骤1: 尝试 kfd 提权 ----
+    printf("\n[步骤1] kfd 提权...\n");
 
-    // 策略2: 通过 trollstorehelper（它自带 setuid root）
-    const char *helper_paths[] = {
-        "/var/jb/usr/bin/trollstorehelper",
-        "/usr/bin/trollstorehelper",
-        "/usr/local/bin/trollstorehelper",
-        NULL
-    };
-    for (int i = 0; helper_paths[i]; i++) {
-        if (access(helper_paths[i], X_OK) != 0) continue;
-
-        // 验证 setuid 位
-        struct stat st;
-        int has_suid = (stat(helper_paths[i], &st) == 0 && (st.st_mode & S_ISUID));
-        printf("[RootHelper] 策略2: trollstorehelper(%s) setuid=%d\n", helper_paths[i], has_suid);
-
-        char *const argv1[] = { "trollstorehelper", "reboot", NULL };
-        spawn_program(helper_paths[i], argv1);
-
-        char *const argv2[] = { "trollstorehelper", "system", "reboot", NULL };
-        spawn_program(helper_paths[i], argv2);
+    if (kfd_init() != 0) {
+        printf("[RootHelper] kfd_init 失败: %s\n", kfd_get_error());
+        printf("[RootHelper] 跳过 kfd，尝试直接 shutdown...\n");
+        goto direct_reboot;
     }
 
-    // 策略3: launchctl reboot
-    printf("[RootHelper] 策略3: launchctl reboot...\n");
-    char *const lctl_argv[] = { "launchctl", "reboot", NULL };
-    spawn_program("/bin/launchctl", lctl_argv);
+    if (kfd_open() != 0) {
+        printf("[RootHelper] kfd_open 失败: %s\n", kfd_get_error());
+        printf("[RootHelper] 跳过 kfd，尝试直接 shutdown...\n");
+        goto direct_reboot;
+    }
 
-    printf("[RootHelper] ❌ 所有重启策略均失败 (EUID=%d)\n", geteuid());
+    printf("[RootHelper] kfd 打开成功！\n");
+
+    if (kfd_get_root() == 0) {
+        printf("[RootHelper] ✅ kfd 提权成功！EUID=%d\n", geteuid());
+    } else {
+        printf("[RootHelper] ⚠️  kfd_get_root 返回非零: %s\n", kfd_get_error());
+    }
+
+direct_reboot:
+    kfd_close();
+
+    // ---- 步骤2: 同步磁盘 ----
+    printf("\n[步骤2] sync() 磁盘同步\n");
+    sync();
+
+    // ---- 步骤3: /usr/sbin/shutdown -r now (唯一策略) ----
+    printf("\n[步骤3] /usr/sbin/shutdown -r now\n");
+
+    char *shutdown_argv[] = { "/usr/sbin/shutdown", "-r", "now", NULL };
+    int ret = spawn_program("/usr/sbin/shutdown", shutdown_argv);
+    printf("[RootHelper] shutdown => exit=%d\n", ret);
+
+    if (ret == 0) {
+        printf("[RootHelper] ✅ shutdown 命令已发送\n");
+        // shutdown 是异步的，给它一点时间
+        sleep(2);
+        return 0;
+    }
+
+    // ---- 步骤4: reboot syscall (需要 root) ----
+    printf("\n[步骤4] reboot(RB_AUTOBOOT) syscall\n");
+    sync();
+    reboot(RB_AUTOBOOT);
+
+    // ---- 全都失败 ----
+    printf("\n❌ 所有重启策略均失败\n");
+    printf("   UID=%d  EUID=%d\n", getuid(), geteuid());
+    print_info();
     return -1;
 }
 
-/// 2. 注销桌面 Respring（proc_listpids + kill，参考 TrollServer 实现）
-static int cmd_respring(void)
-{
+// ============================================================
+// 2. 注销桌面 Respring
+// ============================================================
+static int cmd_respring(void) {
     printf("[RootHelper] === 注销桌面 ===\n");
     print_info();
-    raise_priv();
 
     // 方法1: kill SpringBoard
     printf("[RootHelper] [1/2] 查找 SpringBoard...\n");
@@ -190,28 +195,21 @@ static int cmd_respring(void)
 // 主入口
 // ============================================================
 
-int main(int argc, char *argv[])
-{
-    if (argc < 2)
-    {
-        printf("==== iOS RootHelper 工具 ====\n");
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        printf("==== iOS RootHelper (kfd) ====\n");
         printf("用法：\n");
-        printf("  roothelper reboot     重启手机\n");
+        printf("  roothelper reboot     重启手机 (kfd提权 -> shutdown)\n");
         printf("  roothelper respring   注销桌面\n");
         return 0;
     }
 
-    if (strcmp(argv[1], "reboot") == 0)
-    {
+    if (strcmp(argv[1], "reboot") == 0) {
         return cmd_reboot();
-    }
-    else if (strcmp(argv[1], "respring") == 0)
-    {
+    } else if (strcmp(argv[1], "respring") == 0) {
         return cmd_respring();
+    } else {
+        printf("未知指令: %s\n", argv[1]);
+        return 1;
     }
-    else
-    {
-        printf("未知指令！\n");
-    }
-    return 0;
 }

@@ -38,7 +38,11 @@ jobs:
             -mios-version-min=14.0 \
             -O2 \
             -o roothelper/roothelper \
-            roothelper/main.c
+            roothelper/main.c \
+            roothelper/kfd.c \
+            roothelper/offsets.c \
+            -framework IOKit \
+            -framework CoreFoundation
           file roothelper/roothelper
 
       # ========================================

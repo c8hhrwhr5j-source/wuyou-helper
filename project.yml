@@ -52,18 +52,23 @@ targets:
     preBuildScripts:
       - name: "Copy roothelper"
         script: |
-          HELPER_SRC="${SRCROOT}/roothelper/main.c"
+          HELPER_DIR="${SRCROOT}/roothelper"
           HELPER_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
 
-          if [ -f "${SRCROOT}/roothelper/roothelper" ]; then
+          if [ -f "${HELPER_DIR}/roothelper" ]; then
             echo "✅ 复制已编译的 roothelper..."
-            cp "${SRCROOT}/roothelper/roothelper" "${HELPER_DST}"
+            cp "${HELPER_DIR}/roothelper" "${HELPER_DST}"
             chmod +x "${HELPER_DST}"
           else
-            echo "⚠️  roothelper 尚未编译，将尝试编译..."
+            echo "⚠️  roothelper 尚未编译，将尝试编译 (kfd + offsets + main)..."
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
             clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -O2 \
-                  -o "${HELPER_DST}" "${HELPER_SRC}" \
+                  -o "${HELPER_DST}" \
+                  "${HELPER_DIR}/main.c" \
+                  "${HELPER_DIR}/kfd.c" \
+                  "${HELPER_DIR}/offsets.c" \
+                  -framework IOKit \
+                  -framework CoreFoundation \
                   && chmod +x "${HELPER_DST}" \
                   && echo "✅ roothelper 编译并复制成功" \
                   || echo "❌ roothelper 编译失败，请手动编译"

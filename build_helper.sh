@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 #  build_helper.sh
-#  单独编译 roothelper 二进制（纯 C，无外部依赖）
+#  单独编译 roothelper 二进制（纯 C + kfd，链接 IOKit/CoreFoundation）
 #
 #  在 macOS 上执行:
 #    bash build_helper.sh
@@ -11,10 +11,10 @@
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HELPER_SRC="${SCRIPT_DIR}/roothelper/main.c"
-HELPER_OUT="${SCRIPT_DIR}/roothelper/roothelper"
+HELPER_DIR="${SCRIPT_DIR}/roothelper"
+HELPER_OUT="${HELPER_DIR}/roothelper"
 
-echo "编译 roothelper（纯 C，无沙盒环境）..."
+echo "编译 roothelper (kfd + offsets + main)..."
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 
 clang -arch arm64 \
@@ -22,12 +22,15 @@ clang -arch arm64 \
       -mios-version-min=14.0 \
       -O2 \
       -o "$HELPER_OUT" \
-      "$HELPER_SRC"
+      "${HELPER_DIR}/main.c" \
+      "${HELPER_DIR}/kfd.c" \
+      "${HELPER_DIR}/offsets.c" \
+      -framework IOKit \
+      -framework CoreFoundation
 
 echo "✅ roothelper 编译完成: $HELPER_OUT"
 file "$HELPER_OUT"
 
-# 可选: 签名
 echo ""
 echo "签名 (TrollStore 安装时会自动处理):"
 echo "  ldid -S${SCRIPT_DIR}/entitlements.plist $HELPER_OUT"

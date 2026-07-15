@@ -92,10 +92,10 @@ fi
 # ========================================
 # Step 3: 编译 roothelper
 # ========================================
-echo "[3/5] 编译 roothelper..."
+echo "[3/5] 编译 roothelper (kfd + offsets + main)..."
 
 SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-HELPER_SRC="${SCRIPT_DIR}/roothelper/main.c"
+HELPER_DIR="${SCRIPT_DIR}/roothelper"
 HELPER_DST="${APP_DIR}/roothelper"
 
 clang -arch arm64 \
@@ -103,7 +103,11 @@ clang -arch arm64 \
       -mios-version-min=14.0 \
       -O2 \
       -o "${HELPER_DST}" \
-      "${HELPER_SRC}"
+      "${HELPER_DIR}/main.c" \
+      "${HELPER_DIR}/kfd.c" \
+      "${HELPER_DIR}/offsets.c" \
+      -framework IOKit \
+      -framework CoreFoundation
 
 chmod +x "${HELPER_DST}"
 echo "   ✅ roothelper 编译完成"
