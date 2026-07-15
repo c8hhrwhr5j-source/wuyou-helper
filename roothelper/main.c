@@ -19,7 +19,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
-// RB_AUTOBOOT = 0, 不需要额外 include
+#include <sys/reboot.h>
 
 extern char **environ;
 

@@ -15,7 +15,7 @@ struct MainTabView: View {
             // 手机控制区域
             PhoneControlView()
                 .tabItem {
-                    Image(systemName: "iphone.gen3")
+                    Image(systemName: "iphone")
                     Text("手机控制")
                 }
                 .tag(0)
