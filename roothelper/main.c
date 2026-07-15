@@ -25,15 +25,7 @@ extern char **environ;
 // 工具函数
 // ============================================================
 
-/// 执行系统命令并等待完成
-static int run_command(const char *cmd) {
-    printf("[roothelper] 执行: %s\n", cmd);
-    int ret = system(cmd);
-    printf("[roothelper] 返回码: %d\n", ret);
-    return ret;
-}
-
-/// 使用 posix_spawn 执行命令（更底层，完全 root 权限）
+/// 使用 posix_spawn 执行命令（完全 root 权限，兼容 iOS SDK）
 static int spawn_command(const char *binary, char *const argv[]) {
     pid_t pid;
     int status;
@@ -47,6 +39,13 @@ static int spawn_command(const char *binary, char *const argv[]) {
     waitpid(pid, &status, 0);
     printf("[roothelper] %s 退出码: %d\n", binary, WEXITSTATUS(status));
     return WEXITSTATUS(status);
+}
+
+/// 通过 /bin/sh 执行 shell 命令（兼容 iOS，不用 system()）
+static int shell_command(const char *cmd) {
+    printf("[roothelper] Shell: %s\n", cmd);
+    char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
+    return spawn_command("/bin/sh", argv);
 }
 
 // ============================================================
@@ -77,13 +76,15 @@ static int cmd_respring(void) {
     if (ret != 0) {
         // 方式2: killall SpringBoard
         printf("[roothelper] sbreload 失败，尝试 killall SpringBoard\n");
-        ret = run_command("killall -9 SpringBoard");
+        char *killall_argv[] = { "/usr/bin/killall", "-9", "SpringBoard", NULL };
+        ret = spawn_command("/usr/bin/killall", killall_argv);
     }
 
     if (ret != 0) {
         // 方式3: launchctl kickstart
         printf("[roothelper] killall 失败，尝试 launchctl\n");
-        ret = run_command("launchctl kickstart -k system/com.apple.backboardd");
+        char *launchctl_argv[] = { "/usr/bin/launchctl", "kickstart", "-k", "system/com.apple.backboardd", NULL };
+        ret = spawn_command("/usr/bin/launchctl", launchctl_argv);
     }
 
     return ret;
@@ -91,7 +92,7 @@ static int cmd_respring(void) {
 
 static int cmd_shell(const char *command) {
     printf("[roothelper] ===== 执行 Shell: %s =====\n", command);
-    return run_command(command);
+    return shell_command(command);
 }
 
 // ============================================================
