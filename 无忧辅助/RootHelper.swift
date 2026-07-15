@@ -51,6 +51,34 @@ final class RootHelper {
         return success
     }
 
+    // MARK: - 提权到 root（不重启，只修改当前进程 UID）
+
+    func escalateToRoot() -> Bool {
+        Log.shared.add("🔑 请求提权到 root (UID=\(getuid()))")
+
+        guard let path = helperPath else {
+            Log.shared.add("❌ roothelper 未找到，无法提权")
+            return false
+        }
+
+        Log.shared.add("   调用 roothelper escalate (kfd 内核提权)...")
+        let ret = spawnHelperRaw(path: path, command: "escalate")
+        Log.shared.add("   提权结果: UID=\(getuid()) EUID=\(geteuid())")
+
+        if getuid() == 0 || geteuid() == 0 {
+            Log.shared.add("✅ 现在是 root 权限！")
+            return true
+        } else {
+            Log.shared.add("⚠️ 提权未生效 (UID 仍为 \(getuid()))")
+            return false
+        }
+    }
+
+    /// 判断当前是否已是 root
+    var isRoot: Bool {
+        getuid() == 0 || geteuid() == 0
+    }
+
     // MARK: - 注销
 
     func respring() -> Bool {
@@ -146,5 +174,29 @@ final class RootHelper {
         }
         Log.shared.add("   posix_spawn 失败: \(ret)")
         return false
+    }
+
+    /// spawn roothelper 并返回 exit code（不判断成功/失败）
+    private func spawnHelperRaw(path: String, command: String) -> Int32 {
+        Log.shared.add("   spawnHelperRaw cmd=\(command)")
+        var pid: pid_t = 0
+        let pathC = strdup(path)
+        let cmdC  = strdup(command)
+        defer { free(pathC); free(cmdC) }
+        var argv: [UnsafeMutablePointer<CChar>?] = [pathC, cmdC, nil]
+        let ret = posix_spawn(&pid, path, nil, nil, &argv, environ)
+        if ret == 0 {
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            if (status & 0o177) == 0 {
+                let code = (status >> 8) & 0xff
+                Log.shared.add("   exitCode=\(code)")
+                return code
+            }
+            Log.shared.add("   信号终止: \(status & 0o177)")
+            return -1
+        }
+        Log.shared.add("   posix_spawn 失败: \(ret)")
+        return -1
     }
 }

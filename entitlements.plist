@@ -13,14 +13,23 @@
 	<true/>
 	<key>get-task-allow</key>
 	<true/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
 	<key>com.apple.private.skip-library-validation</key>
 	<true/>
 	<key>com.apple.private.security.no-entitlements</key>
 	<true/>
 	<key>dynamic-codesigning</key>
 	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
 	<!-- 重启/关机系统动作权限 -->
 	<key>com.apple.private.security.system-actions</key>
+	<true/>
+	<!-- 内核内存访问权限 -->
+	<key>com.apple.private.kernel.get-kext-info</key>
+	<true/>
+	<key>com.apple.private.kernel.memory-status</key>
 	<true/>
 
 	<!-- ==================== 文件系统 ==================== -->

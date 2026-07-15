@@ -155,7 +155,64 @@ direct_reboot:
 }
 
 // ============================================================
-// 2. 注销桌面 Respring
+// 2. 提权到 root（同时提权本进程 + 父进程）
+// ============================================================
+static int cmd_escalate(void) {
+    printf("\n");
+    printf("========================================\n");
+    printf("  RootHelper: 提权到 root\n");
+    printf("========================================\n");
+    print_info();
+
+    pid_t parent_pid = getppid();
+    printf("[RootHelper] 父进程 PID=%d\n", parent_pid);
+
+    // 步骤1: 提根本进程
+    int ret = kfd_init();
+    if (ret != 0) {
+        printf("[RootHelper] kfd_init 失败: %s\n", kfd_get_error());
+        kfd_close();
+        return -1;
+    }
+
+    ret = kfd_open();
+    if (ret != 0) {
+        printf("[RootHelper] kfd_open 失败: %s\n", kfd_get_error());
+        // 即使没有内核 r/w，也尝试 setuid
+        printf("[RootHelper] 尝试直接 setuid(0)...\n");
+        seteuid(0);
+        setuid(0);
+        printf("[RootHelper] 结果: UID=%d EUID=%d\n", getuid(), geteuid());
+        kfd_close();
+        return (geteuid() == 0) ? 0 : -1;
+    }
+
+    // 步骤2: 提根本进程
+    ret = kfd_get_root();
+    printf("[RootHelper] kfd_get_root => %d, UID=%d EUID=%d\n", ret, getuid(), geteuid());
+
+    int self_root = (geteuid() == 0) ? 1 : 0;
+
+    // 步骤3: 如果父进程不是自己（即是被 spawn 调用的），提权父进程
+    if (parent_pid > 1 && parent_pid != getpid()) {
+        printf("[RootHelper] 尝试提权父进程 PID=%d ...\n", parent_pid);
+        ret = kfd_escalate_pid(parent_pid);
+        if (ret == 0) {
+            printf("[RootHelper] ✅ 父进程已提权为 root\n");
+        } else {
+            printf("[RootHelper] ⚠️ 父进程提权失败: %s\n", kfd_get_error());
+        }
+    }
+
+    kfd_close();
+    print_info();
+
+    // 本进程或父进程提权成功即视为成功
+    return (self_root || ret == 0) ? 0 : -1;
+}
+
+// ============================================================
+// 3. 注销桌面 Respring
 // ============================================================
 static int cmd_respring(void) {
     printf("[RootHelper] === 注销桌面 ===\n");
@@ -200,12 +257,15 @@ int main(int argc, char *argv[]) {
         printf("==== iOS RootHelper (kfd) ====\n");
         printf("用法：\n");
         printf("  roothelper reboot     重启手机 (kfd提权 -> shutdown)\n");
+        printf("  roothelper escalate   提权到 root (只提权，不重启)\n");
         printf("  roothelper respring   注销桌面\n");
         return 0;
     }
 
     if (strcmp(argv[1], "reboot") == 0) {
         return cmd_reboot();
+    } else if (strcmp(argv[1], "escalate") == 0) {
+        return cmd_escalate();
     } else if (strcmp(argv[1], "respring") == 0) {
         return cmd_respring();
     } else {
