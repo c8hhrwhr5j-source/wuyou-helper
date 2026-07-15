@@ -16,13 +16,17 @@ HELPER_OUT="${SCRIPT_DIR}/roothelper/roothelper"
 
 echo "编译 roothelper..."
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+KFD_SRC="${SCRIPT_DIR}/roothelper/kfd.c"
 
 clang -arch arm64 \
       -isysroot "$SDK" \
       -mios-version-min=14.0 \
       -O2 \
+      -framework IOKit \
+      -framework CoreFoundation \
       -o "$HELPER_OUT" \
-      "$HELPER_SRC"
+      "$HELPER_SRC" \
+      "$KFD_SRC"
 
 echo "✅ roothelper 编译完成: $HELPER_OUT"
 file "$HELPER_OUT"

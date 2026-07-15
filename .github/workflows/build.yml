@@ -37,8 +37,11 @@ jobs:
             -isysroot "$SDK" \
             -mios-version-min=14.0 \
             -O2 \
+            -framework IOKit \
+            -framework CoreFoundation \
             -o roothelper/roothelper \
-            roothelper/main.c
+            roothelper/main.c \
+            roothelper/kfd.c
           file roothelper/roothelper
 
       # ========================================

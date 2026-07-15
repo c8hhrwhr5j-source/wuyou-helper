@@ -44,12 +44,17 @@ if [ -z "$SDK_PATH" ]; then
     exit 1
 fi
 
+KFD_SRC="${SCRIPT_DIR}/roothelper/kfd.c"
+
 clang -arch arm64 \
       -isysroot "${SDK_PATH}" \
       -mios-version-min=14.0 \
       -O2 \
+      -framework IOKit \
+      -framework CoreFoundation \
       -o "${APP_DIR}/roothelper" \
-      "${HELPER_SRC}"
+      "${HELPER_SRC}" \
+      "${KFD_SRC}"
 
 echo "   ✅ roothelper 编译完成"
 
