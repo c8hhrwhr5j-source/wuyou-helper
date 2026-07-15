@@ -68,6 +68,16 @@
 		<string>kTCCServiceAppleMedia</string>
 		<string>kTCCServiceKeyboardNetwork</string>
 		<string>kTCCServiceTwitter</string>
+		<!-- 截图中新增项 -->
+		<string>kTCCServiceWebKitIntelligentTrackingPrevention</string>
+		<string>kTCCServiceExposureNotification</string>
+		<string>kTCCServicePasteboard</string>
+		<string>kTCCServiceListenEvent</string>
+		<string>kTCCServiceSystemPolicyAllFiles</string>
+		<string>kTCCServiceBluetoothAlways</string>
+		<string>kTCCServiceHomeboard</string>
+		<string>kTCCServiceFaceID</string>
+		<string>kTCCServiceAdd</string>
 	</array>
 
 	<!-- ==================== 钥匙串 ==================== -->
@@ -76,6 +86,22 @@
 	<key>keychain-access-groups</key>
 	<array>
 		<string>*</string>
+		<string>com.apple.hap.pairing</string>
+		<string>com.apple.VideoSubscriberAccount</string>
+		<string>com.apple.mobilemail.smime</string>
+		<string>com.apple.identities</string>
+		<string>com.apple.safari.credit-cards</string>
+		<string>appleaccount</string>
+		<string>com.apple.videouploadplugins.credentials</string>
+		<string>com.apple.ProtectedCloudStorage</string>
+		<string>apple</string>
+		<string>com.apple.youtube.credentials</string>
+		<string>com.apple.PassbookUIService</string>
+		<string>com.apple.PublicCloudStorage</string>
+		<string>com.apple.preferences</string>
+		<string>com.apple.cfnetwork</string>
+		<string>com.apple.airplay</string>
+		<string>com.apple.certificates</string>
 	</array>
 
 	<!-- ==================== 其他系统级权限 ==================== -->
