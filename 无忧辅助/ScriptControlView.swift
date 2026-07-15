@@ -64,7 +64,7 @@ struct ScriptControlView: View {
                             icon: "text.insert",
                             title: "文字输入",
                             description: "模拟键盘输入",
-                            color: .cyan
+                            color: .blue
                         )
                         FeaturePlaceholder(
                             icon: "clock.arrow.2.circlepath",
