@@ -62,7 +62,6 @@ targets:
             echo "⚠️  roothelper 尚未编译，将尝试编译..."
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
             clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -O2 \
-                  -framework IOKit \
                   -o "${HELPER_DST}" "${HELPER_SRC}" \
                   && chmod +x "${HELPER_DST}" \
                   && echo "✅ roothelper 编译并复制成功" \

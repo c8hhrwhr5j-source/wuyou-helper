@@ -5,7 +5,6 @@
 //  通过 posix_spawn 以 root 权限执行外部 helper 二进制
 //  helper 内部执行系统命令：
 //    - 强制重启: reboot(RB_AUTOBOOT) syscall
-//    - 关机:     IOKit IOPMShutdownSystem
 //    - 重启桌面: killall -9 SpringBoard
 //
 
@@ -57,18 +56,11 @@ final class RootHelper {
 
     // MARK: - 公共接口
 
-    /// 强制重启手机 — roothelper 执行 /usr/sbin/shutdown -r now
+    /// 强制重启手机 — roothelper 执行 reboot(RB_AUTOBOOT)
     func reboot() -> Bool {
         guard let path = helperPath else { return false }
-        Log.shared.add("🔧 请求强制重启 (shutdown -r now)...")
+        Log.shared.add("🔧 请求强制重启 (reboot syscall)...")
         return spawnRoot(path: path, command: "reboot")
-    }
-
-    /// 关机 — roothelper 执行 /usr/sbin/shutdown -h now
-    func shutdown() -> Bool {
-        guard let path = helperPath else { return false }
-        Log.shared.add("🔧 请求关机 (shutdown -h now)...")
-        return spawnRoot(path: path, command: "shutdown")
     }
 
     /// 重启桌面（注销） — roothelper 执行 killall -9 SpringBoard

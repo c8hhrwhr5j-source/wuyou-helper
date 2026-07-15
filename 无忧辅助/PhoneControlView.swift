@@ -2,18 +2,16 @@
 //  PhoneControlView.swift
 //  无忧辅助
 //
-//  手机控制区域：【重启手机】【关机】【注销桌面】
+//  手机控制区域：【重启设备】【注销设备】
 //  Swift 只负责 UI，真正干活由 roothelper 二进制完成：
 //    - 重启: reboot() syscall
-//    - 关机: IOKit IOPMShutdownSystem
-//    - 注销桌面: killall -9 SpringBoard
+//    - 注销设备: killall -9 SpringBoard
 //
 
 import SwiftUI
 
 struct PhoneControlView: View {
     @State private var showRebootAlert = false
-    @State private var showShutdownAlert = false
     @State private var showRespringAlert = false
     @State private var showResultAlert = false
     @State private var alertTitle = ""
@@ -49,7 +47,7 @@ struct PhoneControlView: View {
 
                         // 重启手机按钮
                         ControlButton(
-                            title: "重启手机",
+                            title: "重启设备",
                             subtitle: "强制重启设备 (reboot syscall)",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
@@ -58,20 +56,9 @@ struct PhoneControlView: View {
                             showRebootAlert = true
                         }
 
-                        // 关机按钮
+                        // 注销设备按钮（Respring）
                         ControlButton(
-                            title: "关机",
-                            subtitle: "完全关闭设备 (IOKit 电源管理)",
-                            icon: "power",
-                            color: .gray,
-                            isExecuting: isExecuting
-                        ) {
-                            showShutdownAlert = true
-                        }
-
-                        // 注销桌面按钮（Respring）
-                        ControlButton(
-                            title: "注销桌面",
+                            title: "注销设备",
                             subtitle: "重启 SpringBoard 桌面 (killall -9 SpringBoard)",
                             icon: "arrow.clockwise",
                             color: .orange,
@@ -104,22 +91,13 @@ struct PhoneControlView: View {
         // ========== 重启确认弹窗 ==========
         .alert(isPresented: $showRebootAlert) {
             Alert(
-                title: Text("确认重启手机？"),
-                message: Text("手机将立即强制重启，未保存的数据可能丢失。"),
+                title: Text("确认重启设备？"),
+                message: Text("设备将立即强制重启，未保存的数据可能丢失。"),
                 primaryButton: .destructive(Text("确认重启"), action: executeReboot),
                 secondaryButton: .cancel(Text("取消"))
             )
         }
-        // ========== 关机确认弹窗 ==========
-        .alert(isPresented: $showShutdownAlert) {
-            Alert(
-                title: Text("确认关机？"),
-                message: Text("设备将完全关闭，需要手动按电源键开机。"),
-                primaryButton: .destructive(Text("确认关机"), action: executeShutdown),
-                secondaryButton: .cancel(Text("取消"))
-            )
-        }
-        // ========== 注销桌面确认弹窗 ==========
+        // ========== 注销确认弹窗 ==========
         .alert(isPresented: $showRespringAlert) {
             Alert(
                 title: Text("确认注销桌面？"),
@@ -141,15 +119,11 @@ struct PhoneControlView: View {
     // MARK: - 执行操作
 
     private func executeReboot() {
-        performAction(name: "重启", successMsg: "手机即将重启...", action: RootHelper.shared.reboot)
-    }
-
-    private func executeShutdown() {
-        performAction(name: "关机", successMsg: "手机正在关机...", action: RootHelper.shared.shutdown)
+        performAction(name: "重启", successMsg: "设备即将重启...", action: RootHelper.shared.reboot)
     }
 
     private func executeRespring() {
-        performAction(name: "注销桌面", successMsg: "桌面正在重启...", action: RootHelper.shared.respring)
+        performAction(name: "注销", successMsg: "设备正在注销...", action: RootHelper.shared.respring)
     }
 
     private func performAction(name: String, successMsg: String, action: @escaping () -> Bool) {

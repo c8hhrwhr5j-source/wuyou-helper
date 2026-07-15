@@ -1,18 +1,17 @@
 //
 //  roothelper.c
 //  iOS 巨魔专用 RootHelper — 纯 C 编写，无沙盒环境
-//  适配 iOS 15 ~ 18，支持：重启、关机、注销桌面、执行系统命令
+//  适配 iOS 15 ~ 18，支持：重启、注销桌面
 //
 //  编译命令 (在 macOS 上):
 //    clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-//          -mios-version-min=14.0 -O2 -framework IOKit -o roothelper main.c
+//          -mios-version-min=14.0 -O2 -o roothelper main.c
 //
 //  签名命令:
 //    ldid -Sentitlements.plist roothelper
 //
 //  说明:
 //   - 重启直接调用 reboot(RB_AUTOBOOT) syscall（巨魔 platform binary + system-actions 权限生效）
-//   - 关机走 IOKit IOPMShutdownSystem（干净断电，需 IOKit.power.management 权限）
 //   - 注销桌面 killall -9 SpringBoard（依赖 launchd KeepAlive 自动重生）
 //   - 注意: iOS 无 loginwindow 进程，不提供 logout 命令
 //
@@ -25,7 +24,6 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/reboot.h>
-#include <IOKit/pwr_mgt/IOPMLib.h>
 
 extern char **environ;
 
@@ -91,31 +89,12 @@ static int cmd_reboot(void)
     // 需要 entitlements: com.apple.private.security.system-actions
     printf("[RootHelper] 调用 reboot(RB_AUTOBOOT)...\n");
     reboot(RB_AUTOBOOT);
-    // 成功则不会返回；失败则继续尝试 IOKit 兜底
-    perror("[RootHelper] reboot() 失败，尝试 IOKit");
+    // 成功则不会返回
+    perror("[RootHelper] reboot() 失败");
     return -1;
 }
 
-/// 2. 关机 —— 走 IOKit 电源管理（干净断电）
-static int cmd_shutdown(void)
-{
-    printf("[RootHelper] 准备关机\n");
-    raise_priv();
-    sync();
-
-    // 需要 entitlements: com.apple.private.IOKit.power.management
-    printf("[RootHelper] 调用 IOPMShutdownSystem...\n");
-    io_connect_t hp = IOPMFindPowerManagement(IO_OBJECT_NULL);
-    if (hp != IO_OBJECT_NULL) {
-        IOPMShutdownSystem(hp);
-        // 成功则不会返回
-    } else {
-        printf("[RootHelper] IOPMFindPowerManagement 返回 NULL\n");
-    }
-    return -1;
-}
-
-/// 3. 注销桌面 Respring（重启 SpringBoard，依赖 launchd 自动重生）
+/// 2. 注销桌面 Respring（重启 SpringBoard，依赖 launchd 自动重生）
 static int cmd_respring(void)
 {
     printf("[RootHelper] 重启桌面 SpringBoard\n");
@@ -135,7 +114,6 @@ int main(int argc, char *argv[])
         printf("==== iOS RootHelper 工具 ====\n");
         printf("用法：\n");
         printf("  roothelper reboot      重启手机\n");
-        printf("  roothelper shutdown    关机\n");
         printf("  roothelper respring    重启桌面\n");
         return 0;
     }
@@ -143,10 +121,6 @@ int main(int argc, char *argv[])
     if (strcmp(argv[1], "reboot") == 0)
     {
         return cmd_reboot();
-    }
-    else if (strcmp(argv[1], "shutdown") == 0)
-    {
-        return cmd_shutdown();
     }
     else if (strcmp(argv[1], "respring") == 0)
     {

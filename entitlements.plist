@@ -12,7 +12,5 @@
 	<true/>
 	<key>com.apple.private.security.system-actions</key>
 	<true/>
-	<key>com.apple.private.IOKit.power.management</key>
-	<true/>
 </dict>
 </plist>
