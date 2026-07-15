@@ -10,15 +10,16 @@
 import Foundation
 import Darwin
 
-// 对齐 TrollServer: 直接调用 proc_listpids / proc_name（librpoc, 通过 libSystem 链接）
-// 某些 Xcode/SDK 版本可能需要 @_silgen_name 声明
-#if swift(>=5.9)
+// 对齐 TrollServer: 直接调用底层 C 函数（通过 libSystem 链接）
+// 显式声明避免与 Swift 标准库/Foundation 中的同名符号冲突
 @_silgen_name("proc_listpids")
-private func proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer, _ buffersize: Int32) -> Int32
+private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer, _ buffersize: Int32) -> Int32
 
 @_silgen_name("proc_name")
-private func proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
-#endif
+private func _proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
+
+@_silgen_name("reboot")
+private func _reboot(_ howto: Int32) -> Int32
 
 final class RootHelper {
     static let shared = RootHelper()
@@ -46,24 +47,24 @@ final class RootHelper {
         // 策略1: 直接 reboot() 尝试（同 TrollServer）
         sync()
         Log.shared.add("   [1/4] 直接 reboot(0)...")
-        var ret = reboot(0)
+        var ret = _reboot(0)
         Log.shared.add("      reboot(0) => \(ret) errno=\(errno)")
 
         if ret != 0 {
             Log.shared.add("   [2/4] reboot(0x400)...")
-            ret = reboot(0x400)
+            ret = _reboot(0x400)
             Log.shared.add("      reboot(0x400) => \(ret) errno=\(errno)")
         }
 
         // 策略2: 通过 roothelper 尝试
         if let path = helperPath {
             Log.shared.add("   [3/4] roothelper reboot...")
-            spawnHelper(path: path, command: "reboot")
+            _ = spawnHelper(path: path, command: "reboot")
         }
 
         // 策略3: launchctl reboot
         Log.shared.add("   [4/4] launchctl reboot...")
-        spawnCommand("/bin/launchctl", args: ["reboot"])
+        _ = spawnCommand("/bin/launchctl", args: ["reboot"])
 
         Log.shared.add("❌ 所有重启策略均失败 (UID=\(getuid()))")
         return false
@@ -127,7 +128,7 @@ final class RootHelper {
         let maxPids = 4096
         let bufferSize = MemoryLayout<pid_t>.size * maxPids
         var buffer = [pid_t](repeating: 0, count: maxPids)
-        let count = proc_listpids(1, 0, &buffer, Int32(bufferSize))
+        let count = _proc_listpids(1, 0, &buffer, Int32(bufferSize))
         let numPids = Int(count) / MemoryLayout<pid_t>.size
 
         Log.shared.add("      proc_listpids 返回 \(numPids) 个进程")
@@ -136,7 +137,7 @@ final class RootHelper {
             let pid = buffer[i]
             if pid <= 0 { continue }
             var nameBuffer = [CChar](repeating: 0, count: 256)
-            let nameLen = proc_name(pid, &nameBuffer, 256)
+            let nameLen = _proc_name(pid, &nameBuffer, 256)
             if nameLen > 0 {
                 let name = String(cString: nameBuffer)
                 if name == named {
