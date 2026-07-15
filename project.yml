@@ -40,6 +40,7 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_ENTITLEMENTS: entitlements.plist
         ENABLE_BITCODE: "NO"
         CLANG_ENABLE_MODULES: "YES"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
@@ -66,6 +67,24 @@ targets:
                   && chmod +x "${HELPER_DST}" \
                   && echo "✅ roothelper 编译并复制成功" \
                   || echo "❌ roothelper 编译失败，请手动编译"
+          fi
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: "Inject entitlements with ldid"
+        script: |
+          APP_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/${PRODUCT_NAME}"
+          ENTITLEMENTS="${SRCROOT}/entitlements.plist"
+          if command -v ldid &> /dev/null && [ -f "${ENTITLEMENTS}" ] && [ -f "${APP_BINARY}" ]; then
+            echo "🔏 注入 entitlements..."
+            if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
+              echo "✅ entitlements 已注入"
+            else
+              echo "⚠️  ldid 注入失败，请手动执行:"
+              echo "     ldid -S${ENTITLEMENTS} ${APP_BINARY}"
+            fi
+          else
+            echo "⚠️  ldid 未安装或 entitlements 文件不存在，跳过注入"
+            echo "     请确保通过 TrollStore 安装时手动注入权限"
           fi
         basedOnDependencyAnalysis: false
     # Info.plist 额外键值

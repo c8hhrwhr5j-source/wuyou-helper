@@ -1,17 +1,16 @@
 #!/bin/bash
 #
-#  build.sh
-#  无忧辅助 - 完整构建脚本
+#  build.sh — 无忧辅助 完整构建脚本 (参考 TrollServer)
 #
 #  用法:
-#    1. 在 macOS 上执行:  bash build.sh
-#    2. 生成的 IPA 路径:  ./build/无忧辅助.ipa
-#    3. 用 TrollStore 安装生成的 IPA
+#    bash build.sh          # 构建 Release IPA
+#    bash build.sh debug    # 构建 Debug IPA
+#    bash build.sh clean    # 清理构建产物
 #
 #  前提条件:
 #    - macOS + Xcode Command Line Tools
-#    - ldid (brew install ldid)
-#    - 或使用 Theos 工具链
+#    - ldid  (brew install ldid)
+#    - xcodegen (brew install xcodegen) — 用于生成 Xcode 项目
 #
 
 set -e
@@ -20,13 +19,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_NAME="无忧辅助"
 BUNDLE_ID="com.wuyou.helper"
 BUILD_DIR="${SCRIPT_DIR}/build"
-APP_DIR="${BUILD_DIR}/payload/${PROJECT_NAME}.app"
-HELPER_SRC="${SCRIPT_DIR}/roothelper/main.c"
-SWIFT_SRC="${SCRIPT_DIR}/无忧辅助"
+PAYLOAD_DIR="${BUILD_DIR}/Payload"
+APP_DIR="${PAYLOAD_DIR}/${PROJECT_NAME}.app"
+SRC_DIR="${SCRIPT_DIR}/无忧辅助"
 ENTITLEMENTS="${SCRIPT_DIR}/entitlements.plist"
+
+CONFIGURATION="Release"
+
+if [ "$1" = "debug" ]; then CONFIGURATION="Debug"; fi
+if [ "$1" = "clean" ]; then
+    echo "[Clean] 清理构建产物..."
+    rm -rf "${BUILD_DIR}" "${SCRIPT_DIR}/DerivedData"
+    echo "[Clean] 完成"
+    exit 0
+fi
 
 echo "============================================"
 echo "  无忧辅助 IPA 构建脚本"
+echo "  配置: ${CONFIGURATION}"
 echo "============================================"
 echo ""
 
@@ -35,127 +45,129 @@ rm -rf "${BUILD_DIR}"
 mkdir -p "${APP_DIR}"
 
 # ========================================
-# Step 1: 编译 roothelper (C -> arm64)
+# Step 1: 生成 Xcode 项目 (如需要)
 # ========================================
-echo "[1/5] 编译 roothelper (纯 C → arm64)..."
-SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-if [ -z "$SDK_PATH" ]; then
-    echo "❌ 未找到 iPhoneOS SDK，请确认 Xcode 已安装"
+if [ -f "${SCRIPT_DIR}/project.yml" ]; then
+    if command -v xcodegen &> /dev/null; then
+        echo "[1/5] 生成 Xcode 项目..."
+        cd "${SCRIPT_DIR}"
+        xcodegen generate || true
+    else
+        echo "⚠️  xcodegen 未安装，跳过项目生成"
+    fi
+fi
+
+# ========================================
+# Step 2: xcodebuild 构建
+# ========================================
+echo "[2/5] xcodebuild 构建 (${CONFIGURATION})..."
+
+if [ -f "${SCRIPT_DIR}/${PROJECT_NAME}.xcodeproj/project.pbxproj" ]; then
+    xcodebuild \
+        -project "${SCRIPT_DIR}/${PROJECT_NAME}.xcodeproj" \
+        -scheme "${PROJECT_NAME}" \
+        -configuration "${CONFIGURATION}" \
+        -sdk iphoneos \
+        -derivedDataPath "${SCRIPT_DIR}/DerivedData" \
+        build
+
+    # 找到构建产物
+    BUILT_APP="${SCRIPT_DIR}/DerivedData/Build/Products/${CONFIGURATION}-iphoneos/${PROJECT_NAME}.app"
+    if [ ! -d "${BUILT_APP}" ]; then
+        BUILT_APP="$(find "${SCRIPT_DIR}/DerivedData" -name "${PROJECT_NAME}.app" -type d | head -n1)"
+    fi
+
+    if [ -d "${BUILT_APP}" ]; then
+        cp -R "${BUILT_APP}/" "${APP_DIR}/"
+        echo "   ✅ 复制构建产物: ${BUILT_APP}"
+    else
+        echo "❌ 未找到构建产物 .app"
+        exit 1
+    fi
+else
+    echo "❌ 未找到 Xcode 项目，请先运行: xcodegen generate"
     exit 1
 fi
+
+# ========================================
+# Step 3: 编译 roothelper
+# ========================================
+echo "[3/5] 编译 roothelper..."
+
+SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+HELPER_SRC="${SCRIPT_DIR}/roothelper/main.c"
+HELPER_DST="${APP_DIR}/roothelper"
 
 clang -arch arm64 \
       -isysroot "${SDK_PATH}" \
       -mios-version-min=14.0 \
       -O2 \
-      -o "${APP_DIR}/roothelper" \
+      -o "${HELPER_DST}" \
       "${HELPER_SRC}"
 
+chmod +x "${HELPER_DST}"
 echo "   ✅ roothelper 编译完成"
 
-# 签名 helper
-echo "   🔐 签名 roothelper..."
-ldid -S"${ENTITLEMENTS}" "${APP_DIR}/roothelper" 2>/dev/null || {
-    echo "   ⚠️  ldid 签名失败，尝试 codesign..."
-    codesign -s - --entitlements "${ENTITLEMENTS}" "${APP_DIR}/roothelper" 2>/dev/null || {
-        echo "   ⚠️  签名跳过（TrollStore 会处理签名）"
-    }
-}
+# ========================================
+# Step 4: 注入 entitlements (关键步骤！)
+# ========================================
+echo "[4/5] 注入 entitlements..."
 
-# 签名主应用（如果存在）
-if [ -f "${APP_DIR}/${PROJECT_NAME}" ]; then
-    echo "   🔐 签名主应用..."
-    ldid -S"${ENTITLEMENTS}" "${APP_DIR}/${PROJECT_NAME}" 2>/dev/null || {
-        echo "   ⚠️  主应用签名失败，尝试 codesign..."
-        codesign -s - --entitlements "${ENTITLEMENTS}" "${APP_DIR}/${PROJECT_NAME}" 2>/dev/null || {
-            echo "   ⚠️  主应用签名跳过（TrollStore 会处理签名）"
-        }
-    }
+APP_BINARY="${APP_DIR}/${PROJECT_NAME}"
+
+if [ ! -f "${ENTITLEMENTS}" ]; then
+    echo "❌ 未找到 entitlements 文件: ${ENTITLEMENTS}"
+    exit 1
 fi
 
-# ========================================
-# Step 2: 编译 Swift (xcodebuild)
-# ========================================
-echo "[2/5] 编译 Swift 应用..."
+if command -v ldid &> /dev/null; then
+    # 注入主应用 entitlements
+    echo "   🔏 注入主应用 entitlements..."
+    if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
+        echo "   ✅ 主应用 entitlements 已注入"
+    else
+        echo "   ⚠️  主应用 ldid 注入失败"
+    fi
 
-# TODO: 需要你手动创建 Xcode 项目或用下面的方式编译
-# 这里用 swiftc 直接编译（简化方式，适合无 Xcode 项目的场景）
-#
-# 推荐方式：手动创建 Xcode 项目后，替换为：
-#   xcodebuild -project "${SCRIPT_DIR}/无忧辅助.xcodeproj" \
-#              -scheme "无忧辅助" \
-#              -configuration Release \
-#              -sdk iphoneos \
-#              -archivePath "${BUILD_DIR}/无忧辅助.xcarchive" \
-#              archive
-#   xcodebuild -exportArchive -archivePath "${BUILD_DIR}/无忧辅助.xcarchive" \
-#              -exportPath "${BUILD_DIR}" \
-#              -exportOptionsPlist exportOptions.plist
-
-echo ""
-echo "   ⚠️  Swift 编译需要 Xcode 项目"
-echo "   → 请先创建 Xcode 项目并将所有 Swift 文件加入项目"
-echo "   → 然后手动运行 xcodebuild，或把 .app 产物放到 build/payload/ 下"
-echo ""
-
-# ========================================
-# Step 3: 复制资源文件
-# ========================================
-echo "[3/5] 复制资源文件..."
-
-# 复制 entitlements 作为参考
-cp "${ENTITLEMENTS}" "${BUILD_DIR}/"
-
-# Info.plist (如果有的话)
-if [ -f "${SWIFT_SRC}/Info.plist" ]; then
-    cp "${SWIFT_SRC}/Info.plist" "${APP_DIR}/"
+    # 注入 roothelper entitlements
+    echo "   🔏 注入 roothelper entitlements..."
+    if ldid -S"${ENTITLEMENTS}" "${HELPER_DST}"; then
+        echo "   ✅ roothelper entitlements 已注入"
+    else
+        echo "   ⚠️  roothelper ldid 注入失败"
+    fi
+else
+    echo "❌ 未找到 ldid，请安装: brew install ldid"
+    exit 1
 fi
-
-echo "   ✅ 资源文件复制完成"
-
-# ========================================
-# Step 4: 签名 App (TrollStore 方式)
-# ========================================
-echo "[4/5] TrollStore 签名处理..."
-
-# TrollStore 签名说明:
-#   - 用 ldid 对 .app 进行伪签名
-#   - 或用 TrollStore 安装时自动签名
-#
-# 手动签名：
-#   ldid -S${ENTITLEMENTS} ${APP_DIR}/${PROJECT_NAME}
-#   ldid -S${ENTITLEMENTS} ${APP_DIR}/roothelper
-
-echo "   ℹ️  TrollStore 会在安装时自动处理签名"
-echo "   如需手动签名："
-echo "     ldid -S${ENTITLEMENTS} ${APP_DIR}/${PROJECT_NAME}"
 
 # ========================================
 # Step 5: 打包 IPA
 # ========================================
 echo "[5/5] 打包 IPA..."
 
+# 写入 PkgInfo
+echo "APPL????" > "${APP_DIR}/PkgInfo"
+
 cd "${BUILD_DIR}"
 zip -qr "${PROJECT_NAME}.ipa" Payload/
 cd "${SCRIPT_DIR}"
 
-echo "   ✅ IPA 打包完成"
-echo ""
+IPA_SIZE=$(du -h "${BUILD_DIR}/${PROJECT_NAME}.ipa" | cut -f1)
 
-# ========================================
-# 完成
-# ========================================
+echo ""
 echo "============================================"
-echo "  构建完成！"
+echo "  构建成功！"
 echo "============================================"
 echo ""
 echo "  IPA 文件: ${BUILD_DIR}/${PROJECT_NAME}.ipa"
+echo "  大小:     ${IPA_SIZE}"
+echo "  Bundle:   ${BUNDLE_ID}"
 echo ""
-echo "安装步骤:"
-echo "  1. 将 ${PROJECT_NAME}.ipa 传到手机"
-echo "  2. 用 TrollStore 打开并安装"
-echo "  3. 打开「无忧辅助」App"
-echo "  4. 点击「重启手机」或「注销桌面」"
+echo "  安装步骤:"
+echo "    1. 将 IPA 传到手机"
+echo "    2. 用 TrollStore 安装"
+echo "    3. 安装后查看元数据，确认沙盒已关闭"
 echo ""
-echo "⚠️  注意: 此应用需要 TrollStore 环境才能获得 root 权限"
+echo "⚠️  注意: 此应用需要 TrollStore 环境"
 echo "============================================"

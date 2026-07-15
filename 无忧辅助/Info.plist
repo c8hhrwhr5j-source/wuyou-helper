@@ -88,6 +88,32 @@
 	<key>NSKeyboardNetworkAccessUsageDescription</key>
 	<string>需要访问键盘网络</string>
 
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon40x40</string>
+				<string>AppIcon60x60</string>
+			</array>
+			<key>UIPrerenderedIcon</key>
+			<false/>
+		</dict>
+	</dict>
+	<key>CFBundleIconFiles</key>
+	<array>
+		<string>AppIcon40x40</string>
+		<string>AppIcon60x60</string>
+	</array>
+
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+
 	<key>MinimumOSVersion</key>
 	<string>14.0</string>
 	<key>CFBundleSupportedPlatforms</key>
