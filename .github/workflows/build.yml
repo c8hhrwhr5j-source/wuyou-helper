@@ -68,7 +68,7 @@ jobs:
             -derivedDataPath ./DerivedData \
             ARCHS=arm64 \
             VALID_ARCHS=arm64 \
-            ONLY_ACTIVE_ARCH=NO \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
