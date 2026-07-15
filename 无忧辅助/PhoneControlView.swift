@@ -2,8 +2,8 @@
 //  PhoneControlView.swift
 //  无忧辅助
 //
-//  手机控制区域：【重启手机】【注销手机】
-//  Swift 只负责 UI，真正干活由 roothelper 二进制执行
+//  手机控制区域：【重启手机】【注销手机】【关机】
+//  Swift 只负责 UI，真正干活由 roothelper 二进制通过 system() 执行
 //
 
 import SwiftUI
@@ -11,6 +11,7 @@ import SwiftUI
 struct PhoneControlView: View {
     @State private var showRebootAlert = false
     @State private var showRespringAlert = false
+    @State private var showShutdownAlert = false
     @State private var showResultAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
@@ -46,7 +47,7 @@ struct PhoneControlView: View {
                         // 重启手机按钮
                         ControlButton(
                             title: "重启手机",
-                            subtitle: "完全重启设备（等同于关机再开机）",
+                            subtitle: "强制重启设备 (shutdown -r now)",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
                             isExecuting: isExecuting
@@ -57,12 +58,23 @@ struct PhoneControlView: View {
                         // 注销手机按钮（Respring）
                         ControlButton(
                             title: "注销手机",
-                            subtitle: "重启 SpringBoard（用户态注销）",
+                            subtitle: "重启 SpringBoard 桌面 (killall SpringBoard)",
                             icon: "arrow.clockwise",
                             color: .orange,
                             isExecuting: isExecuting
                         ) {
                             showRespringAlert = true
+                        }
+
+                        // 关机按钮
+                        ControlButton(
+                            title: "关机",
+                            subtitle: "完全关闭设备 (shutdown -h now)",
+                            icon: "power",
+                            color: .gray,
+                            isExecuting: isExecuting
+                        ) {
+                            showShutdownAlert = true
                         }
                     }
                     .padding(.horizontal)
@@ -75,6 +87,7 @@ struct PhoneControlView: View {
                         InfoRow(label: "权限状态", value: "平台级应用 (no-sandbox)")
                         InfoRow(label: "进程权限", value: "root (posix_spawn)")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
+                        InfoRow(label: "执行方式", value: "system() 系统调用")
                     }
                     .padding(.horizontal)
                     .font(.caption)
@@ -89,7 +102,7 @@ struct PhoneControlView: View {
         .alert(isPresented: $showRebootAlert) {
             Alert(
                 title: Text("确认重启手机？"),
-                message: Text("手机将立即重启，未保存的数据可能丢失。"),
+                message: Text("手机将立即强制重启，未保存的数据可能丢失。"),
                 primaryButton: .destructive(Text("确认重启"), action: executeReboot),
                 secondaryButton: .cancel(Text("取消"))
             )
@@ -100,6 +113,15 @@ struct PhoneControlView: View {
                 title: Text("确认注销手机？"),
                 message: Text("SpringBoard 将重新启动，回到锁屏界面。"),
                 primaryButton: .destructive(Text("确认注销"), action: executeRespring),
+                secondaryButton: .cancel(Text("取消"))
+            )
+        }
+        // ========== 关机确认弹窗 ==========
+        .alert(isPresented: $showShutdownAlert) {
+            Alert(
+                title: Text("确认关机？"),
+                message: Text("设备将完全关闭，需要手动按电源键开机。"),
+                primaryButton: .destructive(Text("确认关机"), action: executeShutdown),
                 secondaryButton: .cancel(Text("取消"))
             )
         }
@@ -116,34 +138,28 @@ struct PhoneControlView: View {
     // MARK: - 执行操作
 
     private func executeReboot() {
-        isExecuting = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let success = RootHelper.shared.reboot()
-            DispatchQueue.main.async {
-                isExecuting = false
-                if success {
-                    alertTitle = "正在重启"
-                    alertMessage = "手机即将重启..."
-                } else {
-                    alertTitle = "重启失败"
-                    alertMessage = "请确认 helper 二进制是否已正确部署。\n路径: \(RootHelper.shared.helperPath ?? "未知")"
-                }
-                showResultAlert = true
-            }
-        }
+        performAction(name: "重启", successMsg: "手机即将重启...", action: RootHelper.shared.reboot)
     }
 
     private func executeRespring() {
+        performAction(name: "注销", successMsg: "手机正在注销...", action: RootHelper.shared.respring)
+    }
+
+    private func executeShutdown() {
+        performAction(name: "关机", successMsg: "手机正在关机...", action: RootHelper.shared.shutdown)
+    }
+
+    private func performAction(name: String, successMsg: String, action: @escaping () -> Bool) {
         isExecuting = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let success = RootHelper.shared.respring()
+            let success = action()
             DispatchQueue.main.async {
                 isExecuting = false
                 if success {
-                    alertTitle = "正在注销"
-                    alertMessage = "手机正在注销..."
+                    alertTitle = "正在\(name)"
+                    alertMessage = successMsg
                 } else {
-                    alertTitle = "注销失败"
+                    alertTitle = "\(name)失败"
                     alertMessage = "请确认 helper 二进制是否已正确部署。\n路径: \(RootHelper.shared.helperPath ?? "未知")"
                 }
                 showResultAlert = true
