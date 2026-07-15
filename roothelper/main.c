@@ -19,7 +19,10 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#include <sys/reboot.h>
+// iOS SDK 没有 sys/reboot.h，手动定义
+#ifndef RB_AUTOBOOT
+#define RB_AUTOBOOT 0
+#endif
 
 extern char **environ;
 
