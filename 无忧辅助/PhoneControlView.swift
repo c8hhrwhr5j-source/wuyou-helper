@@ -2,7 +2,7 @@
 //  PhoneControlView.swift
 //  无忧辅助
 //
-//  手机控制区域：【重启手机】【注销手机】【关机】
+//  手机控制区域：【重启手机】【关机】【注销桌面】【注销用户】
 //  Swift 只负责 UI，真正干活由 roothelper 二进制通过 system() 执行
 //
 
@@ -10,8 +10,9 @@ import SwiftUI
 
 struct PhoneControlView: View {
     @State private var showRebootAlert = false
-    @State private var showRespringAlert = false
     @State private var showShutdownAlert = false
+    @State private var showRespringAlert = false
+    @State private var showLogoutAlert = false
     @State private var showResultAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
@@ -32,7 +33,7 @@ struct PhoneControlView: View {
                             .font(.title2)
                             .fontWeight(.bold)
 
-                        Text("root 权限执行系统级操作")
+                        Text("TrollStore 无沙盒环境 · root 权限执行系统级操作")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -47,7 +48,7 @@ struct PhoneControlView: View {
                         // 重启手机按钮
                         ControlButton(
                             title: "重启手机",
-                            subtitle: "强制重启设备 (shutdown -r now)",
+                            subtitle: "强制重启设备 (/usr/sbin/shutdown -r now)",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
                             isExecuting: isExecuting
@@ -55,10 +56,21 @@ struct PhoneControlView: View {
                             showRebootAlert = true
                         }
 
-                        // 注销手机按钮（Respring）
+                        // 关机按钮
                         ControlButton(
-                            title: "注销手机",
-                            subtitle: "重启 SpringBoard 桌面 (killall SpringBoard)",
+                            title: "关机",
+                            subtitle: "完全关闭设备 (/usr/sbin/shutdown -h now)",
+                            icon: "power",
+                            color: .gray,
+                            isExecuting: isExecuting
+                        ) {
+                            showShutdownAlert = true
+                        }
+
+                        // 注销桌面按钮（Respring）
+                        ControlButton(
+                            title: "注销桌面",
+                            subtitle: "重启 SpringBoard 桌面 (killall -9 SpringBoard)",
                             icon: "arrow.clockwise",
                             color: .orange,
                             isExecuting: isExecuting
@@ -66,15 +78,15 @@ struct PhoneControlView: View {
                             showRespringAlert = true
                         }
 
-                        // 关机按钮
+                        // 注销用户按钮
                         ControlButton(
-                            title: "关机",
-                            subtitle: "完全关闭设备 (shutdown -h now)",
-                            icon: "power",
-                            color: .gray,
+                            title: "注销用户",
+                            subtitle: "注销当前用户回到锁屏 (killall -9 loginwindow)",
+                            icon: "lock.rotation",
+                            color: .blue,
                             isExecuting: isExecuting
                         ) {
-                            showShutdownAlert = true
+                            showLogoutAlert = true
                         }
                     }
                     .padding(.horizontal)
@@ -84,10 +96,10 @@ struct PhoneControlView: View {
 
                     // ========== 状态信息 ==========
                     VStack(alignment: .leading, spacing: 12) {
-                        InfoRow(label: "权限状态", value: "平台级应用 (no-sandbox)")
-                        InfoRow(label: "进程权限", value: "root (posix_spawn)")
+                        InfoRow(label: "权限状态", value: "无沙盒 (no-sandbox)")
+                        InfoRow(label: "提权方式", value: "seteuid(0) + system()")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
-                        InfoRow(label: "执行方式", value: "system() 系统调用")
+                        InfoRow(label: "适配版本", value: "iOS 15 ~ 18")
                     }
                     .padding(.horizontal)
                     .font(.caption)
@@ -107,21 +119,30 @@ struct PhoneControlView: View {
                 secondaryButton: .cancel(Text("取消"))
             )
         }
-        // ========== 注销确认弹窗 ==========
-        .alert(isPresented: $showRespringAlert) {
-            Alert(
-                title: Text("确认注销手机？"),
-                message: Text("SpringBoard 将重新启动，回到锁屏界面。"),
-                primaryButton: .destructive(Text("确认注销"), action: executeRespring),
-                secondaryButton: .cancel(Text("取消"))
-            )
-        }
         // ========== 关机确认弹窗 ==========
         .alert(isPresented: $showShutdownAlert) {
             Alert(
                 title: Text("确认关机？"),
                 message: Text("设备将完全关闭，需要手动按电源键开机。"),
                 primaryButton: .destructive(Text("确认关机"), action: executeShutdown),
+                secondaryButton: .cancel(Text("取消"))
+            )
+        }
+        // ========== 注销桌面确认弹窗 ==========
+        .alert(isPresented: $showRespringAlert) {
+            Alert(
+                title: Text("确认注销桌面？"),
+                message: Text("SpringBoard 将重新启动，回到锁屏界面。"),
+                primaryButton: .destructive(Text("确认注销"), action: executeRespring),
+                secondaryButton: .cancel(Text("取消"))
+            )
+        }
+        // ========== 注销用户确认弹窗 ==========
+        .alert(isPresented: $showLogoutAlert) {
+            Alert(
+                title: Text("确认注销用户？"),
+                message: Text("当前用户将被注销，所有未保存的数据可能丢失。"),
+                primaryButton: .destructive(Text("确认注销"), action: executeLogout),
                 secondaryButton: .cancel(Text("取消"))
             )
         }
@@ -141,12 +162,16 @@ struct PhoneControlView: View {
         performAction(name: "重启", successMsg: "手机即将重启...", action: RootHelper.shared.reboot)
     }
 
-    private func executeRespring() {
-        performAction(name: "注销", successMsg: "手机正在注销...", action: RootHelper.shared.respring)
-    }
-
     private func executeShutdown() {
         performAction(name: "关机", successMsg: "手机正在关机...", action: RootHelper.shared.shutdown)
+    }
+
+    private func executeRespring() {
+        performAction(name: "注销桌面", successMsg: "桌面正在重启...", action: RootHelper.shared.respring)
+    }
+
+    private func executeLogout() {
+        performAction(name: "注销用户", successMsg: "用户正在注销...", action: RootHelper.shared.logout)
     }
 
     private func performAction(name: String, successMsg: String, action: @escaping () -> Bool) {

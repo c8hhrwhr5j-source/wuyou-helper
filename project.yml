@@ -52,7 +52,6 @@ targets:
       - name: "Copy roothelper"
         script: |
           HELPER_SRC="${SRCROOT}/roothelper/main.c"
-          KFD_SRC="${SRCROOT}/roothelper/kfd.c"
           HELPER_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
 
           if [ -f "${SRCROOT}/roothelper/roothelper" ]; then
@@ -63,8 +62,7 @@ targets:
             echo "⚠️  roothelper 尚未编译，将尝试编译..."
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
             clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -O2 \
-                  -framework IOKit -framework CoreFoundation \
-                  -o "${HELPER_DST}" "${HELPER_SRC}" "${KFD_SRC}" \
+                  -o "${HELPER_DST}" "${HELPER_SRC}" \
                   && chmod +x "${HELPER_DST}" \
                   && echo "✅ roothelper 编译并复制成功" \
                   || echo "❌ roothelper 编译失败，请手动编译"

@@ -4,9 +4,10 @@
 //
 //  通过 posix_spawn 以 root 权限执行外部 helper 二进制
 //  helper 内部使用 system() 执行系统命令：
-//    - 强制重启: shutdown -r now
-//    - 重启桌面: killall SpringBoard
-//    - 关机: shutdown -h now
+//    - 强制重启: /usr/sbin/shutdown -r now
+//    - 关机:     /usr/sbin/shutdown -h now
+//    - 重启桌面: killall -9 SpringBoard
+//    - 注销用户: killall -9 loginwindow
 //
 
 import Foundation
@@ -57,33 +58,32 @@ final class RootHelper {
 
     // MARK: - 公共接口
 
-    /// 强制重启手机 — roothelper 执行 system("shutdown -r now")
+    /// 强制重启手机 — roothelper 执行 /usr/sbin/shutdown -r now
     func reboot() -> Bool {
         guard let path = helperPath else { return false }
         Log.shared.add("🔧 请求强制重启 (shutdown -r now)...")
         return spawnRoot(path: path, command: "reboot")
     }
 
-    /// 重启桌面（注销） — roothelper 执行 system("killall SpringBoard")
-    func respring() -> Bool {
-        guard let path = helperPath else { return false }
-        Log.shared.add("🔧 请求重启桌面 (killall SpringBoard)...")
-        return spawnRoot(path: path, command: "respring")
-    }
-
-    /// 关机 — roothelper 执行 system("shutdown -h now")
+    /// 关机 — roothelper 执行 /usr/sbin/shutdown -h now
     func shutdown() -> Bool {
         guard let path = helperPath else { return false }
         Log.shared.add("🔧 请求关机 (shutdown -h now)...")
         return spawnRoot(path: path, command: "shutdown")
     }
 
-    /// 执行 Shell 命令（预留通用接口）
-    func executeShell(_ command: String) -> (output: String, success: Bool) {
-        guard let path = helperPath else {
-            return ("helper 未找到", false)
-        }
-        return spawnWithOutput(path: path, args: ["shell", command])
+    /// 重启桌面（注销） — roothelper 执行 killall -9 SpringBoard
+    func respring() -> Bool {
+        guard let path = helperPath else { return false }
+        Log.shared.add("🔧 请求重启桌面 (killall -9 SpringBoard)...")
+        return spawnRoot(path: path, command: "respring")
+    }
+
+    /// 注销用户 — roothelper 执行 killall -9 loginwindow
+    func logout() -> Bool {
+        guard let path = helperPath else { return false }
+        Log.shared.add("🔧 请求注销用户 (killall -9 loginwindow)...")
+        return spawnRoot(path: path, command: "logout")
     }
 
     // MARK: - posix_spawn 以 root 身份执行
@@ -129,45 +129,6 @@ final class RootHelper {
         } else {
             Log.shared.add("❌ posix_spawn 失败 (ret: \(ret), errno: \(errno))")
             return false
-        }
-    }
-
-    /// 带输出收集的 spawn
-    private func spawnWithOutput(path: String, args: [String]) -> (output: String, success: Bool) {
-        let pipe = Pipe()
-
-        var pid: pid_t = 0
-        var cArgs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) } + [nil]
-        defer { cArgs.forEach { $0.map { free($0) } } }
-
-        var attr: posix_spawnattr_t? = nil
-        var fileActions: posix_spawn_file_actions_t? = nil
-        posix_spawnattr_init(&attr)
-        posix_spawn_file_actions_init(&fileActions)
-        defer {
-            posix_spawn_file_actions_destroy(&fileActions)
-            posix_spawnattr_destroy(&attr)
-        }
-
-        // 设置 root persona
-        _ = posix_spawnattr_set_persona_np(&attr, PERSONA_SYSTEM, PERSONA_FLAGS_OVERRIDE)
-        _ = posix_spawnattr_set_persona_uid_np(&attr, 0)
-        _ = posix_spawnattr_set_persona_gid_np(&attr, 0)
-
-        posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
-
-        let ret = posix_spawn(&pid, path, &fileActions, &attr, &cArgs, environ)
-        pipe.fileHandleForWriting.closeFile()
-
-        if ret == 0 {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            var status: Int32 = 0
-            waitpid(pid, &status, 0)
-            return (output, wifexited(status) && wexitstatus(status) == 0)
-        } else {
-            return ("posix_spawn 失败: \(ret)", false)
         }
     }
 }

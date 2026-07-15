@@ -4,112 +4,11 @@
 <dict>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
-	<key>com.apple.private.security.no-container</key>
-	<true/>
 	<key>platform-application</key>
-	<true/>
-	<key>com.apple.security.exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/</string>
-	</array>
-	<key>com.apple.private.security.storage-exempt.heritable</key>
-	<true/>
-	<key>com.apple.private.security.storage.AppBundles</key>
-	<true/>
-	<key>com.apple.private.security.storage.MobileDocuments</key>
-	<true/>
-	<key>com.apple.private.security.library-downloads</key>
-	<true/>
-	<key>com.apple.private.system-startup-install</key>
-	<true/>
-	<key>com.apple.private.security.disk-device-access</key>
 	<true/>
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
-	<key>com.apple.private.security.container-manager</key>
+	<key>com.apple.coretelephony.callmanagement.private</key>
 	<true/>
-	<key>com.apple.private.MobileContainerManager.allowed</key>
-	<true/>
-	<key>com.apple.private.security.storage.AppDataContainers</key>
-	<true/>
-	<key>com.apple.private.coreservices.canmaplsdatabase</key>
-	<true/>
-	<key>com.apple.springboard.launchapplications</key>
-	<true/>
-	<key>com.apple.backboardd.launchapplications</key>
-	<true/>
-	<key>com.apple.frontboard.launchapplications</key>
-	<true/>
-	<key>com.apple.multitasking.termination</key>
-	<true/>
-	<key>com.apple.private.task-allow</key>
-	<true/>
-	<key>get-task-allow</key>
-	<true/>
-	<key>com.apple.private.cs.debugger</key>
-	<true/>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
-	<key>com.apple.private.hid.client.event-dispatch</key>
-	<true/>
-	<key>com.apple.private.io-hidevents</key>
-	<true/>
-	<key>com.apple.private.coregraphics.debug</key>
-	<true/>
-	<key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
-	<array>
-		<string>IOKitDebug</string>
-		<string>IOHIDDebug</string>
-	</array>
-	<key>com.apple.private.IOKit.power.management</key>
-	<true/>
-	<key>com.apple.security.exception.iokit-user-client-class</key>
-	<array>
-		<string>AGXDeviceUserClient</string>
-		<string>IOSurfaceRootUserClient</string>
-	</array>
-	<key>com.apple.private.networkextension.host</key>
-	<true/>
-	<key>com.apple.developer.networking.multicast</key>
-	<true/>
-	<key>com.apple.developer.networking.wifi-info</key>
-	<true/>
-	<key>com.apple.CommCenter.fine-grained</key>
-	<array>
-		<string>data-allowed-write</string>
-	</array>
-	<key>com.apple.private.background-items</key>
-	<true/>
-	<key>com.apple.developer.background-processing</key>
-	<true/>
-	<key>com.apple.private.system-policy.all-files</key>
-	<true/>
-	<key>com.apple.private.tcc.allow</key>
-	<array>
-		<string>kTCCServiceMicrophone</string>
-		<string>kTCCServiceCamera</string>
-		<string>kTCCServicePhotos</string>
-		<string>kTCCServiceLocation</string>
-		<string>kTCCServiceContacts</string>
-		<string>kTCCServiceCalendar</string>
-		<string>kTCCServiceReminders</string>
-		<string>kTCCServiceBluetooth</string>
-		<string>kTCCServiceHomeKit</string>
-		<string>kTCCServiceMediaLibrary</string>
-		<string>kTCCServiceMotion</string>
-		<string>kTCCServiceSiri</string>
-		<string>kTCCServiceSpeechRecognition</string>
-		<string>kTCCServiceFaceID</string>
-		<string>kTCCServiceAccessibility</string>
-	</array>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>com.apple.hap.pairing</string>
-		<string>com.apple.VideoSubscriberAccount</string>
-		<string>com.apple.mobilemail.smime</string>
-		<string>com.apple.identities</string>
-		<string>TROLLTROLL.*</string>
-		<string>com.apple.token</string>
-	</array>
 </dict>
 </plist>

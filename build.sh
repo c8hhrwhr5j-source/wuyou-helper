@@ -37,24 +37,19 @@ mkdir -p "${APP_DIR}"
 # ========================================
 # Step 1: 编译 roothelper (C -> arm64)
 # ========================================
-echo "[1/5] 编译 roothelper (C → arm64)..."
+echo "[1/5] 编译 roothelper (纯 C → arm64)..."
 SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
 if [ -z "$SDK_PATH" ]; then
     echo "❌ 未找到 iPhoneOS SDK，请确认 Xcode 已安装"
     exit 1
 fi
 
-KFD_SRC="${SCRIPT_DIR}/roothelper/kfd.c"
-
 clang -arch arm64 \
       -isysroot "${SDK_PATH}" \
       -mios-version-min=14.0 \
       -O2 \
-      -framework IOKit \
-      -framework CoreFoundation \
       -o "${APP_DIR}/roothelper" \
-      "${HELPER_SRC}" \
-      "${KFD_SRC}"
+      "${HELPER_SRC}"
 
 echo "   ✅ roothelper 编译完成"
 
@@ -82,9 +77,6 @@ fi
 # Step 2: 编译 Swift (xcodebuild)
 # ========================================
 echo "[2/5] 编译 Swift 应用..."
-
-# 创建临时 Xcode 项目
-TEMP_XCODEPROJ="${SCRIPT_DIR}/.temp_project"
 
 # TODO: 需要你手动创建 Xcode 项目或用下面的方式编译
 # 这里用 swiftc 直接编译（简化方式，适合无 Xcode 项目的场景）
@@ -163,7 +155,7 @@ echo "安装步骤:"
 echo "  1. 将 ${PROJECT_NAME}.ipa 传到手机"
 echo "  2. 用 TrollStore 打开并安装"
 echo "  3. 打开「无忧辅助」App"
-echo "  4. 点击「重启手机」或「注销手机」"
+echo "  4. 点击「重启手机」或「注销桌面」"
 echo ""
 echo "⚠️  注意: 此应用需要 TrollStore 环境才能获得 root 权限"
 echo "============================================"

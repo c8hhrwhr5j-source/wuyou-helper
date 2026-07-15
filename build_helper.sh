@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 #  build_helper.sh
-#  单独编译 roothelper 二进制
+#  单独编译 roothelper 二进制（纯 C，无外部依赖）
 #
 #  在 macOS 上执行:
 #    bash build_helper.sh
@@ -14,19 +14,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER_SRC="${SCRIPT_DIR}/roothelper/main.c"
 HELPER_OUT="${SCRIPT_DIR}/roothelper/roothelper"
 
-echo "编译 roothelper..."
+echo "编译 roothelper（纯 C，无沙盒环境）..."
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-KFD_SRC="${SCRIPT_DIR}/roothelper/kfd.c"
 
 clang -arch arm64 \
       -isysroot "$SDK" \
       -mios-version-min=14.0 \
       -O2 \
-      -framework IOKit \
-      -framework CoreFoundation \
       -o "$HELPER_OUT" \
-      "$HELPER_SRC" \
-      "$KFD_SRC"
+      "$HELPER_SRC"
 
 echo "✅ roothelper 编译完成: $HELPER_OUT"
 file "$HELPER_OUT"
