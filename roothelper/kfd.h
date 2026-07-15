@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/types.h>
 #include <mach/mach.h>
 
 // ---- 内核版本信息 ----

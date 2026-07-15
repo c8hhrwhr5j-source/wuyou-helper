@@ -24,7 +24,10 @@
 #include <unistd.h>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
+// mach_vm.h is unsupported on iOS 26+ SDK — declare needed functions manually
+extern kern_return_t mach_vm_read(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_offset_t *, mach_msg_type_number_t *);
+extern kern_return_t mach_vm_write(vm_map_t, mach_vm_address_t, vm_offset_t, mach_msg_type_number_t);
+extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -194,7 +197,7 @@ int kfd_open(void) {
     CFMutableDictionaryRef match = IOServiceMatching("IOSurfaceRoot");
     if (match) {
         io_iterator_t iter;
-        kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iter);
+        kr = IOServiceGetMatchingServices(IOMainPort(MACH_PORT_NULL), match, &iter);
         if (kr == KERN_SUCCESS && iter) {
             io_object_t service = IOIteratorNext(iter);
             IOObjectRelease(iter);
@@ -205,7 +208,7 @@ int kfd_open(void) {
                     // 通过 IOSurface 属性泄漏内核地址
                     CFMutableDictionaryRef props = (CFMutableDictionaryRef)
                         IORegistryEntryCreateCFProperty((io_registry_entry_t)
-                            IOServiceGetMatchingService(kIOMainPortDefault,
+                            IOServiceGetMatchingService(IOMainPort(MACH_PORT_NULL),
                                 IOServiceMatching("IOSurfaceRoot")),
                             CFSTR("SurfaceIDs"),
                             kCFAllocatorDefault, 0);
