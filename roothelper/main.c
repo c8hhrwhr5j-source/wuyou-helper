@@ -18,7 +18,6 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#include <sys/reboot.h>
 
 extern char **environ;
 
