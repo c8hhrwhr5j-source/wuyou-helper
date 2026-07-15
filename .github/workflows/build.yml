@@ -21,13 +21,23 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Install ldid
+      - name: Install ldid (prebuilt)
         run: |
-          git clone https://github.com/ProcursusTeam/ldid.git /tmp/ldid
-          cd /tmp/ldid
-          make -j$(sysctl -n hw.ncpu)
-          sudo cp ldid /usr/local/bin/
-          ldid || echo "ldid ready"
+          # 下载预编译的 ldid (macOS arm64/x86_64 universal)
+          curl -L -o /tmp/ldid.zip https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_x86_64.zip 2>/dev/null || true
+          if [ -f /tmp/ldid.zip ]; then
+            unzip -o /tmp/ldid.zip -d /tmp/
+            sudo cp /tmp/ldid /usr/local/bin/ 2>/dev/null || sudo cp /tmp/ldid_macosx_x86_64 /usr/local/bin/ldid
+          else
+            # fallback: 安装依赖后从源码编译
+            brew install libplist openssl
+            git clone --recursive https://github.com/ProcursusTeam/ldid.git /tmp/ldid
+            cd /tmp/ldid
+            make -j$(sysctl -n hw.ncpu)
+            sudo cp ldid /usr/local/bin/
+          fi
+          chmod +x /usr/local/bin/ldid
+          ldid 2>&1 | head -1 || true
 
       # ========================================
       # Step 2: 编译 roothelper (C -> arm64)
