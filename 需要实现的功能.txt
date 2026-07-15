@@ -1,0 +1,28 @@
+<!-- 1. 彻底关闭沙盒（最重要） -->
+<key>com.apple.private.security.no-sandbox</key>
+<true/>
+
+<!-- 2. 标记为平台级应用（系统信任） -->
+<key>platform-application</key>
+<true/>
+
+<!-- 3. 允许执行root命令、访问所有目录 -->
+<key>com.apple.private.persona-mgmt</key>
+<true/>
+
+<!-- 4. 允许spawn root进程 -->
+<key>com.apple.private.security.storage.AppDataContainers</key>
+<true/>
+
+用 C / C++ / Go 写一个root 工具
+放进 IPA 包内
+用 posix_spawn / system() 以 root 权限执行
+Swift 只负责 UI，脏活全是外部二进制干的。
+例子（重启手机）：
+Swift：按钮 + 弹窗
+真正干活：/sbin/reboot（root 执行）
+
+实现功能
+
+1.手机控制区域
+【重启手机】 【注销手机】

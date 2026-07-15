@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ============================================ -->
+	<!-- 1. 彻底关闭沙盒（最重要）                       -->
+	<!-- ============================================ -->
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 2. 标记为平台级应用（系统信任）                  -->
+	<!-- ============================================ -->
+	<key>platform-application</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 3. 允许执行 root 命令、访问所有目录              -->
+	<!-- ============================================ -->
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 4. 允许 spawn root 进程                       -->
+	<!-- ============================================ -->
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 5. 允许任务控制（posix_spawn / system 权限）     -->
+	<!-- ============================================ -->
+	<key>com.apple.private.task-allow</key>
+	<true/>
+	<key>com.apple.private.skip-library-validation</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 6. 允许调试 / 注入                             -->
+	<!-- ============================================ -->
+	<key>get-task-allow</key>
+	<true/>
+	<key>com.apple.private.cs.debugger</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 7. 允许访问所有进程（为后续触摸/点击预留）         -->
+	<!-- ============================================ -->
+	<key>com.apple.private.hid.client.event-dispatch</key>
+	<true/>
+	<key>com.apple.private.io-hidevents</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 8. 允许键盘/触摸事件注入（为后续找色/点击预留）     -->
+	<!-- ============================================ -->
+	<key>com.apple.private.ios.endpoint.client</key>
+	<true/>
+	<key>com.apple.private.ioctldispatcher</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 9. 允许截屏/取色（为后续找色功能预留）             -->
+	<!-- ============================================ -->
+	<key>com.apple.private.coregraphics.debug</key>
+	<true/>
+	<key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
+	<array>
+		<string>IOKitDebug</string>
+		<string>IOHIDDebug</string>
+	</array>
+
+	<!-- ============================================ -->
+	<!-- 10. 文件系统完全访问                            -->
+	<!-- ============================================ -->
+	<key>com.apple.private.security.library-downloads</key>
+	<true/>
+	<key>com.apple.private.system-startup-install</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 11. 允许访问磁盘 / IOKit（硬件级操作预留）        -->
+	<!-- ============================================ -->
+	<key>com.apple.private.IOKit.power.management</key>
+	<true/>
+	<key>com.apple.private.security.disk-device-access</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 12. 网络权限全开                               -->
+	<!-- ============================================ -->
+	<key>com.apple.private.networkextension.host</key>
+	<true/>
+	<key>com.apple.developer.networking.multicast</key>
+	<true/>
+	<key>com.apple.developer.networking.wifi-info</key>
+	<true/>
+
+	<!-- ============================================ -->
+	<!-- 13. 后台运行                                   -->
+	<!-- ============================================ -->
+	<key>com.apple.private.background-items</key>
+	<true/>
+	<key>com.apple.developer.background-processing</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,31 @@
+# 构建产物
+build/
+DerivedData/
+*.ipa
+*.app
+*.xcarchive
+*.dSYM.zip
+*.dSYM
+
+# Xcode
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# roothelper 二进制
+roothelper/roothelper
+
+# 临时文件
+.temp_project/
+*.swp
+*.swo
+*~
+
+# macOS 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

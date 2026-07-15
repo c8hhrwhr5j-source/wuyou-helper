@@ -1,0 +1,78 @@
+# 无忧辅助 - XcodeGen 项目配置
+# 安装 XcodeGen: brew install xcodegen
+# 生成项目:    xcodegen generate
+# 打开项目:    open 无忧辅助.xcodeproj
+
+name: 无忧辅助
+
+options:
+  bundleIdPrefix: com.wuyou
+  deploymentTarget:
+    iOS: "14.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+    TARGETED_DEVICE_FAMILY: "1"
+
+targets:
+  无忧辅助:
+    type: application
+    platform: iOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: 无忧辅助
+        type: group
+    settings:
+      base:
+        INFOPLIST_FILE: 无忧辅助/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.wuyou.helper
+        PRODUCT_NAME: 无忧辅助
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        ENABLE_BITCODE: "NO"
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+        CLANG_ENABLE_MODULES: "YES"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: "YES"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 将 roothelper 二进制嵌入 app bundle
+        # 需要先编译 roothelper: 见 build_helper.sh
+    dependencies: []
+    preBuildScripts:
+      - name: "Copy roothelper"
+        script: |
+          HELPER_SRC="${SRCROOT}/roothelper/main.c"
+          HELPER_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
+
+          if [ -f "${SRCROOT}/roothelper/roothelper" ]; then
+            echo "✅ 复制已编译的 roothelper..."
+            cp "${SRCROOT}/roothelper/roothelper" "${HELPER_DST}"
+            chmod +x "${HELPER_DST}"
+          else
+            echo "⚠️  roothelper 尚未编译，将尝试编译..."
+            SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+            clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -O2 \
+                  -o "${HELPER_DST}" "${HELPER_SRC}" \
+                  && chmod +x "${HELPER_DST}" \
+                  && echo "✅ roothelper 编译并复制成功" \
+                  || echo "❌ roothelper 编译失败，请手动编译"
+          fi
+        basedOnDependencyAnalysis: false
+    # Info.plist 额外键值
+    info:
+      path: 无忧辅助/Info.plist
+      properties:
+        UILaunchStoryboardName: LaunchScreen
+        UIApplicationSupportsIndirectInputEvents: true
+        UIDeviceFamily: [1]
+        UIRequiredDeviceCapabilities: [arm64, iphone-ipad]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        LSRequiresIPhoneOS: true
+        MinimumOSVersion: "14.0"
