@@ -5,21 +5,17 @@
 //  手机控制区域：【重启设备】【注销设备】
 //    - 重启: reboot() syscall + trollstorehelper 多策略回退
 //    - 注销: proc_listpids + kill(SpringBoard, SIGKILL)（参考 TrollServer）
+//    - 弹窗: 通过 UIKit UIAlertController（避免 SwiftUI .alert + TabView 嵌套 Bug）
 //
 
 import SwiftUI
 import Darwin
 
 struct PhoneControlView: View {
-    @State private var showRebootAlert = false
-    @State private var showRespringAlert = false
-    @State private var showResultAlert = false
-    @State private var alertTitle = ""
-    @State private var alertMessage = ""
     @State private var isExecuting = false
 
     var body: some View {
-        NavigationView {
+        VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 24) {
 
@@ -53,7 +49,13 @@ struct PhoneControlView: View {
                             color: .red,
                             isExecuting: isExecuting
                         ) {
-                            showRebootAlert = true
+                            showUIKitAlert(
+                                title: "确认重启设备？",
+                                message: "设备将立即强制重启，未保存的数据可能丢失。",
+                                destructiveTitle: "确认重启"
+                            ) {
+                                executeReboot()
+                            }
                         }
 
                         // 注销设备按钮（Respring）
@@ -64,7 +66,13 @@ struct PhoneControlView: View {
                             color: .orange,
                             isExecuting: isExecuting
                         ) {
-                            showRespringAlert = true
+                            showUIKitAlert(
+                                title: "确认注销桌面？",
+                                message: "SpringBoard 将重新启动，回到锁屏界面。",
+                                destructiveTitle: "确认注销"
+                            ) {
+                                executeRespring()
+                            }
                         }
                     }
                     .padding(.horizontal)
@@ -85,34 +93,6 @@ struct PhoneControlView: View {
                     Spacer()
                 }
             }
-            .navigationTitle("无忧辅助")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-        // ========== 重启确认弹窗 ==========
-        .alert(isPresented: $showRebootAlert) {
-            Alert(
-                title: Text("确认重启设备？"),
-                message: Text("设备将立即强制重启，未保存的数据可能丢失。"),
-                primaryButton: .destructive(Text("确认重启"), action: executeReboot),
-                secondaryButton: .cancel(Text("取消"))
-            )
-        }
-        // ========== 注销确认弹窗 ==========
-        .alert(isPresented: $showRespringAlert) {
-            Alert(
-                title: Text("确认注销桌面？"),
-                message: Text("SpringBoard 将重新启动，回到锁屏界面。"),
-                primaryButton: .destructive(Text("确认注销"), action: executeRespring),
-                secondaryButton: .cancel(Text("取消"))
-            )
-        }
-        // ========== 结果弹窗 ==========
-        .alert(isPresented: $showResultAlert) {
-            Alert(
-                title: Text(alertTitle),
-                message: Text(alertMessage),
-                dismissButton: .default(Text("确定"))
-            )
         }
     }
 
@@ -133,18 +113,55 @@ struct PhoneControlView: View {
             let success = action()
             DispatchQueue.main.async {
                 isExecuting = false
+                let title: String
+                let message: String
                 if success {
-                    alertTitle = "正在\(name)"
-                    alertMessage = successMsg
+                    title = "正在\(name)"
+                    message = successMsg
                 } else {
-                    alertTitle = "\(name)失败"
-                    // 提取最近5条日志作为诊断信息
+                    title = "\(name)失败"
                     let recentLogs = Log.shared.entries.suffix(5).map { $0.message }.joined(separator: "\n")
-                    alertMessage = "UID=\(getuid())\nHelper: \(RootHelper.shared.helperPath ?? "未找到")\n\n日志:\n\(recentLogs)"
+                    message = "UID=\(getuid())\nHelper: \(RootHelper.shared.helperPath ?? "未找到")\n\n日志:\n\(recentLogs)"
                 }
-                showResultAlert = true
+                showUIKitAlert(title: title, message: message, dismissTitle: "确定")
             }
         }
+    }
+
+    // MARK: - UIKit Alert（可靠弹窗，不受 SwiftUI TabView 嵌套影响）
+
+    private func showUIKitAlert(
+        title: String,
+        message: String,
+        destructiveTitle: String? = nil,
+        dismissTitle: String = "取消",
+        destructiveAction: (() -> Void)? = nil
+    ) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootVC = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+            // 回退：直接打印日志
+            Log.shared.add("⚠️ 无法获取 rootViewController，弹窗已跳过")
+            destructiveAction?()
+            return
+        }
+
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+
+        if let destructiveTitle, let destructiveAction {
+            alert.addAction(UIAlertAction(title: destructiveTitle, style: .destructive) { _ in
+                destructiveAction()
+            })
+            alert.addAction(UIAlertAction(title: dismissTitle, style: .cancel))
+        } else {
+            alert.addAction(UIAlertAction(title: dismissTitle, style: .default))
+        }
+
+        // 找到最顶层的 presented VC 来 present
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+        topVC.present(alert, animated: true)
     }
 }
 
