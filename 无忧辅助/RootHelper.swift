@@ -63,7 +63,7 @@ final class RootHelper {
         }
 
         Log.shared.add("   调用 roothelper escalate (kfd 内核提权)...")
-        let ret = spawnHelperRaw(path: path, command: "escalate")
+        _ = spawnHelperRaw(path: path, command: "escalate")
         Log.shared.add("   提权结果: UID=\(getuid()) EUID=\(geteuid())")
 
         if getuid() == 0 || geteuid() == 0 {

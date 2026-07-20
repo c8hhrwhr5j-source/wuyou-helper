@@ -23,8 +23,9 @@ import SwiftUI
 struct 无忧辅助App: App {
     init() {
         // 启动时自动提权（异步，不阻塞 UI）
+        // 用 static 方法避免 escaping 闭包捕获未初始化的 self
         DispatchQueue.global(qos: .userInitiated).async {
-            autoEscalateIfNeeded()
+            Self.autoEscalateIfNeeded()
         }
     }
 
@@ -36,7 +37,7 @@ struct 无忧辅助App: App {
 
     // MARK: - 自动提权
 
-    private func autoEscalateIfNeeded() {
+    private static func autoEscalateIfNeeded() {
         // 如果已经是 root，跳过
         if RootHelper.shared.isRoot {
             Log.shared.add("✅ 应用已以 root 运行 (UID=\(getuid()) EUID=\(geteuid()))")
