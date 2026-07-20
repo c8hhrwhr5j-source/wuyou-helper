@@ -23,6 +23,7 @@ PAYLOAD_DIR="${BUILD_DIR}/Payload"
 APP_DIR="${PAYLOAD_DIR}/${PROJECT_NAME}.app"
 SRC_DIR="${SCRIPT_DIR}/无忧辅助"
 ENTITLEMENTS="${SCRIPT_DIR}/entitlements.plist"
+HELPER_ENTITLEMENTS="${SCRIPT_DIR}/helper.entitlements"
 
 CONFIGURATION="Release"
 
@@ -149,12 +150,21 @@ if command -v ldid &> /dev/null; then
         echo "   ⚠️  persona-mgmt 未找到，可能注入失败！"
     fi
 
-    # 注入 roothelper entitlements
-    echo "   🔏 注入 roothelper entitlements..."
-    if ldid -S"${ENTITLEMENTS}" "${HELPER_DST}"; then
-        echo "   ✅ roothelper entitlements 已注入"
+    # 注入 roothelper entitlements (独立精简权限)
+    echo "   🔏 注入 roothelper entitlements (helper.entitlements)..."
+    if [ -f "${HELPER_ENTITLEMENTS}" ]; then
+        if ldid -S"${HELPER_ENTITLEMENTS}" "${HELPER_DST}"; then
+            echo "   ✅ roothelper entitlements 已注入"
+        else
+            echo "   ⚠️  roothelper ldid 注入失败"
+        fi
     else
-        echo "   ⚠️  roothelper ldid 注入失败"
+        echo "   ⚠️  helper.entitlements 未找到，回退到 entitlements.plist"
+        if ldid -S"${ENTITLEMENTS}" "${HELPER_DST}"; then
+            echo "   ✅ roothelper entitlements 已注入 (fallback)"
+        else
+            echo "   ⚠️  roothelper ldid 注入失败"
+        fi
     fi
 else
     echo "❌ 未找到 ldid，请安装: brew install ldid"

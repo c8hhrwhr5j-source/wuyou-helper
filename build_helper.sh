@@ -33,6 +33,6 @@ file "$HELPER_OUT"
 
 echo ""
 echo "签名 (TrollStore 安装时会自动处理):"
-echo "  ldid -S${SCRIPT_DIR}/entitlements.plist $HELPER_OUT"
+echo "  ldid -S${SCRIPT_DIR}/helper.entitlements $HELPER_OUT"
 echo ""
 echo "已完成！"

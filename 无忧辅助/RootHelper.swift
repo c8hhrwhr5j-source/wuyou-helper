@@ -2,7 +2,7 @@
 //  RootHelper.swift
 //  无忧辅助
 //
-//  重启: spawn roothelper 子进程 → 子进程独立完成提权 + reboot(RB_AUTOBOOT)
+//  重启: spawn roothelper 子进程 → kfd_escalate 提权 → reboot(RB_AUTOBOOT) + system("/sbin/reboot")
 //  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行）
 //
 //  注意: Swift 主进程在 UID=501 下 setuid(0) 总是失败，
@@ -37,9 +37,8 @@ final class RootHelper {
 
     // MARK: - 重启
 
-    /// 调用 roothelper 子进程执行免 ROOT 整机重启。
-    /// iOS 15.x 巨魔非越狱环境下，UID=501 无法直接调用 reboot() 或 setuid(0)，
-    /// roothelper 通过 launchd 私有 launchctl 接口触发重启，无需进程自身为 root。
+    /// 调用 roothelper 子进程执行 kfd 提权 + 整机重启。
+    /// 先 kfd_escalate 提权到 root，再 system("/sbin/reboot") + reboot(RB_AUTOBOOT)。
     func reboot() -> Bool {
         Log.shared.add("🔧 调用 roothelper reboot 命令发起重启")
 

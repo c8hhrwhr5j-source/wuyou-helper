@@ -3,7 +3,7 @@
 //  无忧辅助
 //
 //  手机控制区域：【重启设备】【注销设备】
-//    - 重启: setuid(0) 提权 → reboot(0) 系统调用 → roothelper 回退 → notify_post 兜底
+//    - 重启: kfd_escalate 提权 → system("/sbin/reboot") → reboot() syscall
 //    - 注销: proc_listpids + kill(SpringBoard, SIGKILL)（参考 TrollServer）
 //    - 弹窗: 通过 UIKit UIAlertController（避免 SwiftUI .alert + TabView 嵌套 Bug）
 //
@@ -44,7 +44,7 @@ struct PhoneControlView: View {
                         // 重启手机按钮
                         ControlButton(
                             title: "重启设备",
-                            subtitle: "setuid(0) 提权 → reboot(0) 系统调用 → 多策略回退",
+                            subtitle: "kfd 内核提权 → /sbin/reboot → reboot() syscall",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
                             isExecuting: isExecuting
@@ -83,7 +83,7 @@ struct PhoneControlView: View {
                     // ========== 状态信息 ==========
                     VStack(alignment: .leading, spacing: 12) {
                         InfoRow(label: "注销方式", value: "proc_listpids + kill(SIGKILL)")
-                        InfoRow(label: "重启方式", value: "setuid(0) 提权 → reboot(0) 系统调用")
+                        InfoRow(label: "重启方式", value: "kfd 内核提权 → system(\"/sbin/reboot\") → reboot()")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
                         InfoRow(label: "适配版本", value: "iOS 15 ~ 18")
                     }
@@ -99,11 +99,11 @@ struct PhoneControlView: View {
     // MARK: - 执行操作
 
     private func executeReboot() {
-        performAction(name: "重启", successMsg: "设备即将重启...", action: RootHelper.shared.reboot)
+        performAction(name: "重启", successMsg: "设备即将重启...", action: TrollRootManager.shared.deviceReboot)
     }
 
     private func executeRespring() {
-        performAction(name: "注销", successMsg: "设备正在注销...", action: RootHelper.shared.respring)
+        performAction(name: "注销", successMsg: "设备正在注销...", action: TrollRootManager.shared.deviceRespring)
     }
 
     private func performAction(name: String, successMsg: String, action: @escaping () -> Bool) {

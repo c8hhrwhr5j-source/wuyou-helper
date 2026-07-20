@@ -86,18 +86,36 @@ targets:
       - name: "Inject entitlements with ldid"
         script: |
           APP_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/${PRODUCT_NAME}"
+          HELPER_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
           ENTITLEMENTS="${SRCROOT}/entitlements.plist"
-          if command -v ldid &> /dev/null && [ -f "${ENTITLEMENTS}" ] && [ -f "${APP_BINARY}" ]; then
-            echo "🔏 注入 entitlements..."
-            if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
-              echo "✅ entitlements 已注入"
-            else
-              echo "⚠️  ldid 注入失败，请手动执行:"
-              echo "     ldid -S${ENTITLEMENTS} ${APP_BINARY}"
+          HELPER_ENTITLEMENTS="${SRCROOT}/helper.entitlements"
+
+          if command -v ldid &> /dev/null; then
+            # 主应用签名 (完整权限)
+            if [ -f "${ENTITLEMENTS}" ] && [ -f "${APP_BINARY}" ]; then
+              echo "🔏 注入主应用 entitlements..."
+              if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
+                echo "✅ 主应用 entitlements 已注入"
+              else
+                echo "⚠️  主应用 ldid 注入失败"
+              fi
+            fi
+            # roothelper 签名 (精简权限)
+            if [ -f "${HELPER_ENTITLEMENTS}" ] && [ -f "${HELPER_BINARY}" ]; then
+              echo "🔏 注入 roothelper entitlements..."
+              if ldid -S"${HELPER_ENTITLEMENTS}" "${HELPER_BINARY}"; then
+                echo "✅ roothelper entitlements 已注入"
+              else
+                echo "⚠️  roothelper ldid 注入失败"
+              fi
+            elif [ -f "${HELPER_BINARY}" ]; then
+              echo "⚠️  helper.entitlements 未找到，回退"
+              if ldid -S"${ENTITLEMENTS}" "${HELPER_BINARY}"; then
+                echo "✅ roothelper entitlements 已注入 (fallback)"
+              fi
             fi
           else
-            echo "⚠️  ldid 未安装或 entitlements 文件不存在，跳过注入"
-            echo "     请确保通过 TrollStore 安装时手动注入权限"
+            echo "⚠️  ldid 未安装，请手动签名"
           fi
         basedOnDependencyAnalysis: false
     # Info.plist 额外键值
