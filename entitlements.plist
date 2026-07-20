@@ -33,5 +33,27 @@
     <true/>
     <key>com.apple.private.system.shutdown</key>
     <true/>
+
+    <!-- ===== IOKit 访问（Land 内核漏洞必须） ===== -->
+    <!-- 允许打开 IOSurfaceRoot 等受限 IOKit UserClient -->
+    <key>com.apple.private.security.iokit-user-client-class</key>
+    <array>
+        <string>IOSurfaceRootUserClient</string>
+        <string>IOAccelSharedUserClient2</string>
+        <string>IOAccelSurface2</string>
+        <string>IOAccelContext2</string>
+    </array>
+
+    <!-- 通用 IOKit 用户客户端访问 -->
+    <key>com.apple.private.iokit.user-client-access</key>
+    <true/>
+
+    <!-- 内核内存映射（Land 漏洞需要 vm_remap/vm_protect 等） -->
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+
+    <!-- IOKit 服务枚举权限 -->
+    <key>com.apple.private.iokit.restricted-uc-class</key>
+    <true/>
 </dict>
 </plist>

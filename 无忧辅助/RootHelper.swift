@@ -404,6 +404,9 @@ final class RootHelper {
             ("com.apple.private.cs.debugger",             "调试器"),
             ("com.apple.private.system.restart",          "系统重启"),
             ("com.apple.private.system.shutdown",         "系统关机"),
+            ("com.apple.private.security.iokit-user-client-class", "IOKit UC类"),
+            ("com.apple.private.iokit.user-client-access", "IOKit UC访问"),
+            ("com.apple.developer.kernel.increased-memory-limit", "内核扩内存"),
         ]
 
         let task = SecTaskCreateFromSelf(nil)
@@ -451,6 +454,9 @@ final class RootHelper {
             ("com.apple.private.cs.debugger",              "调试器"),
             ("com.apple.private.system.restart",            "系统重启"),
             ("com.apple.private.system.shutdown",           "系统关机"),
+            ("com.apple.private.security.iokit-user-client-class", "IOKit UC类"),
+            ("com.apple.private.iokit.user-client-access",  "IOKit UC访问"),
+            ("com.apple.developer.kernel.increased-memory-limit", "内核扩内存"),
         ]
 
         for (key, desc) in targets {
