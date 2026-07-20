@@ -2,8 +2,8 @@
 //  RootHelper.swift
 //  无忧辅助
 //
+//  重启: spawn roothelper 子进程 → setuid(0) → kfd 提权 → reboot(RB_AUTOBOOT) → shutdown -r now
 //  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行，已验证可用）
-//  重启: notify_post 双通知触发整机重启（绕过内核 syscall 封杀，iOS 15~18 兼容）
 //
 
 import Foundation
@@ -16,10 +16,6 @@ private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: Unsafe
 
 @_silgen_name("proc_name")
 private func _proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
-
-// notify_post 系统通知发送函数 — 绕过 reboot syscall 封杀
-@_silgen_name("notify_post")
-private func _notify_post(_ name: UnsafePointer<CChar>) -> Int32
 
 final class RootHelper {
     static let shared = RootHelper()
@@ -36,23 +32,31 @@ final class RootHelper {
 
     private init() {}
 
-    // MARK: - 重启（notify_post 双通知触发整机重启，兼容 iOS 15~18）
+    // MARK: - 重启（spawn roothelper 子进程执行完整提权+重启流程）
 
     func reboot() -> Bool {
-        Log.shared.add("🔔 请求重启 (UID=\(getuid()))")
+        let uid = getuid(), euid = geteuid()
+        Log.shared.add("🔔 请求重启 (UID=\(uid) EUID=\(euid))")
 
-        // 双通知兜底：先 springboard 级重启，再系统级重启
-        Log.shared.add("   发送 com.apple.springboard.restartDevice...")
-        _ = "com.apple.springboard.restartDevice".withCString {
-            _notify_post($0)
-        }
-        Log.shared.add("   发送 com.apple.system.reboot...")
-        _ = "com.apple.system.reboot".withCString {
-            _notify_post($0)
+        // roothelper 内部流程:
+        //   setuid(0) → kfd 内核提权 → sync() → reboot(RB_AUTOBOOT) → /usr/sbin/shutdown -r now
+        // 子进程不受 Swift 进程 UID 限制，可以独立完成提权并执行重启
+        guard let path = helperPath else {
+            Log.shared.add("❌ roothelper 未找到，重启失败")
+            return false
         }
 
-        Log.shared.add("✅ 重启通知已发送")
-        return true
+        Log.shared.add("   调用 roothelper reboot (完整提权+重启流程)...")
+        let code = spawnHelperRaw(path: path, command: "reboot")
+        Log.shared.add("   roothelper reboot exitCode=\(code)")
+
+        if code == 0 {
+            Log.shared.add("✅ 重启指令已执行，设备即将重启...")
+            return true
+        }
+
+        Log.shared.add("❌ roothelper reboot 失败 (exitCode=\(code))")
+        return false
     }
 
     // MARK: - 提权到 root（先 setuid(0)，再 roothelper 子进程 fallback）

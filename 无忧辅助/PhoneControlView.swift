@@ -3,7 +3,7 @@
 //  无忧辅助
 //
 //  手机控制区域：【重启设备】【注销设备】
-//    - 重启: notify_post 双通知触发整机重启（iOS 15~18 全兼容）
+//    - 重启: spawn roothelper 子进程 → setuid+kfd 提权 → reboot(RB_AUTOBOOT) → shutdown -r now
 //    - 注销: proc_listpids + kill(SpringBoard, SIGKILL)（参考 TrollServer）
 //    - 弹窗: 通过 UIKit UIAlertController（避免 SwiftUI .alert + TabView 嵌套 Bug）
 //
@@ -44,7 +44,7 @@ struct PhoneControlView: View {
                         // 重启手机按钮
                         ControlButton(
                             title: "重启设备",
-                            subtitle: "强制重启设备 (notify_post 双通知触发整机重启)",
+                            subtitle: "通过 roothelper 子进程提权后执行系统重启",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
                             isExecuting: isExecuting
@@ -83,7 +83,7 @@ struct PhoneControlView: View {
                     // ========== 状态信息 ==========
                     VStack(alignment: .leading, spacing: 12) {
                         InfoRow(label: "注销方式", value: "proc_listpids + kill(SIGKILL)")
-                        InfoRow(label: "重启方式", value: "notify_post 系统通知触发")
+                        InfoRow(label: "重启方式", value: "roothelper 子进程 (setuid+kfd → reboot syscall)")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
                         InfoRow(label: "适配版本", value: "iOS 15 ~ 18")
                     }

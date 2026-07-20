@@ -6,15 +6,14 @@
 //   TrollStore 安装的应用以 mobile 用户运行 (UID=501)，
 //   重启/关机等操作需要 root 权限。
 //   init() 中异步调用 roothelper escalate 子进程，
-//   roothelper 通过 kfd (task_for_pid(0)) 修改内核 ucred.uid=0，
+//   roothelper 通过 setuid(0) / kfd (task_for_pid(0)) 修改内核 ucred.uid=0，
 //   实现整个应用进程的 root 提权。
 //   提权后 getuid()==0，后续所有 syscall 都具备 root 权限。
 //
-// == 为什么用子进程(roothelper)而不是直接提权 ==
-//   Swift 进程的 sandbox 限制使 setuid(0) 无效。
-//   独立 C 子进程 handles kfd 内核操作更可靠。
-//   roothelper 提权后会同步修改父进程(Swift)的 ucred，
-//   这样主进程也获得 root 权限。
+// == 重启机制 ==
+//   Swift 端 reboot() spawn roothelper reboot 子进程，
+//   子进程内部: setuid(0) → kfd 提权 → sync() → reboot(RB_AUTOBOOT) → shutdown -r now
+//   子进程不受 Swift 进程 UID 限制，可独立完成提权并触发整机重启。
 //
 
 import SwiftUI
