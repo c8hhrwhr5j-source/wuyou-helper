@@ -228,7 +228,7 @@ final class RootHelper {
         defer { free(pathC); free(cmdC) }
         var argv: [UnsafeMutablePointer<CChar>?] = [pathC, cmdC, nil]
 
-        let ret = posix_spawn(&pid, path, fileActions, nil, &argv, environ)
+        let ret = posix_spawn(&pid, path, &fileActions, nil, &argv, environ)
 
         close(writeFd)
         posix_spawn_file_actions_destroy(&fileActions)
