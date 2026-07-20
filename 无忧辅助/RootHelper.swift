@@ -20,10 +20,6 @@ private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: Unsafe
 @_silgen_name("proc_name")
 private func _proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
 
-// SpringBoard 私有系统通知 — 免 root 触发整机重启
-@_silgen_name("notify_post")
-private func notify_post(_ name: UnsafePointer<CChar>) -> Int32
-
 final class RootHelper {
     static let shared = RootHelper()
 
@@ -41,28 +37,24 @@ final class RootHelper {
 
     // MARK: - 重启
 
-    /// 通过 SpringBoard 私有系统通知触发整机重启。
+    /// 调用 roothelper 子进程执行免 ROOT 整机重启。
     /// iOS 15.x 巨魔非越狱环境下，UID=501 无法直接调用 reboot() 或 setuid(0)，
-    /// 但桌面服务进程 SpringBoard 持有系统最高电源权限，
-    /// 投递其私有通知即可在免 root 的情况下强制整机重启。
+    /// roothelper 通过 launchd 私有 launchctl 接口触发重启，无需进程自身为 root。
     func reboot() -> Bool {
-        let uid = getuid(), euid = geteuid()
-        Log.shared.add("🔔 调用系统桌面服务发起整机重启（免 ROOT 生效）")
-        Log.shared.add("   当前 UID=\(uid) EUID=\(euid)")
+        Log.shared.add("🔧 调用 roothelper reboot 命令发起重启")
 
-        // 双私有系统通知兜底，iOS 15.x 通杀
-        let notifications = [
-            "com.apple.springboard.restartSystem",
-            "com.apple.springboard.shutDownSystem",
-        ]
-
-        for name in notifications {
-            let ret = name.withCString { notify_post($0) }
-            Log.shared.add("   notify_post(\"\(name)\") = \(ret)")
+        guard let path = helperPath else {
+            Log.shared.add("❌ roothelper 未找到，无法重启")
+            return false
         }
 
-        Log.shared.add("✅ 重启指令已下发，设备即将重启")
-        return true
+        let success = spawnHelper(path: path, command: "reboot")
+        if success {
+            Log.shared.add("✅ roothelper reboot 已执行，设备即将重启")
+        } else {
+            Log.shared.add("❌ roothelper reboot 返回非零")
+        }
+        return success
     }
 
     // MARK: - 提权（通过 roothelper 子进程）

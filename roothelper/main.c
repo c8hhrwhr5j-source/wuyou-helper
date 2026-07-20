@@ -25,10 +25,43 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <errno.h>
+#include <notify.h>
+#include <mach/mach.h>
+#include <dlfcn.h>
 
 #include "kfd.h"
 #include "offsets.h"
+
+// launchd 私有重启接口（iOS 15.x TrollStore 免 ROOT 触发）
+#define LAUNCHCTL_SYSTEM_REBOOT   19
+#define LAUNCHCTL_SYSTEM_SHUTDOWN 18
+typedef int (*launchctl_fn_t)(int cmd, const char *path, const char * const *args);
+static launchctl_fn_t g_launchctl = NULL;
+
+static int init_launchctl(void) {
+    if (g_launchctl) return 0;
+
+    // launchctl 位于 libSystem / liblaunch / libxpc，用 dlsym 避免链接依赖
+    const char *libs[] = {
+        "/usr/lib/liblaunch.dylib",
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libxpc.dylib",
+        NULL
+    };
+    for (int i = 0; libs[i]; i++) {
+        void *handle = dlopen(libs[i], RTLD_NOW | RTLD_GLOBAL);
+        if (!handle) continue;
+        g_launchctl = (launchctl_fn_t)dlsym(handle, "launchctl");
+        if (g_launchctl) {
+            printf("[RootHelper] launchctl 已从 %s 动态加载\n", libs[i]);
+            return 0;
+        }
+    }
+    printf("[RootHelper] ❌ 无法动态加载 launchctl 符号\n");
+    return -1;
+}
 
 extern char **environ;
 extern int reboot(int);
@@ -330,6 +363,69 @@ static int cmd_respring(void) {
 }
 
 // ============================================================
+// 4. 免 ROOT 整机重启（iOS 15.x TrollStore 专用）
+//    利用 launchd 私有 launchctl 接口触发重启，
+//    三重兜底覆盖 launchctl / 系统通知 / reboot() syscall。
+// ============================================================
+static int helper_reboot(void) {
+    printf("\n");
+    printf("========================================\n");
+    printf("  RootHelper: 免 ROOT 整机重启\n");
+    printf("========================================\n");
+    print_info();
+
+    // 初始化 launchctl 符号
+    int launchctl_ok = (init_launchctl() == 0);
+    if (!launchctl_ok) {
+        printf("[RootHelper] ⚠️ launchctl 不可用，将使用通知 + reboot() 兜底\n");
+    }
+
+    int ret = -1;
+
+    // 1. 优先调用 launchd 私有重启接口
+    if (launchctl_ok) {
+        printf("\n[步骤1] launchctl(LAUNCHCTL_SYSTEM_REBOOT)...\n");
+        ret = g_launchctl(LAUNCHCTL_SYSTEM_REBOOT, NULL, NULL);
+        printf("[RootHelper] launchctl reboot => %d, errno=%d (%s)\n",
+               ret, errno, strerror(errno));
+        if (ret == 0) {
+            printf("[RootHelper] ✅ launchctl 重启指令已下发\n");
+            sleep(2);
+            return 0;
+        }
+
+        // 2. 兜底：launchctl 关机 + 内核/桌面重启通知
+        printf("\n[步骤2] launchctl(LAUNCHCTL_SYSTEM_SHUTDOWN) + 系统通知兜底...\n");
+        ret = g_launchctl(LAUNCHCTL_SYSTEM_SHUTDOWN, NULL, NULL);
+        printf("[RootHelper] launchctl shutdown => %d, errno=%d (%s)\n",
+               ret, errno, strerror(errno));
+    }
+
+    const char *notifications[] = {
+        "com.apple.system.reboot",
+        "com.apple.iokit.IOPowerSourceCommandReboot",
+        "com.apple.springboard.restartDevice",
+        "com.apple.springboard.restartSystem",
+        "com.apple.springboard.shutDownSystem",
+        NULL
+    };
+    for (int i = 0; notifications[i]; i++) {
+        printf("[RootHelper] notify_post(%s)\n", notifications[i]);
+        notify_post(notifications[i]);
+    }
+
+    // 3. 最终兜底：直接调用 reboot() 系统调用
+    printf("\n[步骤3] sync() + reboot(RB_AUTOBOOT) 最终兜底...\n");
+    sync();
+    ret = reboot(RB_AUTOBOOT);
+    printf("[RootHelper] reboot() => %d, errno=%d (%s)\n",
+           ret, errno, strerror(errno));
+
+    printf("\n[RootHelper] 所有重启指令已下发，设备即将重启\n");
+    return 0;
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 
@@ -341,14 +437,14 @@ int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("==== iOS RootHelper (kfd) ====\n");
         printf("用法：\n");
-        printf("  roothelper reboot     重启手机 (kfd提权 -> shutdown)\n");
+        printf("  roothelper reboot     重启手机 (launchctl 免ROOT)\n");
         printf("  roothelper escalate   提权到 root (只提权，不重启)\n");
         printf("  roothelper respring   注销桌面\n");
         return 0;
     }
 
     if (strcmp(argv[1], "reboot") == 0) {
-        return cmd_reboot();
+        return helper_reboot();
     } else if (strcmp(argv[1], "escalate") == 0) {
         return cmd_escalate();
     } else if (strcmp(argv[1], "respring") == 0) {
