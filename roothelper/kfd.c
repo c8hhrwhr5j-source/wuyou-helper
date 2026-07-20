@@ -197,7 +197,7 @@ int kfd_open(void) {
     CFMutableDictionaryRef match = IOServiceMatching("IOSurfaceRoot");
     if (match) {
         io_iterator_t iter;
-        kr = IOServiceGetMatchingServices(IOMainPort(MACH_PORT_NULL), match, &iter);
+        kr = IOServiceGetMatchingServices(kIOMasterPortDefault, match, &iter);
         if (kr == KERN_SUCCESS && iter) {
             io_object_t service = IOIteratorNext(iter);
             IOObjectRelease(iter);
@@ -208,7 +208,7 @@ int kfd_open(void) {
                     // 通过 IOSurface 属性泄漏内核地址
                     CFMutableDictionaryRef props = (CFMutableDictionaryRef)
                         IORegistryEntryCreateCFProperty((io_registry_entry_t)
-                            IOServiceGetMatchingService(IOMainPort(MACH_PORT_NULL),
+                            IOServiceGetMatchingService(kIOMasterPortDefault,
                                 IOServiceMatching("IOSurfaceRoot")),
                             CFSTR("SurfaceIDs"),
                             kCFAllocatorDefault, 0);
