@@ -59,7 +59,7 @@ final class RootHelper {
         if isRoot {
             Log.shared.add("✅ 当前进程已是 root，直接调用 reboot()")
             sync()
-            reboot(RB_AUTOBOOT)
+            Darwin.reboot(RB_AUTOBOOT)
             return true
         }
 
@@ -102,7 +102,7 @@ final class RootHelper {
         setgid(0)
         sync()
         Log.shared.add("[reboot] 调用 reboot(RB_AUTOBOOT)...")
-        reboot(RB_AUTOBOOT)
+        Darwin.reboot(RB_AUTOBOOT)
         // reboot 成功不会返回
         Log.shared.add("❌ reboot() 返回，errno=\(errno)")
         return false
