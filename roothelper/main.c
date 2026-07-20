@@ -49,8 +49,8 @@ static int spawn_program(const char *path, char *const argv[]) {
     pid_t pid;
     int ret = posix_spawn(&pid, path, NULL, NULL, argv, environ);
     if (ret != 0) {
-        printf("[RootHelper] posix_spawn(%s) 失败: %d (errno=%d: %s)\n",
-               path, ret, errno, strerror(errno));
+        printf("[RootHelper] posix_spawn(%s) 失败: %d (%s)\n",
+               path, ret, strerror(ret));
         return -1;
     }
     int status;
