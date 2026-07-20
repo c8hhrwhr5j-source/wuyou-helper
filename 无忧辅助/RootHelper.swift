@@ -259,44 +259,56 @@ final class RootHelper {
     // MARK: - KFD 内核漏洞测试
 
     /// 分步测试 kfd 内核漏洞利用链
-    /// 注意：kfd 可能触发内核 panic/重启，每一步都独立打印结果
+    /// 捕获 kfd.c 的 printf 输出到诊断日志，精确定位失败步骤
+    /// 注意：kfd 可能触发内核 panic/重启
     private func testKfd() {
         // ---- Step 1: kfd_init ----
         Log.shared.add("[1/4] kfd_init() 初始化漏洞链...")
-        let initRet = _kfd_init()
-        if initRet != 0 {
+        let initOut = captureStdout { _kfd_init() }
+        if let o = initOut.text, !o.isEmpty {
+            Log.shared.add("--- kfd_init stdout ---")
+            logLines(o)
+        }
+        if initOut.ret != 0 {
             let err = _kfd_get_error()
             let msg = err != nil ? String(cString: err!) : "unknown"
-            Log.shared.add("   ❌ kfd_init 失败: \(msg) (ret=\(initRet))")
+            Log.shared.add("   ❌ kfd_init 失败: \(msg) (ret=\(initOut.ret))")
             return
         }
         Log.shared.add("   ✅ kfd_init 成功")
 
         // ---- Step 2: kfd_open ----
         Log.shared.add("[2/4] kfd_open() 打开内核读/写...")
-        let openRet = _kfd_open()
-        if openRet != 0 {
+        let openOut = captureStdout { _kfd_open() }
+        if let o = openOut.text, !o.isEmpty {
+            Log.shared.add("--- kfd_open stdout ---")
+            logLines(o)
+        }
+        if openOut.ret != 0 {
             let err = _kfd_get_error()
             let msg = err != nil ? String(cString: err!) : "unknown"
-            Log.shared.add("   ❌ kfd_open 失败: \(msg) (ret=\(openRet))")
-            Log.shared.add("   → 当前内核版本不支持该漏洞利用方法")
+            Log.shared.add("   ❌ kfd_open 失败: \(msg) (ret=\(openOut.ret))")
             _kfd_close()
             return
         }
         Log.shared.add("   ✅ kfd_open 成功！内核 r/w 已获得")
 
-        // ---- Step 3: kfd_is_root (检查我们的 proc 是否已经是 root) ----
+        // ---- Step 3: kfd_is_root ----
         Log.shared.add("[3/4] kfd_is_root() 检测当前进程状态...")
         let rootBefore = _kfd_is_root()
         Log.shared.add("   当前进程 root 状态: \(rootBefore) (0=否, 1=是)")
 
         // ---- Step 4: kfd_get_root ----
         Log.shared.add("[4/4] kfd_get_root() 利用内核写提升进程为 root...")
-        let rootRet = _kfd_get_root()
-        if rootRet != 0 {
+        let rootOut = captureStdout { _kfd_get_root() }
+        if let o = rootOut.text, !o.isEmpty {
+            Log.shared.add("--- kfd_get_root stdout ---")
+            logLines(o)
+        }
+        if rootOut.ret != 0 {
             let err = _kfd_get_error()
             let msg = err != nil ? String(cString: err!) : "unknown"
-            Log.shared.add("   ❌ kfd_get_root 失败: \(msg) (ret=\(rootRet))")
+            Log.shared.add("   ❌ kfd_get_root 失败: \(msg) (ret=\(rootOut.ret))")
             _kfd_close()
             return
         }
@@ -310,14 +322,11 @@ final class RootHelper {
 
         if afterUid == 0 || afterEuid == 0 || rootAfter == 1 {
             Log.shared.add("   ✅ KFD 提权成功！进程已 root")
-
-            // 验证：root 后检查文件可见性
             let testPaths = ["/sbin/reboot", "/etc/master.passwd"]
             for p in testPaths {
                 let acc = access(p, Int32(F_OK))
                 Log.shared.add("   (root) access(\(p), F_OK)=\(acc)")
                 if acc == 0 {
-                    // 如果文件存在，尝试 stat 读取详情
                     var st = stat()
                     if stat(p, &st) == 0 {
                         Log.shared.add("         size=\(st.st_size) mode=\(String(st.st_mode, radix: 8))")
@@ -328,8 +337,55 @@ final class RootHelper {
             Log.shared.add("   ❌ KFD 提权失败：内核写成功但 UID 未变化")
         }
 
-        // 不关闭 kfd，保持 root 状态以便后续操作
         Log.shared.add("   提示：kfd 句柄保持打开，如需关闭请重启 App")
+    }
+
+    /// 捕获 stdout：重定向 stdout → pipe，执行闭包，恢复 stdout，返回 (返回值, stdout文本)
+    private func captureStdout(_ block: () -> Int32) -> (ret: Int32, text: String?) {
+        // flush 当前 stdout
+        fflush(stdout)
+        let saved = dup(STDOUT_FILENO)
+        guard saved >= 0 else { return (block(), nil) }
+
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else {
+            close(saved)
+            return (block(), nil)
+        }
+
+        dup2(fds[1], STDOUT_FILENO)
+        close(fds[1])
+
+        let ret = block()
+
+        fflush(stdout)
+        fsync(STDOUT_FILENO)
+
+        // 读 pipe
+        var buf = [UInt8](repeating: 0, count: 65536)
+        let n = read(fds[0], &buf, buf.count - 1)
+        close(fds[0])
+
+        // 恢复 stdout
+        dup2(saved, STDOUT_FILENO)
+        close(saved)
+
+        let text: String?
+        if n > 0 {
+            buf[Int(n)] = 0
+            text = String(cString: buf)
+        } else {
+            text = nil
+        }
+        return (ret, text)
+    }
+
+    /// 将多行文本分行添加到日志
+    private func logLines(_ text: String) {
+        for line in text.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { Log.shared.add("   \(t)") }
+        }
     }
 
     // MARK: - 运行时权限检查
