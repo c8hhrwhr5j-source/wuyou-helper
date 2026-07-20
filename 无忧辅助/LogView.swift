@@ -2,12 +2,7 @@
 //  LogView.swift
 //  无忧辅助
 //
-//  运行日志查看
-//
-//  兼容性说明:
-//    NavigationView（非 NavigationStack）— 兼容 iOS 14
-//    PreviewProvider（非 #Preview）— 兼容 Xcode < 15
-//    所有 API 选择以 TrollStore 最低支持版本 iOS 14 为准
+//  运行日志查看 - 文本模式，支持选择和复制
 //
 
 import SwiftUI
@@ -32,18 +27,20 @@ struct LogView: View {
                     }
                     .frame(maxHeight: .infinity)
                 } else {
-                    // 日志列表
-                    List {
-                        ForEach(log.entries.reversed()) { entry in
-                            LogRow(entry: entry)
-                        }
-                    }
-                    .listStyle(.plain)
+                    // 可选中、可滚动的纯文本日志
+                    LogTextView(text: log.fullText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .navigationTitle("运行日志")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("全选") {
+                        UIPasteboard.general.string = log.fullText
+                    }
+                    .disabled(log.entries.isEmpty)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("清空") {
                         log.clear()
@@ -55,36 +52,30 @@ struct LogView: View {
     }
 }
 
-// MARK: - 日志行
+// MARK: - 纯文本视图（UIKit 桥接，支持选择和复制）
 
-struct LogRow: View {
-    let entry: LogEntry
+struct LogTextView: UIViewRepresentable {
+    let text: String
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            // 时间戳
-            Text(entry.timestamp)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-
-            // 级别标签
-            Text(levelEmoji)
-                .font(.caption)
-
-            // 消息内容
-            Text(entry.message)
-                .font(.caption)
-                .foregroundColor(.primary)
-        }
-        .padding(.vertical, 2)
+    func makeUIView(context: Context) -> UITextView {
+        let tv = UITextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.backgroundColor = .systemBackground
+        tv.textColor = .label
+        tv.textContainerInset = UIEdgeInsets(top: 8, left: 4, bottom: 8, right: 4)
+        tv.text = text
+        // 自动滚动到底部
+        tv.scrollRangeToVisible(NSRange(location: text.utf16.count, length: 0))
+        return tv
     }
 
-    private var levelEmoji: String {
-        switch entry.level {
-        case .info:    return "ℹ️"
-        case .warning: return "⚠️"
-        case .error:   return "❌"
-        case .debug:   return "🔍"
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        let shouldScroll = uiView.contentOffset.y + uiView.bounds.height >= uiView.contentSize.height - 60
+        uiView.text = text
+        if shouldScroll {
+            uiView.scrollRangeToVisible(NSRange(location: text.utf16.count, length: 0))
         }
     }
 }

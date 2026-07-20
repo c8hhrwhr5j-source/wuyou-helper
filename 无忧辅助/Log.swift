@@ -44,6 +44,11 @@ final class Log: ObservableObject {
             self.entries.removeAll()
         }
     }
+
+    /// 将所有日志合并为纯文本，方便复制
+    var fullText: String {
+        entries.map { "[\($0.timestamp)] \($0.message)" }.joined(separator: "\n")
+    }
 }
 
 struct LogEntry: Identifiable {
