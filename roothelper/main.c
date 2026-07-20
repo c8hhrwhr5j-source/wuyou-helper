@@ -298,6 +298,10 @@ static int cmd_respring(void) {
 // ============================================================
 
 int main(int argc, char *argv[]) {
+    // 无缓冲输出，确保 stdout/stderr 被父进程完整捕获
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+
     if (argc < 2) {
         printf("==== iOS RootHelper (kfd) ====\n");
         printf("用法：\n");

@@ -228,44 +228,74 @@ final class RootHelper {
 
     private func spawnHelper(path: String, command: String) -> Bool {
         Log.shared.add("   spawnHelper cmd=\(command)")
-        var pid: pid_t = 0
-        let pathC = strdup(path)
-        let cmdC  = strdup(command)
-        defer { free(pathC); free(cmdC) }
-        var argv: [UnsafeMutablePointer<CChar>?] = [pathC, cmdC, nil]
-        let ret = posix_spawn(&pid, path, nil, nil, &argv, environ)
-        if ret == 0 {
-            var status: Int32 = 0
-            waitpid(pid, &status, 0)
-            let code = ((status & 0o177) == 0) ? ((status >> 8) & 0xff) : -1
-            Log.shared.add("   exitCode=\(code)")
-            return code == 0
-        }
-        Log.shared.add("   posix_spawn 失败: \(ret)")
-        return false
+        return spawnHelperRaw(path: path, command: command) == 0
     }
 
-    /// spawn roothelper 并返回 exit code（不判断成功/失败）
+    /// spawn roothelper 并返回 exit code，同时捕获 stdout/stderr 到日志
     private func spawnHelperRaw(path: String, command: String) -> Int32 {
         Log.shared.add("   spawnHelperRaw cmd=\(command)")
+
+        // 创建管道，用于捕获子进程 stdout + stderr
+        var pipeFds: [Int32] = [0, 0]
+        guard pipe(&pipeFds) == 0 else {
+            Log.shared.add("   pipe 创建失败 errno=\(errno)")
+            return -1
+        }
+        let readFd = pipeFds[0]
+        let writeFd = pipeFds[1]
+
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, writeFd, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, writeFd, STDERR_FILENO)
+        posix_spawn_file_actions_addclose(&fileActions, readFd)
+
         var pid: pid_t = 0
         let pathC = strdup(path)
         let cmdC  = strdup(command)
         defer { free(pathC); free(cmdC) }
         var argv: [UnsafeMutablePointer<CChar>?] = [pathC, cmdC, nil]
-        let ret = posix_spawn(&pid, path, nil, nil, &argv, environ)
-        if ret == 0 {
-            var status: Int32 = 0
-            waitpid(pid, &status, 0)
-            if (status & 0o177) == 0 {
-                let code = (status >> 8) & 0xff
-                Log.shared.add("   exitCode=\(code)")
-                return code
-            }
-            Log.shared.add("   信号终止: \(status & 0o177)")
+
+        let ret = posix_spawn(&pid, path, fileActions, nil, &argv, environ)
+
+        close(writeFd) // 父进程关闭写端
+        posix_spawn_file_actions_destroy(&fileActions)
+
+        if ret != 0 {
+            close(readFd)
+            Log.shared.add("   posix_spawn 失败: \(ret) errno=\(errno)")
             return -1
         }
-        Log.shared.add("   posix_spawn 失败: \(ret)")
+
+        // 在后台读取输出，避免阻塞
+        var outputData = Data()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            defer { group.leave() }
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            while true {
+                let n = read(readFd, &buffer, 1024)
+                if n <= 0 { break }
+                outputData.append(buffer, count: n)
+            }
+            close(readFd)
+        }
+
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
+        group.wait()
+
+        if let output = String(data: outputData, encoding: .utf8), !output.isEmpty {
+            Log.shared.add("   [roothelper output]\n\(output)")
+        }
+
+        if (status & 0o177) == 0 {
+            let code = (status >> 8) & 0xff
+            Log.shared.add("   exitCode=\(code)")
+            return code
+        }
+        Log.shared.add("   信号终止: \(status & 0o177)")
         return -1
     }
 }
