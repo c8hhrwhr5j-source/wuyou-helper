@@ -201,12 +201,17 @@ final class RootHelper {
     /// 通过 SecTask API 查询内核在运行时实际看到的 entitlements
     private func checkRuntimeEntitlements() {
         let keys: [(String, String)] = [
-            ("com.apple.private.security.no-sandbox",       "关闭沙盒"),
-            ("com.apple.private.persona-mgmt",              "root身份"),
-            ("com.apple.private.security.no-container",     "无容器"),
-            ("com.apple.private.system.restart",            "系统重启"),
-            ("com.apple.private.system.shutdown",           "系统关机"),
-            ("com.apple.private.task_for_pid-allow",       "task_for_pid"),
+            ("com.apple.private.security.no-sandbox",      "关闭沙盒"),
+            ("com.apple.private.persona-mgmt",             "root身份"),
+            ("platform-application",                       "平台应用"),
+            ("get-task-allow",                             "调试启动"),
+            ("dynamic-codesigning",                        "动态签名"),
+            ("com.apple.private.skip-library-validation",  "跳过库验证"),
+            ("com.apple.private.task_for_pid-allow",      "task_for_pid"),
+            ("com.apple.system-task-ports",               "系统任务端口"),
+            ("com.apple.private.cs.debugger",             "调试器"),
+            ("com.apple.private.system.restart",          "系统重启"),
+            ("com.apple.private.system.shutdown",         "系统关机"),
         ]
 
         let task = SecTaskCreateFromSelf(nil)
@@ -222,8 +227,8 @@ final class RootHelper {
 
     // MARK: - 二进制权限扫描
 
-    /// 扫描自身二进制文件，查找嵌入的 entitlements XML 字符串
-    /// 这能验证构建时权限是否被正确注入到 Mach-O 签名中
+    /// 扫描自身二进制文件的代码签名段，查找嵌入的 entitlements XML 中的 <key> 标记。
+    /// 只匹配 "<key>xxx</key>" 形式，避免把代码里的字符串误判为嵌入权限。
     private func scanBinaryForEntitlements() {
         guard let binaryPath = Bundle.main.executablePath,
               let data = try? Data(contentsOf: URL(fileURLWithPath: binaryPath)) else {
@@ -234,7 +239,7 @@ final class RootHelper {
         Log.shared.add("   二进制路径: \(binaryPath)")
         Log.shared.add("   二进制大小: \(data.count) bytes")
 
-        // 转成 UTF-8 字符串搜索（跳过无效字节）
+        // 转成 UTF-8 字符串（跳过无效字节），只保留 XML 标签内可能出现的字符
         var utf8buf = ""
         data.forEach { byte in
             if byte >= 0x20 && byte < 0x7f {
@@ -245,23 +250,28 @@ final class RootHelper {
         let targets: [(String, String)] = [
             ("com.apple.private.security.no-sandbox",       "关闭沙盒"),
             ("com.apple.private.persona-mgmt",              "root身份"),
-            ("com.apple.private.security.no-container",     "无容器"),
+            ("platform-application",                        "平台应用"),
+            ("get-task-allow",                              "调试启动"),
+            ("dynamic-codesigning",                         "动态签名"),
+            ("com.apple.private.skip-library-validation",   "跳过库验证"),
+            ("com.apple.private.task_for_pid-allow",       "task_for_pid"),
+            ("com.apple.system-task-ports",                "系统任务端口"),
+            ("com.apple.private.cs.debugger",              "调试器"),
             ("com.apple.private.system.restart",            "系统重启"),
             ("com.apple.private.system.shutdown",           "系统关机"),
-            ("com.apple.private.task_for_pid-allow",       "task_for_pid"),
         ]
 
         for (key, desc) in targets {
-            if utf8buf.contains(key) {
-                Log.shared.add("   [✅] \(desc) 字符串已嵌入二进制")
+            if utf8buf.contains("<key>\(key)</key>") {
+                Log.shared.add("   [✅] \(desc) 在二进制签名中")
             } else {
-                Log.shared.add("   [❌] \(desc) 字符串未找到 → 构建时未注入!")
+                Log.shared.add("   [❌] \(desc) 未在二进制签名中找到 → 构建时未注入")
             }
         }
 
-        // 额外：搜索二进制中是否有 <?xml 开头的 entitlements plist 片段
+        // 额外：统计 XML plist 片段数，辅助判断签名中是否包含 entitlements
         let xmlCount = utf8buf.components(separatedBy: "<?xml").count - 1
-        Log.shared.add("   二进制中 XML plist 片段数: \(xmlCount)")
+        Log.shared.add("   二进制签名中 XML plist 片段数: \(xmlCount)")
     }
 
     // MARK: - 注销

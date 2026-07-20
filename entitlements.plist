@@ -2,97 +2,36 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- 关闭沙盒：必须且最优先 -->
-	<key>com.apple.private.security.no-sandbox</key>
-	<true/>
-	<key>com.apple.private.security.no-container</key>
-	<true/>
+    <!-- 关闭沙盒：必须且最优先。只保留这一个，避免和 no-container 冲突 -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
 
-	<!-- TrollStore 运行基础 -->
-	<key>platform-application</key>
-	<true/>
-	<key>get-task-allow</key>
-	<true/>
-	<key>dynamic-codesigning</key>
-	<true/>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
-	<key>com.apple.private.security.no-entitlements</key>
-	<true/>
+    <!-- root 身份/切换用户 -->
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
 
-	<!-- Root 身份 / task_for_pid -->
-	<key>com.apple.private.persona-mgmt</key>
-	<true/>
-	<key>task_for_pid-allow</key>
-	<true/>
-	<key>com.apple.system-task-ports</key>
-	<true/>
+    <!-- TrollStore / 自签运行基础 -->
+    <key>platform-application</key>
+    <true/>
+    <key>get-task-allow</key>
+    <true/>
+    <key>dynamic-codesigning</key>
+    <true/>
 
-	<!-- 重启 / 关机 -->
-	<key>com.apple.private.security.system-actions</key>
-	<true/>
-	<key>com.apple.system.reboot</key>
-	<true/>
-	<key>com.apple.system.shutdown</key>
-	<true/>
+    <!-- 进程/调试 -->
+    <key>com.apple.private.task_for_pid-allow</key>
+    <true/>
+    <key>com.apple.system-task-ports</key>
+    <true/>
+    <key>com.apple.private.cs.debugger</key>
+    <true/>
+    <key>com.apple.private.skip-library-validation</key>
+    <true/>
 
-	<!-- 容器/文件访问 -->
-	<key>com.apple.private.security.storage.AppDataContainers</key>
-	<true/>
-
-	<!-- 文件系统例外（兼容旧版 TrollStore 路径） -->
-	<key>com.apple.security.exception.files.absolute-path.read-only</key>
-	<array>
-		<string>/</string>
-		<string>/var/</string>
-		<string>/private/var/</string>
-	</array>
-	<key>com.apple.security.exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/</string>
-		<string>/var/</string>
-		<string>/private/var/</string>
-	</array>
-
-	<!-- 网络/进程 -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<key>com.apple.security.network.server</key>
-	<true/>
-	<key>com.apple.private.network.allow-all</key>
-	<true/>
-	<key>com.apple.security.exception.mach-lookup.global-name</key>
-	<array>
-		<string>com.apple.springboard.services</string>
-		<string>com.apple.backboardd</string>
-		<string>com.apple.springboard</string>
-	</array>
-	<key>com.apple.private.mach-lookup.persona</key>
-	<true/>
-
-	<!-- 调试/内存 -->
-	<key>com.apple.private.cs.debugger</key>
-	<true/>
-	<key>com.apple.private.memorystatus</key>
-	<true/>
-
-	<!-- TCC 隐私 -->
-	<key>com.apple.private.tcc.allow</key>
-	<array>
-		<string>kTCCServiceAccessibility</string>
-		<string>kTCCServicePhotos</string>
-		<string>kTCCServiceCamera</string>
-		<string>kTCCServiceMicrophone</string>
-		<string>kTCCServiceBluetoothAlways</string>
-	</array>
-
-	<!-- 钥匙串 -->
-	<key>keychain-access-groups</key>
-	<array>
-		<string>apple</string>
-		<string>com.apple.private</string>
-	</array>
-	<key>com.apple.private.security.keychain.default-access-group</key>
-	<string>apple</string>
+    <!-- 重启 / 关机 -->
+    <key>com.apple.private.system.restart</key>
+    <true/>
+    <key>com.apple.private.system.shutdown</key>
+    <true/>
 </dict>
 </plist>

@@ -2,36 +2,36 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- 关闭沙盒：kfd 打开 IOSurfaceRoot / 调用 vm_remap / 操作 kernel 必须 -->
-	<key>com.apple.private.security.no-sandbox</key>
-	<true/>
-	<key>com.apple.private.security.no-container</key>
-	<true/>
+    <!-- 关闭沙盒：kfd 打开 IOSurfaceRoot / 调用 vm_remap 必须 -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
 
-	<!-- TrollStore 运行所需 -->
-	<key>platform-application</key>
-	<true/>
-	<key>get-task-allow</key>
-	<true/>
-	<key>dynamic-codesigning</key>
-	<true/>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
+    <!-- root 身份切换 -->
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
 
-	<!-- Root 提权 / 身份切换 -->
-	<key>com.apple.private.persona-mgmt</key>
-	<true/>
-	<key>task_for_pid-allow</key>
-	<true/>
-	<key>com.apple.system-task-ports</key>
-	<true/>
+    <!-- TrollStore / 自签运行基础 -->
+    <key>platform-application</key>
+    <true/>
+    <key>get-task-allow</key>
+    <true/>
+    <key>dynamic-codesigning</key>
+    <true/>
+    <key>com.apple.private.skip-library-validation</key>
+    <true/>
 
-	<!-- 系统操作：重启 / 关机 -->
-	<key>com.apple.private.security.system-actions</key>
-	<true/>
-	<key>com.apple.system.reboot</key>
-	<true/>
-	<key>com.apple.system.shutdown</key>
-	<true/>
+    <!-- 进程/调试 -->
+    <key>com.apple.private.task_for_pid-allow</key>
+    <true/>
+    <key>com.apple.system-task-ports</key>
+    <true/>
+    <key>com.apple.private.cs.debugger</key>
+    <true/>
+
+    <!-- 重启 / 关机 -->
+    <key>com.apple.private.system.restart</key>
+    <true/>
+    <key>com.apple.private.system.shutdown</key>
+    <true/>
 </dict>
 </plist>
