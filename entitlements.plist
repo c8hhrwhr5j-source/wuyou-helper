@@ -2,169 +2,42 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ==================== 沙盒 ==================== -->
+	<!-- ============================================================ -->
+	<!-- 无忧辅助 - TrollStore 核心权限 (精简版) -->
+	<!-- ============================================================ -->
+	<!-- 为什么精简？
+	     170 行的旧 plist 包含大量无效 key（TCC、钥匙串、蓝牙、WiFi 等），
+	     ldid 做 DER 编码时可能因这些不存在的 key 而失败，导致系统
+	     读取不到 task_for_pid-allow，TrollStore 只能显示 "mobile 用户"。
+	     只保留 iOS 真实存在且本应用必需的 key。
+	-->
+
+	<!-- 关闭沙盒 (TrollStore 非沙盒运行) -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
-	<key>com.apple.private.security.container-required</key>
-	<false/>
+	<key>com.apple.private.security.no-container</key>
+	<true/>
 
-	<!-- ==================== 功能（root + 内核访问） ==================== -->
-	<!--
-	权限分层说明:
-	1. platform-application + get-task-allow → TrollStore 基础开锁
-	2. com.apple.system-task-ports → task_for_pid(0) 获取 kernel_task
-	3. dynamic-codesigning → 允许 ldid 伪签名生效
-	4. no-sandbox → 绕过沙盒限制
-	5. com.apple.private.security.no-entitlements → 跳过 entitlement 检查
-	这套权限组合让应用能直接读写内核内存，实现 root 提权。
-	-->
+	<!-- TrollStore 基础开锁 -->
 	<key>platform-application</key>
 	<true/>
 	<key>get-task-allow</key>
 	<true/>
-	<key>com.apple.system-task-ports</key>
-	<true/>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
-	<key>com.apple.private.security.no-entitlements</key>
-	<true/>
 	<key>dynamic-codesigning</key>
 	<true/>
+
+	<!-- root 提权 (task_for_pid(0) → kernel_task) -->
 	<key>task_for_pid-allow</key>
 	<true/>
-	<!-- 重启/关机系统动作权限 -->
+	<key>com.apple.system-task-ports</key>
+	<true/>
+
+	<!-- 重启/关机等系统操作 -->
 	<key>com.apple.private.security.system-actions</key>
 	<true/>
-	<!-- 内核内存访问权限 -->
-	<key>com.apple.private.kernel.get-kext-info</key>
+
+	<!-- 跳过代码签名库验证 (允许加载任意 dylib) -->
+	<key>com.apple.private.skip-library-validation</key>
 	<true/>
-	<key>com.apple.private.kernel.memory-status</key>
-	<true/>
-
-	<!-- ==================== 文件系统 ==================== -->
-	<key>com.apple.security.exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/</string>
-	</array>
-	<key>com.apple.security.exception.files.home-relative-path.read-write</key>
-	<array>
-		<string>/</string>
-	</array>
-	<key>com.apple.security.exception.files.absolute-path.read-only</key>
-	<array>
-		<string>/var/containers/Shared/SystemGroup/</string>
-		<string>/var/mobile/Library/</string>
-		<string>/usr/</string>
-		<string>/System/</string>
-	</array>
-
-	<!-- ==================== 隐私（TCC 免请求） ==================== -->
-	<key>com.apple.private.tcc.allow</key>
-	<array>
-		<string>kTCCServiceMicrophone</string>
-		<string>kTCCServiceTencentWeibo</string>
-		<string>kTCCServiceUbiquity</string>
-		<string>kTCCServiceCalls</string>
-		<string>kTCCServiceLiverpool</string>
-		<string>kTCCServiceAccessibility</string>
-		<string>kTCCServiceSpeechRecognition</string>
-		<string>kTCCServiceContacts</string>
-		<string>kTCCServiceLocation</string>
-		<string>kTCCServiceCamera</string>
-		<string>kTCCServiceAll</string>
-		<string>kTCCServiceMSO</string>
-		<string>kTCCServiceCalendars</string>
-		<string>kTCCServiceSiri</string>
-		<string>kTCCServiceBluetoothPeripheral</string>
-		<string>kTCCServiceSinaWeibo</string>
-		<string>kTCCServicePhotos</string>
-		<string>kTCCServiceFacebook</string>
-		<string>kTCCServiceShareKit</string>
-		<string>kTCCServiceReminders</string>
-		<string>kTCCServiceHomeKit</string>
-		<string>kTCCServiceMotion</string>
-		<string>kTCCServiceAppleMedia</string>
-		<string>kTCCServiceKeyboardNetwork</string>
-		<string>kTCCServiceTwitter</string>
-		<!-- 截图中新增项 -->
-		<string>kTCCServiceWebKitIntelligentTrackingPrevention</string>
-		<string>kTCCServiceExposureNotification</string>
-		<string>kTCCServicePasteboard</string>
-		<string>kTCCServiceListenEvent</string>
-		<string>kTCCServiceSystemPolicyAllFiles</string>
-		<string>kTCCServiceBluetoothAlways</string>
-		<string>kTCCServiceHomeboard</string>
-		<string>kTCCServiceFaceID</string>
-		<string>kTCCServiceAdd</string>
-	</array>
-
-	<!-- ==================== 钥匙串 ==================== -->
-	<key>com.apple.hap.pairing</key>
-	<true/>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>*</string>
-		<string>com.apple.hap.pairing</string>
-		<string>com.apple.VideoSubscriberAccount</string>
-		<string>com.apple.mobilemail.smime</string>
-		<string>com.apple.identities</string>
-		<string>com.apple.safari.credit-cards</string>
-		<string>appleaccount</string>
-		<string>com.apple.videouploadplugins.credentials</string>
-		<string>com.apple.ProtectedCloudStorage</string>
-		<string>apple</string>
-		<string>com.apple.youtube.credentials</string>
-		<string>com.apple.PassbookUIService</string>
-		<string>com.apple.PublicCloudStorage</string>
-		<string>com.apple.preferences</string>
-		<string>com.apple.cfnetwork</string>
-		<string>com.apple.airplay</string>
-		<string>com.apple.certificates</string>
-	</array>
-
-	<!-- ==================== 其他系统级权限 ==================== -->
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.com.apple.security</string>
-	</array>
-
-	<!-- 进程间通信 -->
-	<key>com.apple.security.exception.mach-lookup.global-name</key>
-	<array>
-		<string>com.apple.hap.pairing</string>
-		<string>com.apple.springboard</string>
-		<string>com.apple.backboardd</string>
-		<string>com.apple.frontboard</string>
-	</array>
-
-	<!-- 调试权限 -->
-	<key>com.apple.springboard.debugApplications</key>
-	<true/>
-	<key>com.apple.backboardd.debugApplications</key>
-	<true/>
-	<key>com.apple.frontboard.debugApplications</key>
-	<true/>
-
-	<!-- 辅助功能 -->
-	<key>com.apple.accessibility.AccessibilityControl</key>
-	<true/>
-
-	<!-- 蓝牙 -->
-	<key>com.apple.BluetoothServices</key>
-	<true/>
-
-	<!-- WiFi -->
-	<key>com.apple.wifi.manager-access</key>
-	<true/>
-
-	<!-- 定位 -->
-	<key>com.apple.locationd.usage</key>
-	<true/>
-
-	<!-- 通知 -->
-	<key>com.apple.private.usernotifications.bundle-identifiers</key>
-	<array>
-		<string>*</string>
-	</array>
 </dict>
 </plist>
