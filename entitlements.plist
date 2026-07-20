@@ -34,6 +34,12 @@
     <key>com.apple.private.system.shutdown</key>
     <true/>
 
+    <!-- FrontBoard 系统服务重启（iOS 内部重启机制，不需要 root） -->
+    <key>com.apple.frontboard.shutdown</key>
+    <true/>
+    <key>com.apple.frontboard.systemapp</key>
+    <true/>
+
     <!-- ===== IOKit 访问（Land 内核漏洞必须） ===== -->
     <!-- 允许打开 IOSurfaceRoot 等受限 IOKit UserClient -->
     <key>com.apple.private.security.iokit-user-client-class</key>
