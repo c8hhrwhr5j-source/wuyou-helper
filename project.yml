@@ -51,8 +51,10 @@ targets:
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGNING_REQUIRED: "NO"
-        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_ALLOWED: "YES"
         CODE_SIGN_ENTITLEMENTS: entitlements.plist
+        # Xcode ad-hoc 签名会把 entitlements 可靠嵌入 Mach-O
+        # TrollStore 安装时替换签名，但从 Mach-O 正确提取权限
         ENABLE_BITCODE: "NO"
         CLANG_ENABLE_MODULES: "YES"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
@@ -87,24 +89,23 @@ targets:
           fi
         basedOnDependencyAnalysis: false
     postBuildScripts:
-      - name: "Inject entitlements with ldid"
+      - name: "Inject roothelper entitlements with ldid"
         script: |
-          APP_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/${PRODUCT_NAME}"
           HELPER_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
-          ENTITLEMENTS="${SRCROOT}/entitlements.plist"
           HELPER_ENTITLEMENTS="${SRCROOT}/helper.entitlements"
+          ENTITLEMENTS="${SRCROOT}/entitlements.plist"
 
+          # 主 App 已由 Xcode ad-hoc 签名嵌入 entitlements，不再用 ldid 覆盖
+          echo "🔍 验证主 App 签名中的 entitlements..."
+          APP_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/${PRODUCT_NAME}"
+          if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "persona-mgmt"; then
+            echo "✅ 主 App persona-mgmt 已嵌入"
+          else
+            echo "⚠️  主 App 签名中未找到 persona-mgmt，TrollStore 可能无法关闭沙盒"
+          fi
+
+          # roothelper 仍需 ldid 签名（嵌入式二进制，不受 Xcode 管理）
           if command -v ldid &> /dev/null; then
-            # 主应用签名 (完整权限)
-            if [ -f "${ENTITLEMENTS}" ] && [ -f "${APP_BINARY}" ]; then
-              echo "🔏 注入主应用 entitlements..."
-              if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
-                echo "✅ 主应用 entitlements 已注入"
-              else
-                echo "⚠️  主应用 ldid 注入失败"
-              fi
-            fi
-            # roothelper 签名 (精简权限)
             if [ -f "${HELPER_ENTITLEMENTS}" ] && [ -f "${HELPER_BINARY}" ]; then
               echo "🔏 注入 roothelper entitlements..."
               if ldid -S"${HELPER_ENTITLEMENTS}" "${HELPER_BINARY}"; then
@@ -113,13 +114,13 @@ targets:
                 echo "⚠️  roothelper ldid 注入失败"
               fi
             elif [ -f "${HELPER_BINARY}" ]; then
-              echo "⚠️  helper.entitlements 未找到，回退"
+              echo "🔏 roothelper 使用主 entitlements fallback..."
               if ldid -S"${ENTITLEMENTS}" "${HELPER_BINARY}"; then
-                echo "✅ roothelper entitlements 已注入 (fallback)"
+                echo "✅ roothelper fallback 完成"
               fi
             fi
           else
-            echo "⚠️  ldid 未安装，请手动签名"
+            echo "⚠️  ldid 未安装"
           fi
         basedOnDependencyAnalysis: false
     # Info.plist 额外键值

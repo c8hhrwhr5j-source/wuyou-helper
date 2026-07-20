@@ -114,9 +114,9 @@ chmod +x "${HELPER_DST}"
 echo "   ✅ roothelper 编译完成"
 
 # ========================================
-# Step 4: 注入 entitlements (关键步骤！)
+# Step 4: 验证 & 注入 entitlements
 # ========================================
-echo "[4/5] 注入 entitlements..."
+echo "[4/5] 验证 & 注入 entitlements..."
 
 APP_BINARY="${APP_DIR}/${PROJECT_NAME}"
 
@@ -134,24 +134,28 @@ if [ ! -f "${APP_BINARY}" ]; then
 fi
 
 if command -v ldid &> /dev/null; then
-    # 注入主应用 entitlements
-    echo "   🔏 注入主应用 entitlements..."
-    if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
-        echo "   ✅ 主应用 entitlements 已注入"
-    else
-        echo "   ⚠️  主应用 ldid 注入失败"
-    fi
-
-    # 验证 persona-mgmt 是否注入成功
-    echo "   🔍 验证 entitlements..."
+    # ===== 主 App：Xcode ad-hoc 签名已嵌入 entitlements，只做验证 =====
+    echo "   🔍 验证主 App 签名 (Xcode ad-hoc)..."
     if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "persona-mgmt"; then
-        echo "   ✅ persona-mgmt 已确认"
+        echo "   ✅ persona-mgmt 已嵌入"
     else
-        echo "   ⚠️  persona-mgmt 未找到，可能注入失败！"
+        echo "   ⚠️  persona-mgmt 未找到!"
+        echo "   ⚠️  Xcode 可能未正确嵌入 entitlements，TrollStore 安装后可能仍被沙盒"
+        echo "   尝试用 ldid 重新注入..."
+        if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
+            echo "   ✅ ldid 注入成功"
+        fi
     fi
 
-    # 注入 roothelper entitlements (独立精简权限)
-    echo "   🔏 注入 roothelper entitlements (helper.entitlements)..."
+    # 验证 no-sandbox
+    if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "no-sandbox"; then
+        echo "   ✅ no-sandbox 已嵌入"
+    else
+        echo "   ⚠️  no-sandbox 未找到!"
+    fi
+
+    # ===== roothelper: ldid 注入 (嵌入式二进制) =====
+    echo "   🔏 注入 roothelper entitlements..."
     if [ -f "${HELPER_ENTITLEMENTS}" ]; then
         if ldid -S"${HELPER_ENTITLEMENTS}" "${HELPER_DST}"; then
             echo "   ✅ roothelper entitlements 已注入"
