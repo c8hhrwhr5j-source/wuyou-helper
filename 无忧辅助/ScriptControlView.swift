@@ -11,7 +11,7 @@ struct ScriptControlView: View {
     @State private var scriptEnabled = false
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             ScrollView {
                 VStack(spacing: 24) {
 
@@ -137,6 +137,8 @@ struct FeaturePlaceholder: View {
     }
 }
 
-#Preview {
-    ScriptControlView()
+struct ScriptControlView_Previews: PreviewProvider {
+    static var previews: some View {
+        ScriptControlView()
+    }
 }

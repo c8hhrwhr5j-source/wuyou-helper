@@ -36,10 +36,12 @@ struct MainTabView: View {
                 }
                 .tag(2)
         }
-        .tint(.orange)
+        .accentColor(.orange)
     }
 }
 
-#Preview {
-    MainTabView()
+struct MainTabView_Previews: PreviewProvider {
+    static var previews: some View {
+        MainTabView()
+    }
 }
