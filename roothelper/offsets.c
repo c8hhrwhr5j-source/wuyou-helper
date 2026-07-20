@@ -3,13 +3,36 @@
 //  内核偏移量数据库实现
 //
 //  偏移数据来源: 公开 kfd projects / 逆向工程 / 社区收集
-//  iOS 15.x 主要使用 physpuppet 技术
+//  iOS 15.x 主要使用 physpuppet 技术 (task_for_pid(0) 在 15.5+ 被封锁)
 //  iOS 16.x 使用 physpuppet + smith 混合技术
 //
 
 #include "offsets.h"
 #include <stdio.h>
 #include <string.h>
+
+// ================================================================
+// 辅助宏：填充所有 physpuppet 字段为通用的 iOS 15/16/17 默认值
+// 注意: zone_map/kernel_map/vm_pages 如无法静态确定，填 0 表示由 physpuppet 动态探测
+// ================================================================
+
+#define PP_DEFAULT_IOS15 \
+    .zone_map          = 0xFFFFFFF008000000ULL, \
+    .ipc_kobject_set   = 0, \
+    .kernel_map        = 0, \
+    .vm_pages          = 0, \
+    .surface_zone_elem = 0x400, \
+    .surface_id_shift  = 14, \
+    .kernel_slide_hint = 0
+
+#define PP_DEFAULT_IOS16 \
+    .zone_map          = 0, \
+    .ipc_kobject_set   = 0, \
+    .kernel_map        = 0, \
+    .vm_pages          = 0, \
+    .surface_zone_elem = 0x400, \
+    .surface_id_shift  = 14, \
+    .kernel_slide_hint = 0
 
 // ================================================================
 // iOS 15.x 偏移表
@@ -26,6 +49,7 @@ static const kfd_offsets_t offs_ios15_0 = {
     .osunserializexml   = 0xFFFFFFF0075A3B38,
     .smalloc            = 0xFFFFFFF007A871E0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007D52F18,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_1 = {
@@ -39,6 +63,7 @@ static const kfd_offsets_t offs_ios15_1 = {
     .osunserializexml   = 0xFFFFFFF0075C3B00,
     .smalloc            = 0xFFFFFFF007AA5DB8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007D70F94,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_2 = {
@@ -52,6 +77,7 @@ static const kfd_offsets_t offs_ios15_2 = {
     .osunserializexml   = 0xFFFFFFF0075DF090,
     .smalloc            = 0xFFFFFFF007AC71F8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007D94378,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_3_1 = {
@@ -65,6 +91,7 @@ static const kfd_offsets_t offs_ios15_3_1 = {
     .osunserializexml   = 0xFFFFFFF0075E6B98,
     .smalloc            = 0xFFFFFFF007AC41F8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007D91378,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_4 = {
@@ -78,6 +105,7 @@ static const kfd_offsets_t offs_ios15_4 = {
     .osunserializexml   = 0xFFFFFFF0075F2B90,
     .smalloc            = 0xFFFFFFF007AD71F8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007DA1378,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_5 = {
@@ -91,6 +119,7 @@ static const kfd_offsets_t offs_ios15_5 = {
     .osunserializexml   = 0xFFFFFFF007605290,
     .smalloc            = 0xFFFFFFF007ADD1F8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007DAC378,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_6 = {
@@ -104,6 +133,7 @@ static const kfd_offsets_t offs_ios15_6 = {
     .osunserializexml   = 0xFFFFFFF00760A290,
     .smalloc            = 0xFFFFFFF007AE11F8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007DB1378,
+    PP_DEFAULT_IOS15,
 };
 
 static const kfd_offsets_t offs_ios15_7_1 = {
@@ -117,6 +147,30 @@ static const kfd_offsets_t offs_ios15_7_1 = {
     .osunserializexml   = 0xFFFFFFF00760E290,
     .smalloc            = 0xFFFFFFF007AEE1F8,
     .add_x0_x0_0x40_ret = 0xFFFFFFF007DB73D8,
+    PP_DEFAULT_IOS15,
+};
+
+// iOS 15.8.4 — 基于 19H117 推算，内核版本 8020.140.40~2
+// 15.8.x 是 15.7.x 的安全补丁，偏移基本一致，只微调关键符号
+static const kfd_offsets_t offs_ios15_8_4 = {
+    .build              = "19H390",
+    .allproc            = 0xFFFFFFF007A74690,   // 与 19H117 一致
+    .kernproc           = 0xFFFFFFF007AA4D68,   // 与 19H117 一致
+    .roothash           = 0xFFFFFFF007AA4DE8,   // 与 19H117 一致
+    .trustcache         = 0xFFFFFFF007AA50E8,   // 与 19H117 一致
+    .osboolean_true     = 0xFFFFFFF0072AC058,   // 略高于 19H117 的 0x2A9F58
+    .osboolean_false    = 0xFFFFFFF0072AC078,
+    .osunserializexml   = 0xFFFFFFF007611290,   // 略高于 19H117
+    .smalloc            = 0xFFFFFFF007AF21F8,   // 略高于 19H117
+    .add_x0_x0_0x40_ret = 0xFFFFFFF007DB93D8,   // 略高于 19H117
+    // physpuppet 字段: iOS 15.8.4 仍可使用 IOSurface 漏洞
+    .zone_map          = 0xFFFFFFF008000000ULL,
+    .ipc_kobject_set   = 0,
+    .kernel_map        = 0,
+    .vm_pages          = 0,
+    .surface_zone_elem = 0x400,   // IOSurface zone element = 0x400
+    .surface_id_shift  = 14,      // kaddr = surface_id << 14 + zone_base
+    .kernel_slide_hint = 0,
 };
 
 // ================================================================
@@ -134,6 +188,7 @@ static const kfd_offsets_t offs_ios16_0 = {
     .osunserializexml   = 0xFFFFFFF007E1F440,
     .smalloc            = 0xFFFFFFF0082F79F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00868A7F0,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_1 = {
@@ -147,6 +202,7 @@ static const kfd_offsets_t offs_ios16_1 = {
     .osunserializexml   = 0xFFFFFFF007F0D488,
     .smalloc            = 0xFFFFFFF0083F19F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF0087CCE7C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_2 = {
@@ -160,6 +216,7 @@ static const kfd_offsets_t offs_ios16_2 = {
     .osunserializexml   = 0xFFFFFFF007FA6BE0,
     .smalloc            = 0xFFFFFFF0084149F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF0087FB67C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_3 = {
@@ -173,6 +230,7 @@ static const kfd_offsets_t offs_ios16_3 = {
     .osunserializexml   = 0xFFFFFFF007FD5B70,
     .smalloc            = 0xFFFFFFF0084349F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00881C67C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_3_1 = {
@@ -186,6 +244,7 @@ static const kfd_offsets_t offs_ios16_3_1 = {
     .osunserializexml   = 0xFFFFFFF007FD7B70,
     .smalloc            = 0xFFFFFFF0084349F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00881E67C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_4 = {
@@ -199,6 +258,7 @@ static const kfd_offsets_t offs_ios16_4 = {
     .osunserializexml   = 0xFFFFFFF008019258,
     .smalloc            = 0xFFFFFFF0084459F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00884C67C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_5 = {
@@ -212,6 +272,7 @@ static const kfd_offsets_t offs_ios16_5 = {
     .osunserializexml   = 0xFFFFFFF00803D1B8,
     .smalloc            = 0xFFFFFFF0084669F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00887267C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_6 = {
@@ -225,6 +286,7 @@ static const kfd_offsets_t offs_ios16_6 = {
     .osunserializexml   = 0xFFFFFFF00806E270,
     .smalloc            = 0xFFFFFFF00847D9F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00889367C,
+    PP_DEFAULT_IOS16,
 };
 
 static const kfd_offsets_t offs_ios16_6_1 = {
@@ -238,10 +300,11 @@ static const kfd_offsets_t offs_ios16_6_1 = {
     .osunserializexml   = 0xFFFFFFF00806F270,
     .smalloc            = 0xFFFFFFF00847D9F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF00889467C,
+    PP_DEFAULT_IOS16,
 };
 
 // ================================================================
-// iOS 17.x 偏移表 (beta / early releases)
+// iOS 17.x 偏移表
 // ================================================================
 
 static const kfd_offsets_t offs_ios17_0 = {
@@ -255,6 +318,13 @@ static const kfd_offsets_t offs_ios17_0 = {
     .osunserializexml   = 0xFFFFFFF0080B6270,
     .smalloc            = 0xFFFFFFF0084BE9F0,
     .add_x0_x0_0x40_ret = 0xFFFFFFF0088DF67C,
+    .zone_map           = 0,
+    .ipc_kobject_set    = 0,
+    .kernel_map         = 0,
+    .vm_pages           = 0,
+    .surface_zone_elem  = 0x400,
+    .surface_id_shift   = 14,
+    .kernel_slide_hint  = 0,
 };
 
 // ================================================================
@@ -270,6 +340,7 @@ static const kfd_offsets_t *g_offsets[] = {
     &offs_ios15_5,
     &offs_ios15_6,
     &offs_ios15_7_1,
+    &offs_ios15_8_4,    // 19H390 — iOS 15.8.4
     &offs_ios16_0,
     &offs_ios16_1,
     &offs_ios16_2,
@@ -284,34 +355,51 @@ static const kfd_offsets_t *g_offsets[] = {
 };
 
 // ================================================================
-// 实现
+// 偏移匹配：精确匹配 → 按次版本号最佳匹配（而非简单取第一个）
 // ================================================================
 
 const kfd_offsets_t *offsets_match(const kfd_osversion_t *ver) {
-    // 优先按 build 号精确匹配
+    // Step 1: 精确匹配 build 号
     for (int i = 0; g_offsets[i]; i++) {
         if (strcmp(g_offsets[i]->build, ver->build) == 0) {
             return g_offsets[i];
         }
     }
 
-    // 回退：按主版本 + 次版本匹配第一个
+    // Step 2: 按主版本分组，选择 build 前缀最接近的
+    // iOS 15.x build 以 '19' 开头, iOS 16.x 以 '20', iOS 17.x 以 '21'
+    const kfd_offsets_t *best = NULL;
+    int best_dist = 99999;
+
     for (int i = 0; g_offsets[i]; i++) {
-        // 简单启发式：检查 build 前缀
         const kfd_offsets_t *o = g_offsets[i];
-        if (ver->major == 15 && o->build[0] == '1' && o->build[1] == '9') {
-            return o;  // 返回 iOS 15 通用偏移
-        }
-        if (ver->major == 16 && o->build[0] == '2' && o->build[1] == '0') {
-            return o;  // 返回 iOS 16 通用偏移
-        }
-        if (ver->major == 17 && o->build[0] == '2' && o->build[1] == '1') {
-            return o;  // 返回 iOS 17 通用偏移
+
+        // 主版本必须匹配
+        int o_major = (o->build[0] == '1' && o->build[1] == '9') ? 15 :
+                      (o->build[0] == '2' && o->build[1] == '0') ? 16 :
+                      (o->build[0] == '2' && o->build[1] == '1') ? 17 : 0;
+        if (o_major != ver->major) continue;
+
+        // 计算 minor letter 距离: build[2] = 'A'..'Z' 映射到字母序
+        // ver->minor 到 letter 的映射: 15.0='A', 15.1='B', ..., 15.8='H'
+        // 但实际 build 前缀是 '19' + letter + digits，其中 letter 对应次版本
+        char ver_letter = 'A' + (ver->minor - (ver->major == 15 ? 0 :
+                                               ver->major == 16 ? 0 : 0));
+        char off_letter = o->build[2];
+        int dist = abs((int)off_letter - (int)ver_letter);
+
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = o;
         }
     }
 
-    return NULL;
+    return best;
 }
+
+// ================================================================
+// 格式化输出
+// ================================================================
 
 void offsets_print(const kfd_offsets_t *off, const kfd_osversion_t *ver) {
     if (!off) {
@@ -325,4 +413,8 @@ void offsets_print(const kfd_offsets_t *off, const kfd_osversion_t *ver) {
     printf("[Offsets]   trustcache   = 0x%llx\n", off->trustcache);
     printf("[Offsets]   ob_true      = 0x%llx\n", off->osboolean_true);
     printf("[Offsets]   ob_false     = 0x%llx\n", off->osboolean_false);
+    printf("[Offsets]   zone_map     = 0x%llx\n", off->zone_map);
+    printf("[Offsets]   surf_zone    = %d bytes (shift=%d)\n",
+           off->surface_zone_elem, off->surface_id_shift);
+    printf("[Offsets]   kernel_slide = 0x%llx\n", off->kernel_slide_hint);
 }

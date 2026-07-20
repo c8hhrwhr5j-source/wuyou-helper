@@ -1,25 +1,24 @@
 //
 //  kfd.h
-//  iOS kernel fd exploit — task_for_pid(0) 内核内存读写提权
+//  iOS kernel exploit — 双路径内核提权
 //
-//  == 为什么用 task_for_pid(0) 而不是 physpuppet/smith/landa? ==
-//  TrollStore 签名的应用拥有以下关键 entitlements：
-//    - get-task-allow          → 允许 task_for_pid
-//    - platform-application    → 以 platform 身份运行
-//    - com.apple.system-task-ports → 允许获取内核 task 端口
-//  task_for_pid(0) 可以直接获取 kernel_task 的 mach port，
-//  然后通过 mach_vm_read / mach_vm_write 直接读写内核内存。
-//  不需要任何内核漏洞（physpuppet/smith/landa/cicuta_virosa），
-//  适用范围更广且不依赖系统版本。
+//  路径 1: task_for_pid(0) → Mach VM 直接读写
+//    适用 iOS 15.0-15.4.1。利用 TrollStore 注入的 system-task-ports
+//    权限直接获取 kernel_task 端口，通过 mach_vm_read/write 读写内核内存。
+//
+//  路径 2: physpuppet (IOSurface heap spray + pipe 劫持)
+//    适用 iOS 15.5-15.8.x（task_for_pid(0) 被内核封锁）。
+//    通过堆喷 IOSurface 控制 kalloc zone 布局，
+//    利用属性字典溢出劫持 pipe buffer 获得任意内核 r/w。
 //
 //  == 提权流程 ==
-//  1. task_for_pid(0) → kernel_task mach port
-//  2. kread64 / kwrite64 读写内核内存
-//  3. 遍历 allproc 链表找到目标进程的 proc 结构
-//  4. 修改 ucred.cr_uid/cr_ruid/cr_svuid/cr_groups[0] = 0
-//  5. setuid(0) 让用户态也感知 root
+//  1. kfd_init() → 版本检测 + 偏移匹配
+//  2. kfd_open() → 尝试路径1 → 失败则切换路径2
+//  3. kfd_get_root() → 遍历 allproc 找到当前 proc
+//  4. 修改 ucred.cr_uid/cr_ruid/cr_svuid/groups[0] = 0
+//  5. setuid(0) 让用户态同步感知 root
 //
-//  运行环境: TrollStore iOS 14-17, arm64
+//  运行环境: TrollStore iOS 15-17, arm64
 //
 
 #ifndef KFD_H

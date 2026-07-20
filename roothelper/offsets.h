@@ -25,6 +25,14 @@ typedef struct {
     uint64_t      osunserializexml;
     uint64_t      smalloc;
     uint64_t      add_x0_x0_0x40_ret;
+    // physpuppet 相关偏移 (用于 task_for_pid(0) 被封锁的场景)
+    uint64_t      zone_map;           // zone_map 地址
+    uint64_t      ipc_kobject_set;    // ipc_kobject_set 函数地址
+    uint64_t      kernel_map;         // kernel_map 地址
+    uint64_t      vm_pages;           // vm_page 数组基址 (或 vm_page.phys_page)
+    int           surface_zone_elem;  // IOSurface zone 元素大小
+    int           surface_id_shift;   // surface ID → 内核地址的位移
+    int           kernel_slide_hint;  // 内核 slide 估算值
 } kfd_offsets_t;
 
 // ---- 公开 API ----
