@@ -2,11 +2,12 @@
 //  RootHelper.swift
 //  无忧辅助
 //
-//  重启: spawn roothelper 子进程 → kfd_escalate 提权 → reboot(RB_AUTOBOOT) + system("/sbin/reboot")
+//  重启: 主进程 kfd 提权 → reboot(RB_AUTOBOOT) + system("/sbin/reboot")
 //  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行）
 //
-//  注意: Swift 主进程在 UID=501 下 setuid(0) 总是失败，
-//        必须通过 roothelper 子进程独立完成提权 + 重启。
+//  说明: 之前通过 roothelper 子进程提权，但 TrollStore 无法给嵌入式
+//        二进制正确签入 no-sandbox 等权限，导致 IOServiceOpen 被沙盒
+//        拒绝 (0xe00002e2)。现在改为由主进程直接调用 kfd 提权。
 //
 
 import Foundation
@@ -19,6 +20,18 @@ private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: Unsafe
 
 @_silgen_name("proc_name")
 private func _proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
+
+// kfd 内核提权接口 (roothelper/kfd.c 已编译进主 App)
+@_silgen_name("kfd_escalate")
+private func _kfd_escalate() -> Int32
+
+@_silgen_name("kfd_get_error")
+private func _kfd_get_error() -> UnsafePointer<CChar>?
+
+@_silgen_name("kfd_close")
+private func _kfd_close()
+
+private let RB_AUTOBOOT: Int32 = 0
 
 final class RootHelper {
     static let shared = RootHelper()
@@ -37,10 +50,27 @@ final class RootHelper {
 
     // MARK: - 重启
 
-    /// 调用 roothelper 子进程执行 kfd 提权 + 整机重启。
-    /// 先 kfd_escalate 提权到 root，再 system("/sbin/reboot") + reboot(RB_AUTOBOOT)。
+    /// 主进程直接执行 kfd 提权 → 整机重启。
     func reboot() -> Bool {
-        Log.shared.add("🔧 调用 roothelper reboot 命令发起重启")
+        Log.shared.add("========== 重启 ==========")
+        Log.shared.add("   当前 UID=\(getuid()) EUID=\(geteuid())")
+
+        // 已经在 root 状态，直接重启
+        if isRoot {
+            Log.shared.add("✅ 当前进程已是 root，直接调用 reboot()")
+            sync()
+            reboot(RB_AUTOBOOT)
+            return true
+        }
+
+        // 主进程直接 kfd 提权（避免 roothelper 被 TrollStore 沙盒化）
+        Log.shared.add("[reboot] 尝试主进程直接 kfd 提权...")
+        if kfdEscalateAndReboot() {
+            return true
+        }
+
+        // 回退：roothelper（如果主进程 kfd 因某种原因失败）
+        Log.shared.add("[reboot] 主进程直接提权失败，回退到 roothelper")
 
         guard let path = helperPath else {
             Log.shared.add("❌ roothelper 未找到，无法重启")
@@ -56,23 +86,62 @@ final class RootHelper {
         return success
     }
 
-    // MARK: - 提权（通过 roothelper 子进程）
+    /// 主进程直接调用 kfd 提权并立即 reboot。
+    /// 若 reboot() 成功，当前进程不会返回；否则返回 false。
+    private func kfdEscalateAndReboot() -> Bool {
+        let ret = _kfd_escalate()
+        if ret != 0 {
+            let err = _kfd_get_error()
+            let msg = err != nil ? String(cString: err!) : "unknown"
+            Log.shared.add("❌ 主进程 kfd 提权失败: \(msg)")
+            return false
+        }
+
+        Log.shared.add("✅ 主进程 kfd 提权成功，UID=\(getuid()) EUID=\(geteuid())")
+        setuid(0)
+        setgid(0)
+        sync()
+        Log.shared.add("[reboot] 调用 reboot(RB_AUTOBOOT)...")
+        reboot(RB_AUTOBOOT)
+        // reboot 成功不会返回
+        Log.shared.add("❌ reboot() 返回，errno=\(errno)")
+        return false
+    }
+
+    // MARK: - 提权
 
     func escalateToRoot() -> Bool {
         let uid = getuid(), euid = geteuid()
         Log.shared.add("🔑 请求提权 (UID=\(uid) EUID=\(euid))")
 
+        if isRoot {
+            Log.shared.add("✅ 当前进程已是 root")
+            return true
+        }
+
+        // 主进程直接 kfd
+        Log.shared.add("   尝试主进程直接 kfd...")
+        let ret = _kfd_escalate()
+        if ret == 0 {
+            let newUid = getuid(), newEuid = geteuid()
+            Log.shared.add("   主进程 kfd 成功，UID=\(newUid) EUID=\(newEuid)")
+            return newUid == 0 || newEuid == 0
+        } else {
+            let err = _kfd_get_error()
+            let msg = err != nil ? String(cString: err!) : "unknown"
+            Log.shared.add("❌ 主进程 kfd 失败: \(msg)")
+        }
+
+        // 回退：roothelper
         guard let path = helperPath else {
             Log.shared.add("❌ roothelper 未找到")
             return false
         }
 
-        // 步骤1: roothelper 子进程提权自身 + 尝试提权父进程 (Swift)
-        Log.shared.add("   调用 roothelper escalate ...")
+        Log.shared.add("   回退：调用 roothelper escalate ...")
         let code = spawnHelperRaw(path: path, command: "escalate")
         Log.shared.add("   roothelper escalate exitCode=\(code)")
 
-        // 步骤2: 重新检查当前进程的 UID
         let newUid = getuid(), newEuid = geteuid()
         Log.shared.add("   提权后: UID=\(newUid) EUID=\(newEuid)")
 
@@ -102,11 +171,11 @@ final class RootHelper {
         Log.shared.add("   isRoot=\(isRoot)")
         Log.shared.add("   helperPath=\(helperPath ?? "未找到")")
 
-        // 检查关键文件是否存在
-        let paths = ["/sbin/reboot", "/usr/sbin/shutdown", "/sbin/shutdown"]
+        // 检查主进程是否能看到系统文件（判断沙盒是否生效）
+        let paths = ["/sbin/reboot", "/usr/sbin/shutdown", "/sbin/shutdown", "/var/mobile"]
         for p in paths {
             let exists = FileManager.default.fileExists(atPath: p)
-            Log.shared.add("   \(p): \(exists ? "存在" : "不存在")")
+            Log.shared.add("   \(p): \(exists ? "存在" : "不存在/不可见")")
         }
     }
 

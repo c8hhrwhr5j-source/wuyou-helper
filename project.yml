@@ -39,6 +39,10 @@ targets:
     sources:
       - path: 无忧辅助
         type: group
+      - path: roothelper
+        type: group
+        excludes:
+          - "main.c"
     settings:
       base:
         INFOPLIST_FILE: 无忧辅助/Info.plist
@@ -54,8 +58,8 @@ targets:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
         SWIFT_STRICT_CONCURRENCY: "minimal"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # 将 roothelper 二进制嵌入 app bundle
-        # 需要先编译 roothelper: 见 build_helper.sh
+        # kfd / offsets 中直接使用了 IOKit / CoreFoundation
+        OTHER_LDFLAGS: "$(inherited) -framework IOKit -framework CoreFoundation"
     dependencies: []
     preBuildScripts:
       - name: "Copy roothelper"

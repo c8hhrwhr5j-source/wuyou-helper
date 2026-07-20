@@ -12,7 +12,7 @@ final class TrollRootManager {
         return RootHelper.shared.escalateToRoot()
     }
 
-    /// 整机重启：spawn roothelper reboot → kfd 提权 → /sbin/reboot → reboot() syscall
+    /// 整机重启：主进程 kfd 提权 → reboot() 系统调用（失败后回退 roothelper）
     func deviceReboot() -> Bool {
         return RootHelper.shared.reboot()
     }

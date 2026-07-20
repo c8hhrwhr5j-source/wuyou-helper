@@ -44,7 +44,7 @@ struct PhoneControlView: View {
                         // 重启手机按钮
                         ControlButton(
                             title: "重启设备",
-                            subtitle: "kfd 内核提权 → /sbin/reboot → reboot() syscall",
+                            subtitle: "主进程 kfd 提权 → reboot() syscall（失败回退 roothelper）",
                             icon: "arrow.triangle.2.circlepath",
                             color: .red,
                             isExecuting: isExecuting
@@ -83,7 +83,7 @@ struct PhoneControlView: View {
                     // ========== 状态信息 ==========
                     VStack(alignment: .leading, spacing: 12) {
                         InfoRow(label: "注销方式", value: "proc_listpids + kill(SIGKILL)")
-                        InfoRow(label: "重启方式", value: "kfd 内核提权 → system(\"/sbin/reboot\") → reboot()")
+                        InfoRow(label: "重启方式", value: "主进程 kfd → reboot()（失败回退 roothelper）")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
                         InfoRow(label: "适配版本", value: "iOS 15 ~ 18")
                     }
