@@ -224,11 +224,25 @@ static int dma_open_agx(void) {
         return -1;
     }
 
-    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &g_dc.agx_conn);
+    // AGX 的 IOServiceOpen 需要特定 type 值，遍历 0-8 尝试
+    kern_return_t kr = KERN_FAILURE;
+    int best_type = -1;
+    for (int t = 0; t <= 8; t++) {
+        io_connect_t test_conn = MACH_PORT_NULL;
+        kr = IOServiceOpen(svc, mach_task_self(), t, &test_conn);
+        if (kr == KERN_SUCCESS) {
+            g_dc.agx_conn = test_conn;
+            best_type = t;
+            LOG("[dmaFail] ✅ IOServiceOpen AGX 成功 type=%d conn=0x%x", t, test_conn);
+            break;
+        } else {
+            LOG("[dmaFail]   type=%d → kr=0x%x", t, kr);
+        }
+    }
     IOObjectRelease(svc);
 
-    if (kr != KERN_SUCCESS) {
-        LOG("[dmaFail] ❌ IOServiceOpen AGX 失败: kr=0x%x", kr);
+    if (best_type < 0) {
+        LOG("[dmaFail] ❌ IOServiceOpen AGX 全部 type 失败");
         return -1;
     }
 

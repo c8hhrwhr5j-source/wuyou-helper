@@ -42,6 +42,10 @@
         <string>IOAccelSharedUserClient2</string>
         <string>IOAccelSurface2</string>
         <string>IOAccelContext2</string>
+        <string>AGXDeviceUserClient</string>
+        <string>AGXSharedUserClient</string>
+        <string>IOGPUDeviceUserClient</string>
+        <string>IOGPUSharedUserClient</string>
     </array>
 
     <!-- 通用 IOKit 用户客户端访问 -->
