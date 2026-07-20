@@ -2,27 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ============================================================ -->
-	<!-- 无忧辅助 - TrollStore 完整权限 -->
-	<!-- ============================================================ -->
-	<!-- TrollStore 的 capability 检测逻辑（来自 TSAppInfo）：
-	     沙盒状态:  container-required / no-container / no-sandbox
-	     Root身份:  com.apple.private.persona-mgmt ← 显示"root"的关键!
-	     二进制执行: platform-application
-	     钥匙串:    keychain-access-groups
-	     隐私:      com.apple.private.tcc.allow
-	     容器:      com.apple.private.security.storage.AppDataContainers
-	-->
-
-	<!-- ===== 沙盒关闭 ===== -->
+	<!-- 关闭沙盒：必须且最优先 -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.security.no-container</key>
 	<true/>
-	<key>com.apple.private.security.container-required</key>
-	<false/>
 
-	<!-- ===== TrollStore 基础 ===== -->
+	<!-- TrollStore 运行基础 -->
 	<key>platform-application</key>
 	<true/>
 	<key>get-task-allow</key>
@@ -34,7 +20,7 @@
 	<key>com.apple.private.security.no-entitlements</key>
 	<true/>
 
-	<!-- ===== Root 提权（TrollStore 显示"root用户"的关键） ===== -->
+	<!-- Root 身份 / task_for_pid -->
 	<key>com.apple.private.persona-mgmt</key>
 	<true/>
 	<key>task_for_pid-allow</key>
@@ -42,54 +28,19 @@
 	<key>com.apple.system-task-ports</key>
 	<true/>
 
-	<!-- ===== 系统操作（重启/关机） ===== -->
+	<!-- 重启 / 关机 -->
 	<key>com.apple.private.security.system-actions</key>
 	<true/>
 	<key>com.apple.system.reboot</key>
 	<true/>
 	<key>com.apple.system.shutdown</key>
 	<true/>
-	<key>com.apple.SystemConfiguration.SCPreferences-write-access</key>
-	<array>
-		<string>com.apple.radios.plist</string>
-		<string>com.apple.wifi.plist</string>
-	</array>
 
-	<!-- ===== 容器访问 ===== -->
+	<!-- 容器/文件访问 -->
 	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
 
-	<!-- ===== 钥匙串访问 ===== -->
-	<key>keychain-access-groups</key>
-	<array>
-		<string>apple</string>
-		<string>com.apple.identities</string>
-		<string>com.apple.certificates</string>
-		<string>com.apple.private</string>
-		<string>com.apple.wifi.plist</string>
-	</array>
-	<key>com.apple.private.security.keychain.default-access-group</key>
-	<string>apple</string>
-
-	<!-- ===== 隐私权限 (TCC) ===== -->
-	<key>com.apple.private.tcc.allow</key>
-	<array>
-		<string>kTCCServiceAccessibility</string>
-		<string>kTCCServicePhotos</string>
-		<string>kTCCServiceCamera</string>
-		<string>kTCCServiceMicrophone</string>
-		<string>kTCCServiceBluetoothAlways</string>
-		<string>kTCCServiceLiverpool</string>
-		<string>kTCCServiceUbiquity</string>
-		<string>kTCCServiceWillow</string>
-		<string>kTCCServiceAddressBook</string>
-		<string>kTCCServiceCalendar</string>
-		<string>kTCCServiceReminders</string>
-		<string>kTCCServiceFileProviderDomain</string>
-		<string>kTCCServiceFileProviderPresence</string>
-	</array>
-
-	<!-- ===== 文件系统访问 ===== -->
+	<!-- 文件系统例外（兼容旧版 TrollStore 路径） -->
 	<key>com.apple.security.exception.files.absolute-path.read-only</key>
 	<array>
 		<string>/</string>
@@ -103,7 +54,7 @@
 		<string>/private/var/</string>
 	</array>
 
-	<!-- ===== 网络/进程/调试 ===== -->
+	<!-- 网络/进程 -->
 	<key>com.apple.security.network.client</key>
 	<true/>
 	<key>com.apple.security.network.server</key>
@@ -114,73 +65,34 @@
 	<array>
 		<string>com.apple.springboard.services</string>
 		<string>com.apple.backboardd</string>
-		<string>com.apple.mediaserverd</string>
-		<string>com.apple.assistantd</string>
-		<string>com.apple.mobile.MCInstall</string>
-		<string>com.apple.mobile.softwareupdated</string>
-		<string>com.apple.managedconfiguration.profiled</string>
-		<string>com.apple.purplebuddy</string>
-		<string>com.apple.dataaccess.dataaccessd</string>
+		<string>com.apple.springboard</string>
 	</array>
 	<key>com.apple.private.mach-lookup.persona</key>
 	<true/>
-	<key>com.apple.private.security.clear-library-validation</key>
-	<true/>
-	<key>com.apple.private.coreservices.canmaplsdatabase</key>
-	<true/>
 
-	<!-- ===== 调试 ===== -->
+	<!-- 调试/内存 -->
 	<key>com.apple.private.cs.debugger</key>
-	<true/>
-	<key>com.apple.private.cs.debugger.attach</key>
 	<true/>
 	<key>com.apple.private.memorystatus</key>
 	<true/>
-	<key>com.apple.private.alloy.nightly</key>
-	<true/>
-	<key>com.apple.private.corewifi</key>
-	<true/>
-	<key>com.apple.system.event</key>
-	<true/>
-	<key>com.apple.springboard.debugapplications</key>
-	<true/>
-	<key>com.apple.backboardd.launchapplications</key>
-	<true/>
 
-	<!-- ===== 后台执行 ===== -->
-	<key>com.apple.developer.background-processing</key>
-	<true/>
-	<key>com.apple.developer.networking.multipath</key>
-	<true/>
-	<key>com.apple.developer.networking.networkextension</key>
+	<!-- TCC 隐私 -->
+	<key>com.apple.private.tcc.allow</key>
 	<array>
-		<string>app-proxy-provider</string>
-		<string>content-filter-provider</string>
-		<string>dns-proxy</string>
+		<string>kTCCServiceAccessibility</string>
+		<string>kTCCServicePhotos</string>
+		<string>kTCCServiceCamera</string>
+		<string>kTCCServiceMicrophone</string>
+		<string>kTCCServiceBluetoothAlways</string>
 	</array>
 
-	<!-- ===== 位置/通知 ===== -->
-	<key>com.apple.locationd.authorizeapplications</key>
-	<true/>
-	<key>com.apple.locationd.effective_bundle</key>
-	<true/>
-
-	<!-- ===== Multitasking ===== -->
-	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
-	<string>com.apple.UIKit.pboard_grabber</string>
-	<key>com.apple.managedconfiguration.profiled-access</key>
-	<true/>
-	<key>com.apple.UIKit.virtualDisplay</key>
-	<true/>
-	<key>com.apple.UIKit.virtualDisplayMirroring</key>
-	<true/>
-
-	<!-- ===== 其他 ===== -->
-	<key>com.apple.assistantd.pommes</key>
-	<true/>
-	<key>com.apple.private.InstallCoordination</key>
-	<true/>
-	<key>com.apple.private.InstallCoordination.allowed</key>
-	<true/>
+	<!-- 钥匙串 -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>apple</string>
+		<string>com.apple.private</string>
+	</array>
+	<key>com.apple.private.security.keychain.default-access-group</key>
+	<string>apple</string>
 </dict>
 </plist>

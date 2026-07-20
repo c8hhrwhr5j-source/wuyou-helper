@@ -2,17 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ============================================================ -->
-	<!-- roothelper entitlements — 必须保持无沙盒，否则 kfd 打不开 IOKit -->
-	<!-- ============================================================ -->
-
 	<!-- 关闭沙盒：kfd 打开 IOSurfaceRoot / 调用 vm_remap / 操作 kernel 必须 -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.security.no-container</key>
 	<true/>
-	<key>com.apple.private.security.container-required</key>
-	<false/>
 
 	<!-- TrollStore 运行所需 -->
 	<key>platform-application</key>
