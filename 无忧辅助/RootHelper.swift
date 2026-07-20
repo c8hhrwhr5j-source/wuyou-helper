@@ -2,8 +2,11 @@
 //  RootHelper.swift
 //  无忧辅助
 //
-//  重启: spawn roothelper 子进程 → setuid(0) → kfd 提权 → reboot(RB_AUTOBOOT) → shutdown -r now
-//  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行，已验证可用）
+//  重启: spawn roothelper 子进程 → 子进程独立完成提权 + reboot(RB_AUTOBOOT)
+//  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行）
+//
+//  注意: Swift 主进程在 UID=501 下 setuid(0) 总是失败，
+//        必须通过 roothelper 子进程独立完成提权 + 重启。
 //
 
 import Foundation
@@ -32,120 +35,90 @@ final class RootHelper {
 
     private init() {}
 
-    // notify_post 系统通知发送函数（未公开）
-    @_silgen_name("notify_post")
-    private func _notify_post(_ name: UnsafePointer<CChar>) -> Int32
+    // MARK: - 重启
 
-    // reboot() 系统调用（RB_AUTOBOOT = 0）
-    @_silgen_name("reboot")
-    private func sys_reboot(_ howto: Int32) -> Int32
-
-    // MARK: - 重启（先 setuid(0) 提权 → reboot(0) 系统调用 → notify_post 回退）
-
+    /// 通过 spawn roothelper 子进程执行完整提权+重启流程。
+    /// Swift 主进程 UID=501 时 setuid(0) 永远失败，
+    /// 必须由独立的 roothelper C 子进程完成提权后调用 reboot(RB_AUTOBOOT)。
     func reboot() -> Bool {
         let uid = getuid(), euid = geteuid()
         Log.shared.add("🔔 请求重启 (UID=\(uid) EUID=\(euid))")
 
-        // 步骤1: 尝试 setuid(0) 提权
-        if uid != 0 {
-            Log.shared.add("   尝试 setuid(0) 提权...")
-            let s1 = seteuid(0)
-            let s2 = setuid(0)
-            let uidAfter = getuid()
-            Log.shared.add("   seteuid(0)=\(s1), setuid(0)=\(s2), uidAfter=\(uidAfter)")
-
-            if uidAfter == 0 {
-                Log.shared.add("✅ 提权成功，UID=0")
-            } else {
-                Log.shared.add("⚠️ 提权失败，仍 UID=\(uidAfter)")
-            }
-        }
-
-        // 步骤2: 如果已是 root，直接调用 reboot(0) 系统调用
-        if getuid() == 0 || geteuid() == 0 {
-            Log.shared.add("   直接调用 reboot(0) 系统调用...")
-            sync()
-            let ret = sys_reboot(0)  // RB_AUTOBOOT = 0
-            Log.shared.add("   reboot(0) => ret=\(ret) errno=\(errno)")
-            if ret == 0 {
-                Log.shared.add("✅ 重启指令已执行")
-                return true
-            }
-            Log.shared.add("   reboot(0) 失败，尝试 roothelper...")
-        }
-
-        // 步骤3: 通过 roothelper 子进程（独立提权 + reboot）
         guard let path = helperPath else {
             Log.shared.add("❌ roothelper 未找到，重启失败")
             return false
         }
 
-        Log.shared.add("   调用 roothelper reboot...")
+        Log.shared.add("   spawn roothelper reboot ...")
         let code = spawnHelperRaw(path: path, command: "reboot")
         Log.shared.add("   roothelper exitCode=\(code)")
+
         if code == 0 {
-            Log.shared.add("✅ roothelper 已执行重启")
+            Log.shared.add("✅ roothelper 重启流程已执行，设备即将重启...")
             return true
         }
 
-        // 步骤4: notify_post 最后回退（mobile 用户下通常无效，但保留）
-        Log.shared.add("   尝试 notify_post 双通知...")
-        _ = "com.apple.springboard.restartDevice".withCString { _notify_post($0) }
-        _ = "com.apple.system.reboot".withCString { _notify_post($0) }
-        Log.shared.add("   notify_post 已发送 (注意: UID=501 下通常无效)")
-
-        Log.shared.add("❌ 所有重启方式均已尝试")
+        Log.shared.add("❌ roothelper 重启失败 (exitCode=\(code))")
+        Log.shared.add("   可能原因:")
+        Log.shared.add("     1) setuid(0) 被系统拒绝 + kfd 不可用 (iOS 16.6+)")
+        Log.shared.add("     2) roothelper 签名/entitlements 缺失")
+        Log.shared.add("     3) offsets 不匹配当前 iOS 版本")
+        Log.shared.add("   请查看 [roothelper output] 获取详细原因")
         return false
     }
 
-    // MARK: - 提权到 root（先 setuid(0)，再 roothelper 子进程 fallback）
+    // MARK: - 提权（通过 roothelper 子进程）
 
     func escalateToRoot() -> Bool {
-        Log.shared.add("🔑 请求提权到 root (UID=\(getuid()))")
+        let uid = getuid(), euid = geteuid()
+        Log.shared.add("🔑 请求提权 (UID=\(uid) EUID=\(euid))")
 
-        // 策略1: 直接 setuid(0)（TrollStore 通常直接成功）
-        Log.shared.add("   尝试直接 setuid(0)...")
-        let s1 = seteuid(0)
-        let s2 = setuid(0)
-        let uid = getuid()
-        let euid = geteuid()
-        Log.shared.add("   setuid(0) result: uid=\(uid) euid=\(euid) s1=\(s1) s2=\(s2)")
-
-        if uid == 0 || euid == 0 {
-            Log.shared.add("✅ 直接 setuid(0) 成功，无需 roothelper")
-            return true
-        }
-        Log.shared.add("   ⚠️ setuid(0) 失败，尝试 roothelper 子进程...")
-
-        // 策略2: 通过 roothelper 子进程（含 kfd 内核修改）
         guard let path = helperPath else {
-            Log.shared.add("❌ roothelper 未找到，无法提权")
+            Log.shared.add("❌ roothelper 未找到")
             return false
         }
 
-        Log.shared.add("   调用 roothelper escalate (kfd 内核提权)...")
+        // 步骤1: roothelper 子进程提权自身 + 尝试提权父进程 (Swift)
+        Log.shared.add("   调用 roothelper escalate ...")
         let code = spawnHelperRaw(path: path, command: "escalate")
-        Log.shared.add("   roothelper return code=\(code)")
+        Log.shared.add("   roothelper escalate exitCode=\(code)")
 
-        // 检查主进程是否已 root（roothelper 可能通过 kfd 修改了父进程 ucred）
-        if getuid() == 0 || geteuid() == 0 {
-            Log.shared.add("✅ 主进程已提权为 root")
+        // 步骤2: 重新检查当前进程的 UID
+        let newUid = getuid(), newEuid = geteuid()
+        Log.shared.add("   提权后: UID=\(newUid) EUID=\(newEuid)")
+
+        if newUid == 0 || newEuid == 0 {
+            Log.shared.add("✅ 主进程已获得 root 权限")
             return true
         }
 
         if code == 0 {
-            Log.shared.add("⚠️ roothelper 返回成功但主进程 UID 未变，尝试再次 setuid...")
-            _ = setuid(0)
-            return getuid() == 0
+            Log.shared.add("⚠️ roothelper 子进程提权成功但父进程 UID 未变")
+            Log.shared.add("   这通常意味着 kfd_escalate_pid 未生效或 iOS 版本不支持")
         }
 
-        Log.shared.add("❌ roothelper 返回失败 (exitCode=\(code))")
         return false
     }
 
     /// 判断当前是否已是 root
     var isRoot: Bool {
         getuid() == 0 || geteuid() == 0
+    }
+
+    // MARK: - 诊断
+
+    func diagnoseRoot() {
+        Log.shared.add("========== 权限诊断 ==========")
+        Log.shared.add("   UID=\(getuid())  EUID=\(geteuid())  GID=\(getgid())  EGID=\(getegid())")
+        Log.shared.add("   isRoot=\(isRoot)")
+        Log.shared.add("   helperPath=\(helperPath ?? "未找到")")
+
+        // 检查关键文件是否存在
+        let paths = ["/sbin/reboot", "/usr/sbin/shutdown", "/sbin/shutdown"]
+        for p in paths {
+            let exists = FileManager.default.fileExists(atPath: p)
+            Log.shared.add("   \(p): \(exists ? "存在" : "不存在")")
+        }
     }
 
     // MARK: - 注销
@@ -227,11 +200,10 @@ final class RootHelper {
     // MARK: - spawn roothelper
 
     private func spawnHelper(path: String, command: String) -> Bool {
-        Log.shared.add("   spawnHelper cmd=\(command)")
         return spawnHelperRaw(path: path, command: command) == 0
     }
 
-    /// spawn roothelper 并返回 exit code，同时捕获 stdout/stderr 到日志
+    /// spawn roothelper 子进程，捕获 stdout/stderr 到日志。
     private func spawnHelperRaw(path: String, command: String) -> Int32 {
         Log.shared.add("   spawnHelperRaw cmd=\(command)")
 
@@ -258,7 +230,7 @@ final class RootHelper {
 
         let ret = posix_spawn(&pid, path, fileActions, nil, &argv, environ)
 
-        close(writeFd) // 父进程关闭写端
+        close(writeFd)
         posix_spawn_file_actions_destroy(&fileActions)
 
         if ret != 0 {
@@ -267,15 +239,15 @@ final class RootHelper {
             return -1
         }
 
-        // 在后台读取输出，避免阻塞
+        // 后台读取子进程输出
         var outputData = Data()
         let group = DispatchGroup()
         group.enter()
         DispatchQueue.global().async {
             defer { group.leave() }
-            var buffer = [UInt8](repeating: 0, count: 1024)
+            var buffer = [UInt8](repeating: 0, count: 4096)
             while true {
-                let n = read(readFd, &buffer, 1024)
+                let n = read(readFd, &buffer, 4096)
                 if n <= 0 { break }
                 outputData.append(buffer, count: n)
             }
@@ -286,8 +258,12 @@ final class RootHelper {
         waitpid(pid, &status, 0)
         group.wait()
 
+        // 打印子进程输出到日志
         if let output = String(data: outputData, encoding: .utf8), !output.isEmpty {
-            Log.shared.add("   [roothelper output]\n\(output)")
+            let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                Log.shared.add("   [roothelper]\n\(trimmed)")
+            }
         }
 
         if (status & 0o177) == 0 {
@@ -295,7 +271,7 @@ final class RootHelper {
             Log.shared.add("   exitCode=\(code)")
             return code
         }
-        Log.shared.add("   信号终止: \(status & 0o177)")
+        Log.shared.add("   信号终止: signal=\(status & 0o177)")
         return -1
     }
 }

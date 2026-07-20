@@ -2,18 +2,15 @@
 //  无忧辅助App.swift
 //  无忧辅助 - TrollStore IPA
 //
-// == 为什么启动时自动提权 ==
+// == 权限说明 ==
 //   TrollStore 安装的应用以 mobile 用户运行 (UID=501)，
-//   重启/关机等操作需要 root 权限。
-//   init() 中异步调用 roothelper escalate 子进程，
-//   roothelper 通过 setuid(0) / kfd (task_for_pid(0)) 修改内核 ucred.uid=0，
-//   实现整个应用进程的 root 提权。
-//   提权后 getuid()==0，后续所有 syscall 都具备 root 权限。
+//   在 UID=501 下 setuid(0) 永远被内核拒绝。
+//   重启操作通过 spawn roothelper 子进程完成：
+//   子进程独立尝试 setuid(0) → kfd 提权 → reboot(RB_AUTOBOOT)。
+//   子进程不受 Swift 主进程 UID 限制，可独立完成提权并触发重启。
 //
-// == 重启机制 ==
-//   Swift 端 reboot() spawn roothelper reboot 子进程，
-//   子进程内部: setuid(0) → kfd 提权 → sync() → reboot(RB_AUTOBOOT) → shutdown -r now
-//   子进程不受 Swift 进程 UID 限制，可独立完成提权并触发整机重启。
+// == 启动诊断 ==
+//   init() 中异步执行权限诊断，输出 UID/EUID/关键文件等信息到日志。
 //
 
 import SwiftUI
@@ -21,10 +18,9 @@ import SwiftUI
 @main
 struct 无忧辅助App: App {
     init() {
-        // 启动时自动提权（异步，不阻塞 UI）
-        // 用 static 方法避免 escaping 闭包捕获未初始化的 self
+        // 启动时异步执行权限诊断（不阻塞 UI）
         DispatchQueue.global(qos: .userInitiated).async {
-            Self.autoEscalateIfNeeded()
+            Self.startupDiagnostics()
         }
     }
 
@@ -34,29 +30,37 @@ struct 无忧辅助App: App {
         }
     }
 
-    // MARK: - 自动提权
+    // MARK: - 启动诊断
 
-    private static func autoEscalateIfNeeded() {
-        // 如果已经是 root，跳过
-        if RootHelper.shared.isRoot {
-            Log.shared.add("✅ 应用已以 root 运行 (UID=\(getuid()) EUID=\(geteuid()))")
-            return
-        }
+    private static func startupDiagnostics() {
+        Log.shared.add("===== 无忧辅助 启动 =====")
+        Log.shared.add("   UID=\(getuid())  EUID=\(geteuid())  GID=\(getgid())  EGID=\(getegid())")
 
-        Log.shared.add("🔑 应用启动，尝试提权到 root ...")
-        Log.shared.add("   当前 UID=\(getuid()) EUID=\(geteuid()) GID=\(getgid())")
+        // 检查 roothelper 是否存在
+        if let path = RootHelper.shared.helperPath {
+            Log.shared.add("   roothelper 已找到: \(path)")
 
-        let success = RootHelper.shared.escalateToRoot()
-
-        // 提权后重新检查权限
-        sleep(1)
-        Log.shared.add("   提权后: UID=\(getuid()) EUID=\(geteuid()) GID=\(getgid())")
-        if getuid() == 0 || geteuid() == 0 {
-            Log.shared.add("✅ 成功以 root 权限运行！")
-        } else if success {
-            Log.shared.add("⚠️ roothelper 提权成功但当前进程 UID 未变 (可能需要父进程提权)")
+            // 检查 roothelper 是否可执行
+            if FileManager.default.isExecutableFile(atPath: path) {
+                Log.shared.add("   roothelper 可执行 ✅")
+            } else {
+                Log.shared.add("   ⚠️ roothelper 不可执行！请检查编译和签名")
+            }
         } else {
-            Log.shared.add("⚠️ 自动提权未成功，重启等操作将经由 roothelper 子进程执行")
+            Log.shared.add("   ❌ roothelper 未嵌入 App Bundle！")
         }
+
+        // 检查关键系统文件
+        let paths = [
+            "/sbin/reboot",
+            "/usr/sbin/shutdown",
+            "/sbin/shutdown"
+        ]
+        for p in paths {
+            let exists = FileManager.default.fileExists(atPath: p)
+            Log.shared.add("   \(p): \(exists ? "存在" : "不存在")")
+        }
+
+        Log.shared.add("===== 启动诊断完成 =====")
     }
 }

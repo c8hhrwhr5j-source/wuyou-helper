@@ -89,7 +89,14 @@ static int find_pid_by_name(const char *name) {
 }
 
 // ============================================================
-// 1. 重启手机 — 先尝试 setuid(0) (TrollStore 通常直接成功)，再 fallback 到 kfd
+// 1. 重启手机 — 逐级回退策略
+//
+//   步骤1: setuid(0) — TrollStore 平台权限（通常直接成功）
+//   步骤2: kfd 内核提权 — 仅 iOS 15.x / 16.0-16.5 可用
+//   步骤3: 无论如何都尝试 reboot(RB_AUTOBOOT) —
+//          某些环境虽然拦截 setuid 但放行 reboot syscall
+//   步骤4: /usr/sbin/shutdown -r now
+//   步骤5: /sbin/reboot 直接调用
 // ============================================================
 static int cmd_reboot(void) {
     printf("\n");
@@ -98,85 +105,114 @@ static int cmd_reboot(void) {
     printf("========================================\n");
     print_info();
 
+    int tried_setuid = 0;
+    int tried_kfd = 0;
+    int is_root = 0;
+
     // ---- 步骤1: TrollStore 环境直接 setuid(0) ----
-    // platform-application + persona-mgmt + no-sandbox 通常可以直接 setuid(0)
-    // 不需要 kfd 内核漏洞（iOS 16.6+ / 17+ 上 kfd 已不可用）
     printf("\n[步骤1] 尝试 setuid(0) (TrollStore 平台权限)...\n");
     int r1 = seteuid(0);
     int r2 = setuid(0);
-    printf("[RootHelper] setuid(0)=%d seteuid(0)=%d => UID=%d EUID=%d\n",
-           r2, r1, getuid(), geteuid());
+    printf("[RootHelper] setuid(0)=%d seteuid(0)=%d => UID=%d EUID=%d errno=%d(%s)\n",
+           r2, r1, getuid(), geteuid(), errno, strerror(errno));
+    tried_setuid = 1;
 
-    int is_root = (getuid() == 0 || geteuid() == 0);
+    is_root = (getuid() == 0 || geteuid() == 0);
     if (is_root) {
-        printf("[RootHelper] ✅ setuid(0) 直接成功！跳过 kfd。\n");
+        printf("[RootHelper] ✅ setuid(0) 直接成功！UID=%d EUID=%d\n", getuid(), geteuid());
         goto do_reboot;
     }
-    printf("[RootHelper] ⚠️ setuid(0) 失败，继续尝试 kfd...\n");
+    printf("[RootHelper] ⚠️ setuid(0) 失败 (errno=%d: %s)\n", errno, strerror(errno));
 
     // ---- 步骤2: kfd 内核提权（仅适用于 iOS 15.x / 16.0-16.5）----
     printf("\n[步骤2] kfd 内核提权...\n");
 
     if (kfd_init() != 0) {
         printf("[RootHelper] kfd_init 失败: %s\n", kfd_get_error());
-        goto do_reboot;  // 即使没有 kfd，也尝试 reboot（如果 setuid 之前成功过）
-    }
-
-    if (kfd_open() != 0) {
+    } else if (kfd_open() != 0) {
         printf("[RootHelper] kfd_open 失败: %s\n", kfd_get_error());
-        goto do_reboot;
-    }
-
-    printf("[RootHelper] kfd 打开成功！\n");
-
-    if (kfd_get_root() == 0) {
-        printf("[RootHelper] ✅ kfd 提权成功！EUID=%d\n", geteuid());
-        is_root = 1;
     } else {
-        printf("[RootHelper] ⚠️  kfd_get_root 返回非零: %s\n", kfd_get_error());
-    }
+        printf("[RootHelper] kfd 打开成功！\n");
+        tried_kfd = 1;
 
-do_reboot:
+        if (kfd_get_root() == 0) {
+            printf("[RootHelper] ✅ kfd 提权成功！UID=%d EUID=%d\n", getuid(), geteuid());
+            is_root = 1;
+        } else {
+            printf("[RootHelper] ⚠️  kfd_get_root 返回非零: %s\n", kfd_get_error());
+            printf("[RootHelper]    当前 UID=%d EUID=%d\n", getuid(), geteuid());
+            // 即使 kfd_get_root 报错，也可能内核已修改
+            if (getuid() == 0 || geteuid() == 0) {
+                printf("[RootHelper]    但 UID/EUID 已经是 0，视为成功\n");
+                is_root = 1;
+            }
+        }
+    }
     kfd_close();
 
-    if (!is_root) {
-        printf("\n❌ 无法获得 root 权限，重启失败\n");
-        printf("   UID=%d EUID=%d\n", getuid(), geteuid());
-        printf("   可能原因：1) offsets 不匹配 2) iOS 16.6+ task_for_pid 被限制 3) setuid 被拒绝\n");
-        return -1;
-    }
+do_reboot:
+    printf("\n[RootHelper] 提权结果: is_root=%d  UID=%d  EUID=%d\n",
+           is_root, getuid(), geteuid());
 
-    printf("\n[RootHelper] ✅ 已获得 root 权限，执行重启...\n");
+    if (!is_root) {
+        printf("[RootHelper] ⚠️ 未获得 root 权限，但继续尝试重启...\n");
+        printf("   某些 TrollStore 环境虽然拦截 setuid(0) 但放行 reboot() syscall\n");
+    }
 
     // ---- 步骤3: 同步磁盘 ----
     printf("\n[步骤3] sync() 磁盘同步\n");
     sync();
 
-    // ---- 步骤4: reboot() 系统调用（最可靠） ----
+    // ---- 步骤4: reboot() 系统调用 ----
     printf("\n[步骤4] reboot(RB_AUTOBOOT) 系统调用...\n");
-    if (reboot(RB_AUTOBOOT) == 0) {
-        printf("[RootHelper] ✅ reboot() 成功返回\n");
-        sleep(2);
+    printf("[RootHelper] 调用前: UID=%d EUID=%d\n", getuid(), geteuid());
+    int rbreboot = reboot(RB_AUTOBOOT);
+    printf("[RootHelper] reboot() => ret=%d  errno=%d (%s)\n",
+           rbreboot, errno, strerror(errno));
+    if (rbreboot == 0) {
+        printf("[RootHelper] ✅ reboot() 成功返回，设备即将重启\n");
+        sleep(3);
         return 0;
     }
-    printf("[RootHelper] ⚠️  reboot() 失败: errno=%d (%s)\n", errno, strerror(errno));
 
     // ---- 步骤5: /usr/sbin/shutdown -r now ----
     printf("\n[步骤5] /usr/sbin/shutdown -r now\n");
     char *shutdown_argv[] = { "/usr/sbin/shutdown", "-r", "now", NULL };
     int ret = spawn_program("/usr/sbin/shutdown", shutdown_argv);
     printf("[RootHelper] shutdown => exit=%d\n", ret);
-
     if (ret == 0) {
         printf("[RootHelper] ✅ shutdown 命令已执行\n");
         sleep(2);
         return 0;
     }
 
-    // ---- 全都失败 ----
-    printf("\n❌ 所有重启策略均失败\n");
-    printf("   UID=%d  EUID=%d\n", getuid(), geteuid());
+    // ---- 步骤6: /sbin/reboot 直接调用 ----
+    printf("\n[步骤6] /sbin/reboot 直接调用\n");
+    char *reboot_argv[] = { "/sbin/reboot", NULL };
+    ret = spawn_program("/sbin/reboot", reboot_argv);
+    printf("[RootHelper] /sbin/reboot => exit=%d\n", ret);
+    if (ret == 0) {
+        printf("[RootHelper] ✅ /sbin/reboot 已执行\n");
+        sleep(2);
+        return 0;
+    }
+
+    // ---- 全部失败 ----
+    printf("\n");
+    printf("========================================\n");
+    printf("  ❌ 所有重启策略均失败\n");
+    printf("========================================\n");
+    printf("  诊断信息:\n");
     print_info();
+    printf("  setuid(0) 尝试过: %s\n", tried_setuid ? "是" : "否");
+    printf("  kfd 提权尝试过:  %s\n", tried_kfd ? "是" : "否");
+    printf("  errno=%d: %s\n", errno, strerror(errno));
+    printf("\n  可能原因:\n");
+    printf("  1) roothelper 签名/entitlements 缺失 get-task-allow + platform-application\n");
+    printf("  2) iOS 版本 >= 16.6 且 task_for_pid(0) 被系统限制\n");
+    printf("  3) offsets 不匹配当前 iOS build 号\n");
+    printf("  4) reboot() syscall 被内核彻底封杀\n");
+    printf("========================================\n");
     return -1;
 }
 
