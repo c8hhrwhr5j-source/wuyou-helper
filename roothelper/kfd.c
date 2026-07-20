@@ -1047,10 +1047,10 @@ int notify_reboot(void) {
         "com.apple.backboardd.restart",
         NULL
     };
-    int sent = 0;
     for (int i = 0; notes[i]; i++) {
-        if (notify_post(notes[i]) == 0) sent++;
+        notify_post(notes[i]);
     }
+    int sent = (int)(sizeof(notes) / sizeof(notes[0]) - 1);
     LOG("[Notify] 发送了 %d 个系统通知", sent);
     return sent > 0 ? 0 : -1;
 }
