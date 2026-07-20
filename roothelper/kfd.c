@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -38,6 +39,16 @@
 #include <IOKit/IOKitKeys.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+
+// ObjC runtime 前向声明 — kfd.c 是纯 C 文件，不能直接 #import <objc/...>
+// 但这些函数都是 C ABI 的，前向声明完全正确
+typedef void* id_ptr;
+typedef void* Class_ptr;
+typedef void* SEL_ptr;
+extern id_ptr objc_msgSend(id_ptr self, SEL_ptr op, ...);
+extern Class_ptr objc_getClass(const char *name);
+extern SEL_ptr sel_registerName(const char *str);
+extern void notify_post(const char *name);
 
 // ============================================================
 // mach_vm 手动声明
@@ -916,4 +927,130 @@ int kfd_escalate_pid(pid_t pid) {
     }
     SETERR("未找到 PID=%d", pid);
     return -1;
+}
+
+// ============================================================
+// FrontBoard 系统重启 — 纯 C 实现，使用 objc_msgSend (arm64e PAC 安全)
+// 注意: kfd.c 是 .c 文件，不能使用 ObjC 语法（方括号、id/Class/SEL 类型）
+//       所有 ObjC 消息调用都通过 objc_msgSend 函数指针完成
+// ============================================================
+
+/// 通过 FBSSystemService.shutdownWithOptions: 触发重启
+/// 返回 0=成功发送, -1=失败
+int fb_shutdown_reboot(void) {
+    void *handle = dlopen(
+        "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
+        RTLD_NOW);
+    if (!handle) {
+        LOG("[FB] dlopen 失败: %s", dlerror());
+        return -1;
+    }
+
+    Class_ptr cls = objc_getClass("FBSSystemService");
+    if (!cls) {
+        LOG("[FB] FBSSystemService 类未找到");
+        dlclose(handle);
+        return -1;
+    }
+
+    SEL_ptr sharedSel = sel_registerName("sharedService");
+    SEL_ptr respSel = sel_registerName("respondsToSelector:");
+    if (!((bool (*)(Class_ptr, SEL_ptr, SEL_ptr))objc_msgSend)(cls, respSel, sharedSel)) {
+        LOG("[FB] +sharedService 不存在");
+        dlclose(handle);
+        return -1;
+    }
+
+    id_ptr service = ((id_ptr (*)(Class_ptr, SEL_ptr))objc_msgSend)(cls, sharedSel);
+    if (!service) {
+        LOG("[FB] sharedService 返回 nil");
+        dlclose(handle);
+        return -1;
+    }
+
+    SEL_ptr shutdownSel = sel_registerName("shutdownWithOptions:");
+    if (!((bool (*)(id_ptr, SEL_ptr, SEL_ptr))objc_msgSend)(service, respSel, shutdownSel)) {
+        LOG("[FB] -shutdownWithOptions: 不存在，尝试 reboot");
+        // 尝试无参数 reboot
+        SEL_ptr rebootSel = sel_registerName("reboot");
+        if (((bool (*)(id_ptr, SEL_ptr, SEL_ptr))objc_msgSend)(service, respSel, rebootSel)) {
+            LOG("[FB] 调用 FBSSystemService.reboot");
+            ((void (*)(id_ptr, SEL_ptr))objc_msgSend)(service, rebootSel);
+            LOG("[FB] reboot 已发送");
+            return 0;
+        }
+        dlclose(handle);
+        return -1;
+    }
+
+    LOG("[FB] 调用 shutdownWithOptions:1 (reboot)");
+    ((void (*)(id_ptr, SEL_ptr, unsigned long))objc_msgSend)(service, shutdownSel, 1);
+    LOG("[FB] shutdownWithOptions: 已发送");
+
+    // 不关闭 handle — 让 XPC 回调有机会工作
+    return 0;
+}
+
+/// 通过 SpringBoardServices 触发重启
+int sbs_restart(void) {
+    void *handle = dlopen(
+        "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+        RTLD_NOW);
+    if (!handle) {
+        LOG("[SBS] dlopen 失败: %s", dlerror());
+        return -1;
+    }
+
+    Class_ptr sbsCls = objc_getClass("SBSSystemService");
+    if (!sbsCls) {
+        LOG("[SBS] SBSSystemService 类未找到");
+        dlclose(handle);
+        return -1;
+    }
+
+    SEL_ptr sharedSel = sel_registerName("sharedInstance");
+    SEL_ptr respSel = sel_registerName("respondsToSelector:");
+    if (!((bool (*)(Class_ptr, SEL_ptr, SEL_ptr))objc_msgSend)(sbsCls, respSel, sharedSel)) {
+        LOG("[SBS] +sharedInstance 不存在");
+        dlclose(handle);
+        return -1;
+    }
+
+    id_ptr inst = ((id_ptr (*)(Class_ptr, SEL_ptr))objc_msgSend)(sbsCls, sharedSel);
+    if (!inst) {
+        LOG("[SBS] sharedInstance 返回 nil");
+        dlclose(handle);
+        return -1;
+    }
+
+    const char *names[] = {"reboot", "restart", "shutdown", NULL};
+    for (int i = 0; names[i]; i++) {
+        SEL_ptr sel = sel_registerName(names[i]);
+        if (((bool (*)(id_ptr, SEL_ptr, SEL_ptr))objc_msgSend)(inst, respSel, sel)) {
+            LOG("[SBS] 调用 SBSSystemService.%s", names[i]);
+            ((void (*)(id_ptr, SEL_ptr))objc_msgSend)(inst, sel);
+            return 0;
+        }
+    }
+
+    dlclose(handle);
+    LOG("[SBS] 未找到可用的重启方法");
+    return -1;
+}
+
+/// 发送系统级 Darwin 通知尝试触发重启
+int notify_reboot(void) {
+    const char *notes[] = {
+        "com.apple.springboard.restart",
+        "com.apple.springboard.reload",
+        "com.apple.system.restart",
+        "com.apple.backboardd.restart",
+        NULL
+    };
+    int sent = 0;
+    for (int i = 0; notes[i]; i++) {
+        if (notify_post(notes[i]) == 0) sent++;
+    }
+    LOG("[Notify] 发送了 %d 个系统通知", sent);
+    return sent > 0 ? 0 : -1;
 }

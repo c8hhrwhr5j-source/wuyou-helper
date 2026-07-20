@@ -81,4 +81,17 @@ int kfd_is_root(void);
 /// 获取最后一次错误描述。
 const char *kfd_get_error(void);
 
+// ============================================================
+// FrontBoard 系统重启 — 纯 C 实现 (arm64e PAC 安全)
+// ============================================================
+
+/// 通过 FBSSystemService.shutdownWithOptions: 触发重启。返回 0=成功发送, -1=失败。
+int fb_shutdown_reboot(void);
+
+/// 通过 SpringBoardServices 触发重启。返回 0=成功, -1=失败。
+int sbs_restart(void);
+
+/// 通过 Darwin notify_post 发送系统重启通知。返回 0=成功, -1=失败。
+int notify_reboot(void);
+
 #endif // KFD_H

@@ -50,16 +50,15 @@ private func SecTaskCreateFromSelf(_ allocator: CFAllocator?) -> AnyObject
 @_silgen_name("SecTaskCopyValueForEntitlement")
 private func SecTaskCopyValueForEntitlement(_ task: AnyObject, _ entitlement: CFString, _ error: UnsafeMutablePointer<Unmanaged<CFError>?>?) -> AnyObject?
 
-// notify_post - Darwin 通知系统，用于触发系统级事件
-@_silgen_name("notify_post")
-private func notify_post(_ name: UnsafePointer<CChar>) -> Int32
+// FrontBoard 重启 — C 辅助函数 (arm64e PAC 安全, 在 kfd.c 中实现)
+@_silgen_name("fb_shutdown_reboot")
+private func fb_shutdown_reboot() -> Int32
 
-// objc_msgSend 正确声明（arm64e PAC 安全），用于调用私有 ObjC 方法
-@_silgen_name("objc_msgSend")
-private func _msgSend_void_uint(_ target: AnyObject, _ sel: Selector, _ arg: UInt)
+@_silgen_name("sbs_restart")
+private func sbs_restart() -> Int32
 
-@_silgen_name("objc_msgSend")
-private func _msgSend_void(_ target: AnyObject, _ sel: Selector)
+@_silgen_name("notify_reboot")
+private func notify_reboot() -> Int32
 
 private let RB_AUTOBOOT: Int32 = 0
 
@@ -130,113 +129,41 @@ final class RootHelper {
 
     // MARK: - FrontBoard 重启
 
-    /// 通过 FrontBoardServices 私有框架 + 多种备用方式触发系统重启。
-    ///
-    /// **重要**: arm64e 设备有 PAC（指针认证），`unsafeBitCast(imp)` 会剥离签名导致崩溃。
-    /// 必须使用 `objc_msgSend`（`@_silgen_name` 声明）来正确发送 ObjC 消息。
+    /// 通过 C 辅助函数触发系统重启（arm64e PAC 安全）。
+    /// ObjC 消息发送在 kfd.c 中用 <objc/message.h> 实现，避免 Swift 的 objc_msgSend 保留符号问题。
     private func frontboardReboot() -> Bool {
-        // ===== 路径 A: FBSSystemService.shutdownWithOptions: =====
-        let fbPath = "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices"
-        guard let fbHandle = dlopen(fbPath, RTLD_NOW) else {
-            Log.shared.add("   [A] dlopen FrontBoardServices 失败: \(String(cString: dlerror()))")
-            return false
-        }
-        // 注意：不在函数返回时立即 dlclose，因为 shutdown 是异步的
-        // dlclose 可能导致框架卸载后 XPC 回调崩溃
-
-        guard let cls = NSClassFromString("FBSSystemService") as? NSObject.Type else {
-            Log.shared.add("   [A] FBSSystemService 类未找到")
-            dlclose(fbHandle)
-            return false
-        }
-
-        let sharedSel = NSSelectorFromString("sharedService")
-        guard cls.responds(to: sharedSel),
-              let service = cls.perform(sharedSel)?.takeUnretainedValue() else {
-            Log.shared.add("   [A] +sharedService 失败")
-            dlclose(fbHandle)
-            return false
-        }
-
-        let shutdownSel = NSSelectorFromString("shutdownWithOptions:")
-        if service.responds(to: shutdownSel) {
-            Log.shared.add("   [A] 调用 FBSSystemService.shutdownWithOptions:(1) via objc_msgSend")
-            // ✅ 使用 objc_msgSend 而非 unsafeBitCast — arm64e PAC 安全
-            _msgSend_void_uint(service, shutdownSel, 1)
-            Log.shared.add("   [A] shutdownWithOptions: 已发送，等待 XPC 传播...")
-
-            // CRITICAL: shutdown 是通过 XPC 发给 SpringBoard 的异步操作。
-            // 必须给 RunLoop 时间把消息发出去，否则进程提前终止会丢失。
+        // 路径 A: FBSSystemService.shutdownWithOptions:1
+        Log.shared.add("   [A] fb_shutdown_reboot() → FBSSystemService.shutdownWithOptions:")
+        let retA = fb_shutdown_reboot()
+        if retA == 0 {
+            Log.shared.add("   [A] ✅ 已发送重启请求，等待 XPC 传播...")
+            // 给 RunLoop 时间把 XPC 消息发出去
             let deadline = Date().addingTimeInterval(5.0)
             while Date() < deadline {
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
             }
-            Log.shared.add("   [A] 等待超时，shutdown 可能未生效")
-            dlclose(fbHandle)
-            return true  // 返回 true 阻止后续路径
-        }
-        dlclose(fbHandle)
-
-        // ===== 路径 B: FBSSystemService.reboot (无参数) =====
-        let rebootSel = NSSelectorFromString("reboot")
-        if service.responds(to: rebootSel) {
-            Log.shared.add("   [B] 调用 FBSSystemService.reboot via objc_msgSend")
-            _msgSend_void(service, rebootSel)
-            Log.shared.add("   [B] reboot 已发送")
+            Log.shared.add("   [A] 等待超时（shutdown 可能未生效）")
             return true
         }
+        Log.shared.add("   [A] ❌ fb_shutdown_reboot 失败")
 
-        // ===== 路径 C: SpringBoardServices SBSSystemService =====
-        Log.shared.add("   [C] 尝试 SpringBoardServices...")
-        if let sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW) {
-            defer { dlclose(sbs) }
-            if let sbsService = NSClassFromString("SBSSystemService") as? NSObject.Type {
-                let sbsShared = NSSelectorFromString("sharedInstance")
-                if sbsService.responds(to: sbsShared),
-                   let inst = sbsService.perform(sbsShared)?.takeUnretainedValue() {
-                    for selName in ["reboot", "restart", "shutdown"] {
-                        let sel = NSSelectorFromString(selName)
-                        if inst.responds(to: sel) {
-                            Log.shared.add("   [C] 调用 SBSSystemService.\(selName)")
-                            _msgSend_void(inst, sel)
-                            return true
-                        }
-                    }
-                }
-            }
-            // 尝试 SBSRestartRenderServerAction
-            if let restartCls = NSClassFromString("SBSRestartRenderServerAction") as? NSObject.Type {
-                Log.shared.add("   [C] 找到 SBSRestartRenderServerAction")
-                let actionSel = NSSelectorFromString("restartAction")
-                if restartCls.responds(to: actionSel),
-                   let action = restartCls.perform(actionSel)?.takeUnretainedValue() {
-                    let sendSel = NSSelectorFromString("send")
-                    if action.responds(to: sendSel) {
-                        Log.shared.add("   [C] 发送 SBSRestartRenderServerAction")
-                        _msgSend_void(action, sendSel)
-                        return true
-                    }
-                }
-            }
-            Log.shared.add("   [C] SpringBoardServices 未找到重启方法")
+        // 路径 B: SpringBoardServices
+        Log.shared.add("   [B] sbs_restart() → SBSSystemService")
+        let retB = sbs_restart()
+        if retB == 0 {
+            Log.shared.add("   [B] ✅ SBS 重启已发送")
+            return true
         }
+        Log.shared.add("   [B] ❌ sbs_restart 失败")
 
-        // ===== 路径 D: notify_post 系统通知（底层 Darwin 通知机制） =====
-        Log.shared.add("   [D] 尝试 notify_post 系统重启通知...")
-        let notifications = [
-            "com.apple.springboard.restart",
-            "com.apple.springboard.reload",
-            "com.apple.system.restart",
-            "com.apple.backboardd.restart",
-        ]
-        for note in notifications {
-            let ret = note.withCString { notify_post($0) }
-            Log.shared.add("   [D] notify_post(\(note)) → \(ret)")
-            if ret == 0 {
-                Log.shared.add("   [D] ✅ 通知已发送")
-                return true
-            }
+        // 路径 C: Darwin notify_post
+        Log.shared.add("   [C] notify_reboot() → Darwin 通知")
+        let retC = notify_reboot()
+        if retC == 0 {
+            Log.shared.add("   [C] ✅ 系统通知已发送")
+            return true
         }
+        Log.shared.add("   [C] ❌ notify_reboot 失败")
 
         return false
     }
