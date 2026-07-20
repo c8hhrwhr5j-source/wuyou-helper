@@ -173,6 +173,24 @@ do_reboot:
         return 0;
     }
 
+    // ---- 步骤6: system("reboot") — 用户建议的简化方式 ----
+    printf("\n[步骤6] system(\"reboot\")\n");
+    ret = system("reboot");
+    printf("[RootHelper] system(reboot) => ret=%d\n", ret);
+    if (ret != -1) {
+        sleep(2);
+        return 0;
+    }
+
+    // ---- 步骤7: system("/usr/sbin/reboot") ----
+    printf("\n[步骤7] system(\"/usr/sbin/reboot\")\n");
+    ret = system("/usr/sbin/reboot");
+    printf("[RootHelper] system(/usr/sbin/reboot) => ret=%d\n", ret);
+    if (ret != -1) {
+        sleep(2);
+        return 0;
+    }
+
     // ---- 全都失败 ----
     printf("\n❌ 所有重启策略均失败\n");
     printf("   UID=%d  EUID=%d\n", getuid(), geteuid());
