@@ -22,8 +22,20 @@ private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: Unsafe
 private func _proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
 
 // kfd 内核提权接口 (roothelper/kfd.c 已编译进主 App)
+@_silgen_name("kfd_init")
+private func _kfd_init() -> Int32
+
+@_silgen_name("kfd_open")
+private func _kfd_open() -> Int32
+
+@_silgen_name("kfd_get_root")
+private func _kfd_get_root() -> Int32
+
 @_silgen_name("kfd_escalate")
 private func _kfd_escalate() -> Int32
+
+@_silgen_name("kfd_is_root")
+private func _kfd_is_root() -> Int32
 
 @_silgen_name("kfd_get_error")
 private func _kfd_get_error() -> UnsafePointer<CChar>?
@@ -199,6 +211,11 @@ final class RootHelper {
         Log.shared.add("")
         Log.shared.add("--- 实战测试：setuid(0) ---")
         testSetuid()
+
+        // ==== KFD 内核漏洞测试 ====
+        Log.shared.add("")
+        Log.shared.add("--- KFD 内核漏洞测试 ---")
+        testKfd()
     }
 
     // MARK: - setuid(0) 实战测试
@@ -237,6 +254,82 @@ final class RootHelper {
             Log.shared.add("   → persona-mgmt 虽然被内核识别，但 setuid 被拒绝")
             Log.shared.add("   → 这是 iOS 15.8.4 运行时限制，与 entitlements 无关")
         }
+    }
+
+    // MARK: - KFD 内核漏洞测试
+
+    /// 分步测试 kfd 内核漏洞利用链
+    /// 注意：kfd 可能触发内核 panic/重启，每一步都独立打印结果
+    private func testKfd() {
+        // ---- Step 1: kfd_init ----
+        Log.shared.add("[1/4] kfd_init() 初始化漏洞链...")
+        let initRet = _kfd_init()
+        if initRet != 0 {
+            let err = _kfd_get_error()
+            let msg = err != nil ? String(cString: err!) : "unknown"
+            Log.shared.add("   ❌ kfd_init 失败: \(msg) (ret=\(initRet))")
+            return
+        }
+        Log.shared.add("   ✅ kfd_init 成功")
+
+        // ---- Step 2: kfd_open ----
+        Log.shared.add("[2/4] kfd_open() 打开内核读/写...")
+        let openRet = _kfd_open()
+        if openRet != 0 {
+            let err = _kfd_get_error()
+            let msg = err != nil ? String(cString: err!) : "unknown"
+            Log.shared.add("   ❌ kfd_open 失败: \(msg) (ret=\(openRet))")
+            Log.shared.add("   → 当前内核版本不支持该漏洞利用方法")
+            _kfd_close()
+            return
+        }
+        Log.shared.add("   ✅ kfd_open 成功！内核 r/w 已获得")
+
+        // ---- Step 3: kfd_is_root (检查我们的 proc 是否已经是 root) ----
+        Log.shared.add("[3/4] kfd_is_root() 检测当前进程状态...")
+        let rootBefore = _kfd_is_root()
+        Log.shared.add("   当前进程 root 状态: \(rootBefore) (0=否, 1=是)")
+
+        // ---- Step 4: kfd_get_root ----
+        Log.shared.add("[4/4] kfd_get_root() 利用内核写提升进程为 root...")
+        let rootRet = _kfd_get_root()
+        if rootRet != 0 {
+            let err = _kfd_get_error()
+            let msg = err != nil ? String(cString: err!) : "unknown"
+            Log.shared.add("   ❌ kfd_get_root 失败: \(msg) (ret=\(rootRet))")
+            _kfd_close()
+            return
+        }
+
+        // 检查提权后状态
+        let rootAfter = _kfd_is_root()
+        let afterUid = getuid()
+        let afterEuid = geteuid()
+        Log.shared.add("   提权后 root 状态: \(rootAfter)")
+        Log.shared.add("   提权后 UID=\(afterUid) EUID=\(afterEuid)")
+
+        if afterUid == 0 || afterEuid == 0 || rootAfter == 1 {
+            Log.shared.add("   ✅ KFD 提权成功！进程已 root")
+
+            // 验证：root 后检查文件可见性
+            let testPaths = ["/sbin/reboot", "/etc/master.passwd"]
+            for p in testPaths {
+                let acc = access(p, Int32(F_OK))
+                Log.shared.add("   (root) access(\(p), F_OK)=\(acc)")
+                if acc == 0 {
+                    // 如果文件存在，尝试 stat 读取详情
+                    var st = stat()
+                    if stat(p, &st) == 0 {
+                        Log.shared.add("         size=\(st.st_size) mode=\(String(st.st_mode, radix: 8))")
+                    }
+                }
+            }
+        } else {
+            Log.shared.add("   ❌ KFD 提权失败：内核写成功但 UID 未变化")
+        }
+
+        // 不关闭 kfd，保持 root 状态以便后续操作
+        Log.shared.add("   提示：kfd 句柄保持打开，如需关闭请重启 App")
     }
 
     // MARK: - 运行时权限检查
