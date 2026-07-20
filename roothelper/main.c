@@ -148,10 +148,13 @@ static int cmd_reboot(void) {
     printf("[reboot] sync() 磁盘同步\n");
     sync();
 
-    // /sbin/reboot
-    printf("[reboot] 调用 system(\"/sbin/reboot\")...\n");
-    ret = system("/sbin/reboot");
-    printf("[reboot] system(/sbin/reboot) => %d\n", ret);
+    // /sbin/reboot（用 posix_spawn 替代 system()，后者在 iOS SDK 不可用）
+    printf("[reboot] 调用 /sbin/reboot...\n");
+    {
+        char *const argv[] = { "/sbin/reboot", NULL };
+        ret = spawn_program("/sbin/reboot", argv);
+    }
+    printf("[reboot] /sbin/reboot => %d\n", ret);
 
     // reboot() 系统调用兜底
     printf("[reboot] 调用 reboot(RB_AUTOBOOT)...\n");
