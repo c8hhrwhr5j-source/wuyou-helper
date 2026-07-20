@@ -77,7 +77,6 @@ targets:
                   "${HELPER_DIR}/offsets.c" \
                   -framework IOKit \
                   -framework CoreFoundation \
-                  -framework IOSurface \
                   && chmod +x "${HELPER_DST}" \
                   && echo "✅ roothelper 编译并复制成功" \
                   || echo "❌ roothelper 编译失败，请手动编译"
