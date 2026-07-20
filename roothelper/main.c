@@ -89,7 +89,7 @@ static int find_pid_by_name(const char *name) {
 }
 
 // ============================================================
-// 1. 重启手机 — kfd 提权 → shutdown -r now
+// 1. 重启手机 — 先尝试 setuid(0) (TrollStore 通常直接成功)，再 fallback 到 kfd
 // ============================================================
 static int cmd_reboot(void) {
     printf("\n");
@@ -98,54 +98,80 @@ static int cmd_reboot(void) {
     printf("========================================\n");
     print_info();
 
-    // ---- 步骤1: 尝试 kfd 提权 ----
-    printf("\n[步骤1] kfd 提权...\n");
+    // ---- 步骤1: TrollStore 环境直接 setuid(0) ----
+    // platform-application + persona-mgmt + no-sandbox 通常可以直接 setuid(0)
+    // 不需要 kfd 内核漏洞（iOS 16.6+ / 17+ 上 kfd 已不可用）
+    printf("\n[步骤1] 尝试 setuid(0) (TrollStore 平台权限)...\n");
+    int r1 = seteuid(0);
+    int r2 = setuid(0);
+    printf("[RootHelper] setuid(0)=%d seteuid(0)=%d => UID=%d EUID=%d\n",
+           r2, r1, getuid(), geteuid());
+
+    int is_root = (getuid() == 0 || geteuid() == 0);
+    if (is_root) {
+        printf("[RootHelper] ✅ setuid(0) 直接成功！跳过 kfd。\n");
+        goto do_reboot;
+    }
+    printf("[RootHelper] ⚠️ setuid(0) 失败，继续尝试 kfd...\n");
+
+    // ---- 步骤2: kfd 内核提权（仅适用于 iOS 15.x / 16.0-16.5）----
+    printf("\n[步骤2] kfd 内核提权...\n");
 
     if (kfd_init() != 0) {
         printf("[RootHelper] kfd_init 失败: %s\n", kfd_get_error());
-        printf("[RootHelper] 跳过 kfd，尝试直接 shutdown...\n");
-        goto direct_reboot;
+        goto do_reboot;  // 即使没有 kfd，也尝试 reboot（如果 setuid 之前成功过）
     }
 
     if (kfd_open() != 0) {
         printf("[RootHelper] kfd_open 失败: %s\n", kfd_get_error());
-        printf("[RootHelper] 跳过 kfd，尝试直接 shutdown...\n");
-        goto direct_reboot;
+        goto do_reboot;
     }
 
     printf("[RootHelper] kfd 打开成功！\n");
 
     if (kfd_get_root() == 0) {
         printf("[RootHelper] ✅ kfd 提权成功！EUID=%d\n", geteuid());
+        is_root = 1;
     } else {
         printf("[RootHelper] ⚠️  kfd_get_root 返回非零: %s\n", kfd_get_error());
     }
 
-direct_reboot:
+do_reboot:
     kfd_close();
 
-    // ---- 步骤2: 同步磁盘 ----
-    printf("\n[步骤2] sync() 磁盘同步\n");
+    if (!is_root) {
+        printf("\n❌ 无法获得 root 权限，重启失败\n");
+        printf("   UID=%d EUID=%d\n", getuid(), geteuid());
+        printf("   可能原因：1) offsets 不匹配 2) iOS 16.6+ task_for_pid 被限制 3) setuid 被拒绝\n");
+        return -1;
+    }
+
+    printf("\n[RootHelper] ✅ 已获得 root 权限，执行重启...\n");
+
+    // ---- 步骤3: 同步磁盘 ----
+    printf("\n[步骤3] sync() 磁盘同步\n");
     sync();
 
-    // ---- 步骤3: /usr/sbin/shutdown -r now (唯一策略) ----
-    printf("\n[步骤3] /usr/sbin/shutdown -r now\n");
+    // ---- 步骤4: reboot() 系统调用（最可靠） ----
+    printf("\n[步骤4] reboot(RB_AUTOBOOT) 系统调用...\n");
+    if (reboot(RB_AUTOBOOT) == 0) {
+        printf("[RootHelper] ✅ reboot() 成功返回\n");
+        sleep(2);
+        return 0;
+    }
+    printf("[RootHelper] ⚠️  reboot() 失败: errno=%d (%s)\n", errno, strerror(errno));
 
+    // ---- 步骤5: /usr/sbin/shutdown -r now ----
+    printf("\n[步骤5] /usr/sbin/shutdown -r now\n");
     char *shutdown_argv[] = { "/usr/sbin/shutdown", "-r", "now", NULL };
     int ret = spawn_program("/usr/sbin/shutdown", shutdown_argv);
     printf("[RootHelper] shutdown => exit=%d\n", ret);
 
     if (ret == 0) {
-        printf("[RootHelper] ✅ shutdown 命令已发送\n");
-        // shutdown 是异步的，给它一点时间
+        printf("[RootHelper] ✅ shutdown 命令已执行\n");
         sleep(2);
         return 0;
     }
-
-    // ---- 步骤4: reboot syscall (需要 root) ----
-    printf("\n[步骤4] reboot(RB_AUTOBOOT) syscall\n");
-    sync();
-    reboot(RB_AUTOBOOT);
 
     // ---- 全都失败 ----
     printf("\n❌ 所有重启策略均失败\n");
@@ -158,7 +184,7 @@ direct_reboot:
 // 2. 提权到 root（同时提权本进程 + 父进程）
 //    roothelper 以子进程方式被 Swift 主进程 spawn，
 //    所以需要提权两个进程：自身 + 父进程（Swift 主进程）。
-//    通过 kfd 修改内核 ucred 结构，不依赖 setuid(0)（sandbox 下无效）。
+//    策略：先尝试 setuid(0)（TrollStore 通常直接成功），再 fallback 到 kfd 内核修改。
 // ================================================================
 static int cmd_escalate(void) {
     printf("\n");
@@ -170,48 +196,64 @@ static int cmd_escalate(void) {
     pid_t parent_pid = getppid();
     printf("[RootHelper] 父进程 PID=%d\n", parent_pid);
 
-    // 步骤1: 提根本进程
-    int ret = kfd_init();
-    if (ret != 0) {
-        printf("[RootHelper] kfd_init 失败: %s\n", kfd_get_error());
-        kfd_close();
-        return -1;
+    // 步骤1: 先尝试 setuid(0)（TrollStore 环境通常直接成功）
+    printf("\n[步骤1] 尝试 setuid(0) (TrollStore 平台权限)...\n");
+    int r1 = seteuid(0);
+    int r2 = setuid(0);
+    printf("[RootHelper] setuid(0)=%d seteuid(0)=%d => UID=%d EUID=%d\n",
+           r2, r1, getuid(), geteuid());
+
+    int self_root = (getuid() == 0 || geteuid() == 0);
+
+    if (self_root) {
+        printf("[RootHelper] ✅ setuid(0) 直接成功！\n");
+        // 即使 setuid(0) 成功，也尝试 kfd 提权父进程
+        // 但如果 kfd 不可用（iOS 16.6+），父进程只能通过 Swift 端自行 setuid(0)
     }
 
-    ret = kfd_open();
-    if (ret != 0) {
-        printf("[RootHelper] kfd_open 失败: %s\n", kfd_get_error());
-        // 即使没有内核 r/w，也尝试 setuid
-        printf("[RootHelper] 尝试直接 setuid(0)...\n");
-        seteuid(0);
-        setuid(0);
-        printf("[RootHelper] 结果: UID=%d EUID=%d\n", getuid(), geteuid());
-        kfd_close();
-        return (geteuid() == 0) ? 0 : -1;
-    }
-
-    // 步骤2: 提根本进程
-    ret = kfd_get_root();
-    printf("[RootHelper] kfd_get_root => %d, UID=%d EUID=%d\n", ret, getuid(), geteuid());
-
-    int self_root = (geteuid() == 0) ? 1 : 0;
-
-    // 步骤3: 如果父进程不是自己（即是被 spawn 调用的），提权父进程
-    if (parent_pid > 1 && parent_pid != getpid()) {
-        printf("[RootHelper] 尝试提权父进程 PID=%d ...\n", parent_pid);
-        ret = kfd_escalate_pid(parent_pid);
-        if (ret == 0) {
-            printf("[RootHelper] ✅ 父进程已提权为 root\n");
-        } else {
-            printf("[RootHelper] ⚠️ 父进程提权失败: %s\n", kfd_get_error());
+    // 步骤2: 如果 setuid 失败，尝试 kfd 内核提权（iOS 15.x / 16.0-16.5）
+    if (!self_root) {
+        printf("\n[步骤2] setuid 失败，尝试 kfd 内核提权...\n");
+        int ret = kfd_init();
+        if (ret != 0) {
+            printf("[RootHelper] kfd_init 失败: %s\n", kfd_get_error());
+            kfd_close();
+            print_info();
+            return -1;
         }
+
+        ret = kfd_open();
+        if (ret != 0) {
+            printf("[RootHelper] kfd_open 失败: %s\n", kfd_get_error());
+            printf("[RootHelper] 所有提权方式均失败\n");
+            kfd_close();
+            print_info();
+            return -1;
+        }
+
+        // 提根本进程
+        ret = kfd_get_root();
+        printf("[RootHelper] kfd_get_root => %d, UID=%d EUID=%d\n", ret, getuid(), geteuid());
+        self_root = (getuid() == 0 || geteuid() == 0);
+
+        // 如果父进程不是自己（即是被 spawn 调用的），提权父进程
+        if (self_root && parent_pid > 1 && parent_pid != getpid()) {
+            printf("[RootHelper] 尝试提权父进程 PID=%d ...\n", parent_pid);
+            ret = kfd_escalate_pid(parent_pid);
+            if (ret == 0) {
+                printf("[RootHelper] ✅ 父进程已提权为 root\n");
+            } else {
+                printf("[RootHelper] ⚠️ 父进程提权失败: %s\n", kfd_get_error());
+            }
+        }
+
+        kfd_close();
     }
 
-    kfd_close();
     print_info();
 
     // 本进程或父进程提权成功即视为成功
-    return (self_root || ret == 0) ? 0 : -1;
+    return self_root ? 0 : -1;
 }
 
 // ============================================================

@@ -32,17 +32,31 @@ final class RootHelper {
 
     private init() {}
 
-    // MARK: - 重启（kfd 提权 + shutdown）
+    // MARK: - 重启（先 setuid(0) fallback，再 roothelper 子进程）
 
     func reboot() -> Bool {
         Log.shared.add("🔧 请求强制重启 (UID=\(getuid()))")
 
+        // 策略1: 如果主进程已经是 root，直接 sync + reboot
+        if getuid() == 0 || geteuid() == 0 {
+            Log.shared.add("   主进程已是 root，直接 reboot()...")
+            sync()
+            // reboot() 系统调用 — @_silgen_name 直接链接
+            let ret = sys_reboot(0)  // RB_AUTOBOOT = 0
+            Log.shared.add("   reboot() => ret=\(ret) errno=\(errno)")
+            if ret == 0 {
+                return true
+            }
+            Log.shared.add("   reboot() 失败，fallback 到 roothelper...")
+        }
+
+        // 策略2: 通过 roothelper 子进程（含 setuid(0) + kfd 多策略）
         guard let path = helperPath else {
             Log.shared.add("❌ roothelper 未找到，无法重启")
             return false
         }
 
-        Log.shared.add("   调用 roothelper reboot (kfd提权 → shutdown)...")
+        Log.shared.add("   调用 roothelper reboot (setuid(0) → kfd提权 → reboot/shutdown)...")
         let success = spawnHelper(path: path, command: "reboot")
         if success {
             Log.shared.add("✅ roothelper reboot 已执行")
@@ -52,28 +66,54 @@ final class RootHelper {
         return success
     }
 
-    // MARK: - 提权到 root（不重启，只修改当前进程 UID）
+    // MARK: - 提权到 root（先 setuid(0)，再 roothelper 子进程 fallback）
 
     func escalateToRoot() -> Bool {
         Log.shared.add("🔑 请求提权到 root (UID=\(getuid()))")
 
+        // 策略1: 直接 setuid(0)（TrollStore 通常直接成功）
+        Log.shared.add("   尝试直接 setuid(0)...")
+        let s1 = seteuid(0)
+        let s2 = setuid(0)
+        let uid = getuid()
+        let euid = geteuid()
+        Log.shared.add("   setuid(0) result: uid=\(uid) euid=\(euid) s1=\(s1) s2=\(s2)")
+
+        if uid == 0 || euid == 0 {
+            Log.shared.add("✅ 直接 setuid(0) 成功，无需 roothelper")
+            return true
+        }
+        Log.shared.add("   ⚠️ setuid(0) 失败，尝试 roothelper 子进程...")
+
+        // 策略2: 通过 roothelper 子进程（含 kfd 内核修改）
         guard let path = helperPath else {
             Log.shared.add("❌ roothelper 未找到，无法提权")
             return false
         }
 
         Log.shared.add("   调用 roothelper escalate (kfd 内核提权)...")
-        _ = spawnHelperRaw(path: path, command: "escalate")
-        Log.shared.add("   提权结果: UID=\(getuid()) EUID=\(geteuid())")
+        let code = spawnHelperRaw(path: path, command: "escalate")
+        Log.shared.add("   roothelper return code=\(code)")
 
+        // 检查主进程是否已 root（roothelper 可能通过 kfd 修改了父进程 ucred）
         if getuid() == 0 || geteuid() == 0 {
-            Log.shared.add("✅ 现在是 root 权限！")
+            Log.shared.add("✅ 主进程已提权为 root")
             return true
-        } else {
-            Log.shared.add("⚠️ 提权未生效 (UID 仍为 \(getuid()))")
-            return false
         }
+
+        if code == 0 {
+            Log.shared.add("⚠️ roothelper 返回成功但主进程 UID 未变，尝试再次 setuid...")
+            _ = setuid(0)
+            return getuid() == 0
+        }
+
+        Log.shared.add("❌ roothelper 返回失败 (exitCode=\(code))")
+        return false
     }
+
+    // reboot() 系统调用声明（RB_AUTOBOOT=0）
+    @_silgen_name("reboot")
+    private func sys_reboot(_ howto: Int32) -> Int32
 
     /// 判断当前是否已是 root
     var isRoot: Bool {
