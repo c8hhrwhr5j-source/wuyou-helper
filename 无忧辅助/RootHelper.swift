@@ -31,6 +31,13 @@ private func _kfd_get_error() -> UnsafePointer<CChar>?
 @_silgen_name("kfd_close")
 private func _kfd_close()
 
+// SecTask - 运行时查询内核实际看到的 entitlements
+@_silgen_name("SecTaskCreateFromSelf")
+private func SecTaskCreateFromSelf(_ allocator: CFAllocator?) -> AnyObject
+
+@_silgen_name("SecTaskCopyValueForEntitlement")
+private func SecTaskCopyValueForEntitlement(_ task: AnyObject, _ entitlement: CFString, _ error: UnsafeMutablePointer<Unmanaged<CFError>?>?) -> AnyObject?
+
 private let RB_AUTOBOOT: Int32 = 0
 
 final class RootHelper {
@@ -177,6 +184,84 @@ final class RootHelper {
             let exists = FileManager.default.fileExists(atPath: p)
             Log.shared.add("   \(p): \(exists ? "存在" : "不存在/不可见")")
         }
+
+        // ==== 运行时 entitlements 检查（内核实际看到的） ====
+        Log.shared.add("")
+        Log.shared.add("--- 内核运行时权限 ---")
+        checkRuntimeEntitlements()
+
+        // ==== 二进制中嵌入的权限字符串（构建时注入的） ====
+        Log.shared.add("")
+        Log.shared.add("--- 二进制嵌入权限 ---")
+        scanBinaryForEntitlements()
+    }
+
+    // MARK: - 运行时权限检查
+
+    /// 通过 SecTask API 查询内核在运行时实际看到的 entitlements
+    private func checkRuntimeEntitlements() {
+        let keys: [(String, String)] = [
+            ("com.apple.private.security.no-sandbox",       "关闭沙盒"),
+            ("com.apple.private.persona-mgmt",              "root身份"),
+            ("com.apple.private.security.no-container",     "无容器"),
+            ("com.apple.private.system.restart",            "系统重启"),
+            ("com.apple.private.system.shutdown",           "系统关机"),
+            ("com.apple.private.task_for_pid-allow",       "task_for_pid"),
+        ]
+
+        let task = SecTaskCreateFromSelf(nil)
+        for (key, desc) in keys {
+            if let value = SecTaskCopyValueForEntitlement(task, key as CFString, nil) {
+                let str = String(describing: value)
+                Log.shared.add("   [✅] \(desc) (\(key)): \(str)")
+            } else {
+                Log.shared.add("   [❌] \(desc) (\(key)): 未注册")
+            }
+        }
+    }
+
+    // MARK: - 二进制权限扫描
+
+    /// 扫描自身二进制文件，查找嵌入的 entitlements XML 字符串
+    /// 这能验证构建时权限是否被正确注入到 Mach-O 签名中
+    private func scanBinaryForEntitlements() {
+        guard let binaryPath = Bundle.main.executablePath,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: binaryPath)) else {
+            Log.shared.add("   ❌ 无法读取自身二进制")
+            return
+        }
+
+        Log.shared.add("   二进制路径: \(binaryPath)")
+        Log.shared.add("   二进制大小: \(data.count) bytes")
+
+        // 转成 UTF-8 字符串搜索（跳过无效字节）
+        var utf8buf = ""
+        data.forEach { byte in
+            if byte >= 0x20 && byte < 0x7f {
+                utf8buf.append(Character(UnicodeScalar(byte)))
+            }
+        }
+
+        let targets: [(String, String)] = [
+            ("com.apple.private.security.no-sandbox",       "关闭沙盒"),
+            ("com.apple.private.persona-mgmt",              "root身份"),
+            ("com.apple.private.security.no-container",     "无容器"),
+            ("com.apple.private.system.restart",            "系统重启"),
+            ("com.apple.private.system.shutdown",           "系统关机"),
+            ("com.apple.private.task_for_pid-allow",       "task_for_pid"),
+        ]
+
+        for (key, desc) in targets {
+            if utf8buf.contains(key) {
+                Log.shared.add("   [✅] \(desc) 字符串已嵌入二进制")
+            } else {
+                Log.shared.add("   [❌] \(desc) 字符串未找到 → 构建时未注入!")
+            }
+        }
+
+        // 额外：搜索二进制中是否有 <?xml 开头的 entitlements plist 片段
+        let xmlCount = utf8buf.components(separatedBy: "<?xml").count - 1
+        Log.shared.add("   二进制中 XML plist 片段数: \(xmlCount)")
     }
 
     // MARK: - 注销

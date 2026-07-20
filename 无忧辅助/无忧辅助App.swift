@@ -61,6 +61,9 @@ struct 无忧辅助App: App {
             Log.shared.add("   \(p): \(exists ? "存在" : "不存在")")
         }
 
+        // 自动执行完整权限诊断
+        RootHelper.shared.diagnoseRoot()
+
         Log.shared.add("===== 启动诊断完成 =====")
     }
 }
