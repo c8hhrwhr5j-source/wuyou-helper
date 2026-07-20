@@ -2,12 +2,12 @@
 //  RootHelper.swift
 //  无忧辅助
 //
-//  重启: 主进程 kfd 提权 → reboot(RB_AUTOBOOT) + system("/sbin/reboot")
+//  重启: kfd 提权 → 直接内核写 ucred → reboot(0)
 //  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行）
 //
-//  说明: 之前通过 roothelper 子进程提权，但 TrollStore 无法给嵌入式
-//        二进制正确签入 no-sandbox 等权限，导致 IOServiceOpen 被沙盒
-//        拒绝 (0xe00002e2)。现在改为由主进程直接调用 kfd 提权。
+//  说明: iOS 15.8.4 封堵了旧 Landa/IOSurfaceRoot 路径，改用
+//        dmaFail + IOAccel 路径获取内核 r/w，然后直接修改
+//        ucred.cr_uid = 0 实现提权（完全绕过 setuid(0) 限制）。
 //
 
 import Foundation
@@ -216,6 +216,14 @@ final class RootHelper {
         Log.shared.add("")
         Log.shared.add("--- KFD 内核漏洞测试 ---")
         testKfd()
+
+        // ==== reboot() 直接调用测试 ====
+        Log.shared.add("")
+        Log.shared.add("--- reboot() 直接调用测试 ---")
+        Log.shared.add("   说明: 我们已有 com.apple.private.system.restart 权限")
+        Log.shared.add("         内核可能允许带此权限的进程直接调用 reboot(2)")
+        Log.shared.add("         即使 UID != 0")
+        testReboot()
     }
 
     // MARK: - setuid(0) 实战测试
@@ -338,6 +346,42 @@ final class RootHelper {
         }
 
         Log.shared.add("   提示：kfd 句柄保持打开，如需关闭请重启 App")
+    }
+
+    // MARK: - reboot() 直接调用测试
+
+    /// 测试直接调用 Darwin.reboot() —— 利用已注册的 system.restart 权限
+    /// XNU 内核的 reboot() 路径会检查 com.apple.private.system.restart 权限
+    /// 如果权限有效，允许非 root 进程执行重启
+    private func testReboot() {
+        // 先确认权限状态
+        let task = SecTaskCreateFromSelf(nil)
+        let hasRestart = SecTaskCopyValueForEntitlement(task, "com.apple.private.system.restart" as CFString, nil)
+        let hasShutdown = SecTaskCopyValueForEntitlement(task, "com.apple.private.system.shutdown" as CFString, nil)
+
+        Log.shared.add("   确认 system.restart: \(hasRestart != nil ? "已注册" : "未注册")")
+        Log.shared.add("   确认 system.shutdown: \(hasShutdown != nil ? "已注册" : "未注册")")
+
+        // 尝试 reboot(0) = RB_AUTOBOOT
+        // ⚠️ 如果内核允许，设备会立即重启，以下代码不会执行
+        Log.shared.add("   尝试 reboot(RB_AUTOBOOT=0)...")
+
+        let ret = Darwin.reboot(0) // RB_AUTOBOOT
+        let err = errno
+        Log.shared.add("   Darwin.reboot(0) 返回=\(ret) errno=\(err) (\(String(cString: strerror(err))))")
+
+        if ret == 0 {
+            Log.shared.add("   ✅ reboot() 成功！设备应正在重启...")
+        } else {
+            Log.shared.add("   ❌ reboot() 失败: 内核拒绝")
+            Log.shared.add("   → system.restart 权限不足以执行 reboot")
+
+            // 再试 sync + reboot (RB_AUTOBOOT)
+            sync()
+            let ret2 = Darwin.reboot(0)
+            let err2 = errno
+            Log.shared.add("   sync后 reboot(0) 返回=\(ret2) errno=\(err2) (\(String(cString: strerror(err2))))")
+        }
     }
 
     /// 捕获 stdout：重定向 stdout → pipe，执行闭包，恢复 stdout，返回 (返回值, stdout文本)

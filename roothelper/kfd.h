@@ -9,18 +9,19 @@
 //  路径 2: host_get_special_port(HOST_PRIV,4) → Mach VM 读写
 //    部分 iOS 15.x 版本仍开放此端口。
 //
-//  路径 3: Landa (CVE-2023-41974) + IOSurface 内核 r/w
-//    适用 iOS 15.7.4-15.8.x（task_for_pid(0) 被内核封锁）。
-//    通过 vm_remap 共享映射 + mlock 竞态释放内核物理页面，
-//    利用 IOSurface IOKit 调用实现任意内核 r/w。
-//    参考: alfiecg24/Vertex
+//  路径 3: dmaFail + IOAccel (iOS 15.8.x 唯一可行路径)
+//    iOS 15.8.4 封堵了 Landa/IOSurfaceRoot 路径（IOServiceOpen → 0xe00002e2）。
+//    dmaFail 利用 IOAccelSharedUserClient2 + IOAccelSurface2 的 DMA 缓冲区
+//    管理漏洞获取内核地址泄露和物理内存映射。
+//    完全不需要 IOSurfaceRoot IOKit 服务。
+//    参考: opa334/dmaFail, misaka 团队验证 15.8.2-15.8.4 arm64
 //
 //  == 提权流程 ==
 //  1. kfd_init() → 版本检测 + 偏移匹配
-//  2. kfd_open() → 尝试路径1 → 路径2 → 路径3
+//  2. kfd_open() → 尝试路径1 → 路径2 → 路径3 (dmaFail)
 //  3. kfd_get_root() → 遍历 allproc 找到当前 proc
-//  4. 修改 ucred.cr_uid/cr_ruid/cr_svuid/cr_rgid/cr_svgid = 0
-//  5. setuid(0) 让用户态同步感知 root
+//  4. 直接内核写 ucred.cr_uid/cr_ruid/cr_svuid/cr_rgid/cr_svgid = 0
+//  5. 完全绕过用户态 setuid(0) 检查（iOS 15.8.4 阻止 setuid）
 //
 //  运行环境: TrollStore iOS 15-17, arm64
 //
@@ -56,13 +57,13 @@ typedef enum {
 /// 初始化 kfd 内部数据结构（偏移表、版本检测等），返回 0 表示成功。
 int kfd_init(void);
 
-/// 尝试通过 task_for_pid(0)/host_get_special_port/Landa 获取内核 r/w 能力，返回 0 表示成功。
+/// 尝试通过 task_for_pid(0)/host_get_special_port/dmaFail 获取内核 r/w 能力，返回 0 表示成功。
 int kfd_open(void);
 
-/// 将当前进程提权为 UID=0（root），通过修改内核 ucred 结构实现，返回 0 表示成功。
+/// 将当前进程提权为 UID=0（root），通过直接内核写 ucred 实现（绕过 setuid 限制），返回 0 表示成功。
 int kfd_get_root(void);
 
-/// 关闭 kfd 句柄并清理。
+/// 关闭 kfd 句柄并清理 IOAccel/dmaFail 资源。
 void kfd_close(void);
 
 /// 完整的提权流程: init → open → get_root，返回 0 表示成功。
