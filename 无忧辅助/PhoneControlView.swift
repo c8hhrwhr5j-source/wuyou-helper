@@ -2,9 +2,10 @@
 //  PhoneControlView.swift
 //  无忧辅助
 //
-//  手机控制区域：【重启设备】【注销设备】
-//    - 重启: kfd_escalate 提权 → system("/sbin/reboot") → reboot() syscall
+//  手机控制区域：【重启设备】【注销设备】【权限诊断】
+//    - 重启: 主进程 kfd 提权 → reboot() syscall（失败回退 roothelper）
 //    - 注销: proc_listpids + kill(SpringBoard, SIGKILL)（参考 TrollServer）
+//    - 诊断: 检查主进程 UID / 沙盒可见文件 / Helper 路径
 //    - 弹窗: 通过 UIKit UIAlertController（避免 SwiftUI .alert + TabView 嵌套 Bug）
 //
 
@@ -73,6 +74,36 @@ struct PhoneControlView: View {
                             ) {
                                 executeRespring()
                             }
+                        }
+                        // 诊断按钮
+                        Button(action: { RootHelper.shared.diagnoseRoot() }) {
+                            HStack(spacing: 16) {
+                                Image(systemName: "stethoscope")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(.blue)
+                                    .frame(width: 44, height: 44)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("权限诊断")
+                                        .font(.headline)
+                                        .foregroundColor(.primary)
+
+                                    Text("检查主进程沙盒状态及关键文件可见性")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+                                }
+
+                                Spacer()
+
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(16)
+                            .background(Color(.systemBackground))
+                            .cornerRadius(14)
+                            .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
                         }
                     }
                     .padding(.horizontal)
