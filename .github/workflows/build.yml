@@ -141,7 +141,8 @@ jobs:
           ENTITLEMENTS_OUTPUT=$(ldid -e "$APP_PATH/无忧辅助" 2>/dev/null || true)
           echo "$ENTITLEMENTS_OUTPUT"
 
-          for key in "no-sandbox" "platform-application" "task_for_pid-allow"; do
+          # TrollStore 检测 root 身份用的是 persona-mgmt，不是 task_for_pid-allow
+          for key in "no-sandbox" "platform-application" "com.apple.private.persona-mgmt"; do
             if ! echo "$ENTITLEMENTS_OUTPUT" | grep -q "$key"; then
               echo "❌ 验证失败：entitlements 中未找到 $key"
               exit 1
