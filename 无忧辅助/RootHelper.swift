@@ -32,30 +32,69 @@ final class RootHelper {
 
     private init() {}
 
-    // MARK: - 重启（spawn roothelper 子进程执行完整提权+重启流程）
+    // notify_post 系统通知发送函数（未公开）
+    @_silgen_name("notify_post")
+    private func _notify_post(_ name: UnsafePointer<CChar>) -> Int32
+
+    // reboot() 系统调用（RB_AUTOBOOT = 0）
+    @_silgen_name("reboot")
+    private func sys_reboot(_ howto: Int32) -> Int32
+
+    // MARK: - 重启（先 setuid(0) 提权 → reboot(0) 系统调用 → notify_post 回退）
 
     func reboot() -> Bool {
         let uid = getuid(), euid = geteuid()
         Log.shared.add("🔔 请求重启 (UID=\(uid) EUID=\(euid))")
 
-        // roothelper 内部流程:
-        //   setuid(0) → kfd 内核提权 → sync() → reboot(RB_AUTOBOOT) → /usr/sbin/shutdown -r now
-        // 子进程不受 Swift 进程 UID 限制，可以独立完成提权并执行重启
+        // 步骤1: 尝试 setuid(0) 提权
+        if uid != 0 {
+            Log.shared.add("   尝试 setuid(0) 提权...")
+            let s1 = seteuid(0)
+            let s2 = setuid(0)
+            let uidAfter = getuid()
+            Log.shared.add("   seteuid(0)=\(s1), setuid(0)=\(s2), uidAfter=\(uidAfter)")
+
+            if uidAfter == 0 {
+                Log.shared.add("✅ 提权成功，UID=0")
+            } else {
+                Log.shared.add("⚠️ 提权失败，仍 UID=\(uidAfter)")
+            }
+        }
+
+        // 步骤2: 如果已是 root，直接调用 reboot(0) 系统调用
+        if getuid() == 0 || geteuid() == 0 {
+            Log.shared.add("   直接调用 reboot(0) 系统调用...")
+            sync()
+            let ret = sys_reboot(0)  // RB_AUTOBOOT = 0
+            Log.shared.add("   reboot(0) => ret=\(ret) errno=\(errno)")
+            if ret == 0 {
+                Log.shared.add("✅ 重启指令已执行")
+                return true
+            }
+            Log.shared.add("   reboot(0) 失败，尝试 roothelper...")
+        }
+
+        // 步骤3: 通过 roothelper 子进程（独立提权 + reboot）
         guard let path = helperPath else {
             Log.shared.add("❌ roothelper 未找到，重启失败")
             return false
         }
 
-        Log.shared.add("   调用 roothelper reboot (完整提权+重启流程)...")
+        Log.shared.add("   调用 roothelper reboot...")
         let code = spawnHelperRaw(path: path, command: "reboot")
-        Log.shared.add("   roothelper reboot exitCode=\(code)")
-
+        Log.shared.add("   roothelper exitCode=\(code)")
         if code == 0 {
-            Log.shared.add("✅ 重启指令已执行，设备即将重启...")
+            Log.shared.add("✅ roothelper 已执行重启")
             return true
         }
 
-        Log.shared.add("❌ roothelper reboot 失败 (exitCode=\(code))")
+        // 步骤4: notify_post 最后回退（mobile 用户下通常无效，但保留）
+        Log.shared.add("   尝试 notify_post 双通知...")
+        _ = "com.apple.springboard.restartDevice".withCString { _notify_post($0) }
+        _ = "com.apple.system.reboot".withCString { _notify_post($0) }
+        Log.shared.add("   notify_post 已发送 (注意: UID=501 下通常无效)")
+
+        Log.shared.add("❌ 所有重启方式均已尝试")
         return false
     }
 

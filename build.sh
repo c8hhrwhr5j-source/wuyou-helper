@@ -124,6 +124,14 @@ if [ ! -f "${ENTITLEMENTS}" ]; then
     exit 1
 fi
 
+# 验证应用二进制存在
+if [ ! -f "${APP_BINARY}" ]; then
+    echo "❌ 找不到应用二进制: ${APP_BINARY}"
+    echo "   目录内容:"
+    ls -la "${APP_DIR}/"
+    exit 1
+fi
+
 if command -v ldid &> /dev/null; then
     # 注入主应用 entitlements
     echo "   🔏 注入主应用 entitlements..."
@@ -131,6 +139,14 @@ if command -v ldid &> /dev/null; then
         echo "   ✅ 主应用 entitlements 已注入"
     else
         echo "   ⚠️  主应用 ldid 注入失败"
+    fi
+
+    # 验证 persona-mgmt 是否注入成功
+    echo "   🔍 验证 entitlements..."
+    if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "persona-mgmt"; then
+        echo "   ✅ persona-mgmt 已确认"
+    else
+        echo "   ⚠️  persona-mgmt 未找到，可能注入失败！"
     fi
 
     # 注入 roothelper entitlements
