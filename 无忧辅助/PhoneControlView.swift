@@ -231,8 +231,6 @@ struct InfoRow: View {
     }
 }
 
-struct PhoneControlView_Previews: PreviewProvider {
-    static var previews: some View {
-        PhoneControlView()
-    }
+#Preview {
+    PhoneControlView()
 }

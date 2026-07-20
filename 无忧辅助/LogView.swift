@@ -11,7 +11,7 @@ struct LogView: View {
     @StateObject private var log = Log.shared
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 0) {
                 if log.entries.isEmpty {
                     // 空状态
@@ -84,8 +84,6 @@ struct LogRow: View {
     }
 }
 
-struct LogView_Previews: PreviewProvider {
-    static var previews: some View {
-        LogView()
-    }
+#Preview {
+    LogView()
 }

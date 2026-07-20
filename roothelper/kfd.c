@@ -191,35 +191,42 @@ int kfd_open(void) {
     }
 
     // === 方法3: 通过 IOSurface physpuppet 获取内核地址泄漏 + fallback ===
-    printf("[kfd] 尝试 physpuppet 内核地址泄漏...\n");
-    // 简化的 physpuppet: 获取 IOSurface 内核地址用于 slide 估算
-    io_connect_t conn = MACH_PORT_NULL;
-    CFMutableDictionaryRef match = IOServiceMatching("IOSurfaceRoot");
-    if (match) {
-        io_iterator_t iter;
-        kr = IOServiceGetMatchingServices(kIOMasterPortDefault, match, &iter);
-        if (kr == KERN_SUCCESS && iter) {
-            io_object_t service = IOIteratorNext(iter);
-            IOObjectRelease(iter);
-            if (service) {
-                kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
-                IOObjectRelease(service);
-                if (kr == KERN_SUCCESS) {
-                    // 通过 IOSurface 属性泄漏内核地址
-                    CFMutableDictionaryRef props = (CFMutableDictionaryRef)
-                        IORegistryEntryCreateCFProperty((io_registry_entry_t)
-                            IOServiceGetMatchingService(kIOMasterPortDefault,
-                                IOServiceMatching("IOSurfaceRoot")),
-                            CFSTR("SurfaceIDs"),
-                            kCFAllocatorDefault, 0);
-                    if (props) {
-                        printf("[kfd] physpuppet leaked SurfaceIDs\n");
-                        CFRelease(props);
+    // IOKit master port 在 iOS 15+ 可用，iOS 14 降级跳过
+    mach_port_t masterPort = MACH_PORT_NULL;
+    if (__builtin_available(iOS 15.0, *)) {
+        IOMainPort(MACH_PORT_NULL, &masterPort);
+    }
+    if (masterPort != MACH_PORT_NULL) {
+        printf("[kfd] 尝试 physpuppet 内核地址泄漏...\n");
+        io_connect_t conn = MACH_PORT_NULL;
+        CFMutableDictionaryRef match = IOServiceMatching("IOSurfaceRoot");
+        if (match) {
+            io_iterator_t iter;
+            kr = IOServiceGetMatchingServices(masterPort, match, &iter);
+            if (kr == KERN_SUCCESS && iter) {
+                io_object_t service = IOIteratorNext(iter);
+                IOObjectRelease(iter);
+                if (service) {
+                    kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
+                    IOObjectRelease(service);
+                    if (kr == KERN_SUCCESS) {
+                        CFMutableDictionaryRef props = (CFMutableDictionaryRef)
+                            IORegistryEntryCreateCFProperty((io_registry_entry_t)
+                                IOServiceGetMatchingService(masterPort,
+                                    IOServiceMatching("IOSurfaceRoot")),
+                                CFSTR("SurfaceIDs"),
+                                kCFAllocatorDefault, 0);
+                        if (props) {
+                            printf("[kfd] physpuppet leaked SurfaceIDs\n");
+                            CFRelease(props);
+                        }
+                        IOServiceClose(conn);
                     }
-                    IOServiceClose(conn);
                 }
             }
         }
+    } else {
+        printf("[kfd] IOKit master port 不可用 (iOS 14)，跳过 physpuppet\n");
     }
 
     set_error("所有内核访问方式均失败 - 需要 task_for_pid(0) 或 physpuppet");
