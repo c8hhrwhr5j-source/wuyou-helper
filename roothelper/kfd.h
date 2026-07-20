@@ -1,10 +1,25 @@
 //
 //  kfd.h
-//  iOS kernel fd exploit — 多种提权技术集成
+//  iOS kernel fd exploit — task_for_pid(0) 内核内存读写提权
 //
-//  支持 iOS 15.0 ~ 18.x
-//  技术路径: physpuppet (IOSurface) / smith (weightBufs) / landa (perf control)
-//  目标: 获取 kernel r/w → 修改进程 credential → UID=0
+//  == 为什么用 task_for_pid(0) 而不是 physpuppet/smith/landa? ==
+//  TrollStore 签名的应用拥有以下关键 entitlements：
+//    - get-task-allow          → 允许 task_for_pid
+//    - platform-application    → 以 platform 身份运行
+//    - com.apple.system-task-ports → 允许获取内核 task 端口
+//  task_for_pid(0) 可以直接获取 kernel_task 的 mach port，
+//  然后通过 mach_vm_read / mach_vm_write 直接读写内核内存。
+//  不需要任何内核漏洞（physpuppet/smith/landa/cicuta_virosa），
+//  适用范围更广且不依赖系统版本。
+//
+//  == 提权流程 ==
+//  1. task_for_pid(0) → kernel_task mach port
+//  2. kread64 / kwrite64 读写内核内存
+//  3. 遍历 allproc 链表找到目标进程的 proc 结构
+//  4. 修改 ucred.cr_uid/cr_ruid/cr_svuid/cr_groups[0] = 0
+//  5. setuid(0) 让用户态也感知 root
+//
+//  运行环境: TrollStore iOS 14-17, arm64
 //
 
 #ifndef KFD_H

@@ -9,7 +9,8 @@
 import Foundation
 import Darwin
 
-// 直接调用底层 C 函数（通过 libSystem 链接）
+// proc_listpids / proc_name 是未公开的 libSystem C 函数，
+// 用 @_silgen_name 直接链接而非 dlsym（编译期解析，更可靠）
 @_silgen_name("proc_listpids")
 private func _proc_listpids(_ type: UInt32, _ typeinfo: UInt32, _ buffer: UnsafeMutableRawPointer, _ buffersize: Int32) -> Int32
 

@@ -4,6 +4,11 @@
 //
 //  运行日志查看
 //
+//  兼容性说明:
+//    NavigationView（非 NavigationStack）— 兼容 iOS 14
+//    PreviewProvider（非 #Preview）— 兼容 Xcode < 15
+//    所有 API 选择以 TrollStore 最低支持版本 iOS 14 为准
+//
 
 import SwiftUI
 

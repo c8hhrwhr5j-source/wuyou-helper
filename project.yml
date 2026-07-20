@@ -1,7 +1,15 @@
-# 无忧辅助 - XcodeGen 项目配置
+# ================================================================
+# 无忧辅助 - TrollStore IPA 项目配置
+# ================================================================
 # 安装 XcodeGen: brew install xcodegen
 # 生成项目:    xcodegen generate
 # 打开项目:    open 无忧辅助.xcodeproj
+#
+# 部署目标: iOS 14.0
+#   TrollStore 核心支持 iOS 14.0 - 17.0，最小系统定为 14.0
+#   因此使用 NavigationView / accentColor / PreviewProvider 等旧 API：
+#   NavigationStack 需要 iOS 16+，在 iOS 14/15 上运行时会崩溃
+#   Swift Version 保持 5.9（Xcode 15+）兼容
 
 name: 无忧辅助
 

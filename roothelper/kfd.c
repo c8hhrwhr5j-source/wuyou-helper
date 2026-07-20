@@ -191,7 +191,12 @@ int kfd_open(void) {
     }
 
     // === 方法3: 通过 IOSurface physpuppet 获取内核地址泄漏 + fallback ===
-    // IOKit master port 在 iOS 15+ 可用，iOS 14 降级跳过
+    //
+    // IOKit master port 获取方式随 SDK 变化：
+    //   kIOMasterPortDefault → iOS 26 SDK 标记为 unavailable
+    //   kIOMainPortDefault   → 需要 iOS 15+（常量）
+    //   IOMainPort()         → 需要 iOS 15+（函数，2 参数）
+    // 这里用 IOMainPort + __builtin_available 适配所有 SDK 版本。
     mach_port_t masterPort = MACH_PORT_NULL;
     if (__builtin_available(iOS 15.0, *)) {
         IOMainPort(MACH_PORT_NULL, &masterPort);

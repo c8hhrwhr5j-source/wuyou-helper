@@ -4,6 +4,8 @@
 //
 //  脚本控制区域 - 预留（后续实现找色、点击、按住滑动等）
 //
+//  兼容性说明: 同 LogView — NavigationView 兼容 iOS 14
+//
 
 import SwiftUI
 

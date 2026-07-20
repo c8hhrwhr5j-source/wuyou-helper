@@ -36,7 +36,7 @@ struct MainTabView: View {
                 }
                 .tag(2)
         }
-        .accentColor(.orange)
+        .accentColor(.orange)  // 用 accentColor 而非 tint — 兼容 iOS 14
     }
 }
 

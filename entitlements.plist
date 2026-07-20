@@ -8,7 +8,16 @@
 	<key>com.apple.private.security.container-required</key>
 	<false/>
 
-	<!-- ==================== 功能（root + 二进制） ==================== -->
+	<!-- ==================== 功能（root + 内核访问） ==================== -->
+	<!--
+	权限分层说明:
+	1. platform-application + get-task-allow → TrollStore 基础开锁
+	2. com.apple.system-task-ports → task_for_pid(0) 获取 kernel_task
+	3. dynamic-codesigning → 允许 ldid 伪签名生效
+	4. no-sandbox → 绕过沙盒限制
+	5. com.apple.private.security.no-entitlements → 跳过 entitlement 检查
+	这套权限组合让应用能直接读写内核内存，实现 root 提权。
+	-->
 	<key>platform-application</key>
 	<true/>
 	<key>get-task-allow</key>

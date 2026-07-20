@@ -2,8 +2,19 @@
 //  无忧辅助App.swift
 //  无忧辅助 - TrollStore IPA
 //
-//  启动时自动通过 roothelper 提权到 root（kfd 内核漏洞）
-//  提权后 UID=0，后续操作（重启/关机）无需额外提权
+// == 为什么启动时自动提权 ==
+//   TrollStore 安装的应用以 mobile 用户运行 (UID=501)，
+//   重启/关机等操作需要 root 权限。
+//   init() 中异步调用 roothelper escalate 子进程，
+//   roothelper 通过 kfd (task_for_pid(0)) 修改内核 ucred.uid=0，
+//   实现整个应用进程的 root 提权。
+//   提权后 getuid()==0，后续所有 syscall 都具备 root 权限。
+//
+// == 为什么用子进程(roothelper)而不是直接提权 ==
+//   Swift 进程的 sandbox 限制使 setuid(0) 无效。
+//   独立 C 子进程 handles kfd 内核操作更可靠。
+//   roothelper 提权后会同步修改父进程(Swift)的 ucred，
+//   这样主进程也获得 root 权限。
 //
 
 import SwiftUI
