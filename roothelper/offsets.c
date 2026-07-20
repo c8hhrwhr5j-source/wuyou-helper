@@ -10,6 +10,7 @@
 #include "offsets.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 // ================================================================
 // 辅助宏：填充所有 physpuppet 字段为通用的 iOS 15/16/17 默认值
@@ -416,5 +417,5 @@ void offsets_print(const kfd_offsets_t *off, const kfd_osversion_t *ver) {
     printf("[Offsets]   zone_map     = 0x%llx\n", off->zone_map);
     printf("[Offsets]   surf_zone    = %d bytes (shift=%d)\n",
            off->surface_zone_elem, off->surface_id_shift);
-    printf("[Offsets]   kernel_slide = 0x%llx\n", off->kernel_slide_hint);
+    printf("[Offsets]   kernel_slide = 0x%x\n", off->kernel_slide_hint);
 }
