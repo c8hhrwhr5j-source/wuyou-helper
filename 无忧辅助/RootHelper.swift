@@ -194,6 +194,49 @@ final class RootHelper {
         Log.shared.add("")
         Log.shared.add("--- 二进制嵌入权限 ---")
         scanBinaryForEntitlements()
+
+        // ==== 实战测试：setuid(0) ====
+        Log.shared.add("")
+        Log.shared.add("--- 实战测试：setuid(0) ---")
+        testSetuid()
+    }
+
+    // MARK: - setuid(0) 实战测试
+
+    private func testSetuid() {
+        // 测试 access()（C 层，比 FileManager 更准确）
+        let testPaths = ["/sbin/reboot", "/var/mobile"]
+        for p in testPaths {
+            let acc = access(p, Int32(F_OK))
+            Log.shared.add("   access(\(p), F_OK)=\(acc) errno=\(acc == -1 ? String(cString: strerror(errno)) : "ok")")
+        }
+
+        // 尝试 setuid(0)
+        let beforeUid = getuid()
+        let beforeEuid = geteuid()
+        let ret = setuid(0)
+        let ret2 = seteuid(0)
+        let afterUid = getuid()
+        let afterEuid = geteuid()
+
+        Log.shared.add("   setuid(0) 返回=\(ret), seteuid(0) 返回=\(ret2)")
+        Log.shared.add("   提权前: UID=\(beforeUid) EUID=\(beforeEuid)")
+        Log.shared.add("   提权后: UID=\(afterUid) EUID=\(afterEuid)")
+
+        if afterUid == 0 || afterEuid == 0 {
+            Log.shared.add("   ✅ setuid(0) 成功！persona-mgmt 有效")
+            for p in testPaths {
+                let acc = access(p, Int32(F_OK))
+                Log.shared.add("   (root) access(\(p), F_OK)=\(acc) errno=\(acc == -1 ? String(cString: strerror(errno)) : "ok")")
+            }
+            seteuid(beforeEuid)
+            setuid(beforeUid)
+        } else {
+            let msg = ret == -1 ? String(cString: strerror(errno)) : "返回非零"
+            Log.shared.add("   ❌ setuid(0) 失败: \(msg) (errno=\(errno))")
+            Log.shared.add("   → persona-mgmt 虽然被内核识别，但 setuid 被拒绝")
+            Log.shared.add("   → 这是 iOS 15.8.4 运行时限制，与 entitlements 无关")
+        }
     }
 
     // MARK: - 运行时权限检查
