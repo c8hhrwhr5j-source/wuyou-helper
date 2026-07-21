@@ -164,6 +164,7 @@
 	<!-- ===== TCC 隐私权限全部绕过（与 TrollAutoScript 一致） ===== -->
 	<key>com.apple.private.tcc.allow</key>
 	<array>
+		<string>kTCCServiceAccessibility</string>
 		<string>kTCCServiceMicrophone</string>
 		<string>kTCCServiceCamera</string>
 		<string>kTCCServicePhotoLibrary</string>
