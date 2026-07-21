@@ -1,0 +1,20 @@
+workflows:
+  build-ipa:
+    name: 构建无忧辅助 IPA
+    instance_type: mac_mini_m1
+    max_build_duration: 20
+    environment:
+      xcode: latest
+    scripts:
+      - name: 安装依赖
+        script: |
+          brew install xcodegen ldid
+      - name: 构建 IPA
+        script: |
+          bash build.sh
+    artifacts:
+      - build/无忧辅助.ipa
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com
