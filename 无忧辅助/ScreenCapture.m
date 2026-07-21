@@ -109,6 +109,12 @@ static void _loadIOMobileFramebuffer(void) {
         _keeping = NO;
         _cachedBuffer = NULL;
         _cachedSize = 0;
+        _diagMessage = @"(init 开始, _connect 尚未执行)";
+        _connection = NULL;
+        _surface = NULL;
+        _width = 0;
+        _height = 0;
+        _bytesPerRow = 0;
         [self _connect];
     }
     return self;
@@ -120,14 +126,24 @@ static void _loadIOMobileFramebuffer(void) {
 }
 
 - (void)_connect {
-    NSLog(@"[ScreenCapture] _connect 开始 --- isSandboxed=%d", !access("/var/tmp", W_OK));
+    @try {
+        [self _connectImpl];
+    } @catch (NSException *e) {
+        _diagMessage = [NSString stringWithFormat:@"❌ _connect 抛出异常: %@ - %@", e.name, e.reason];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        [self _fallbackScreenSize];
+    }
+}
+
+- (void)_connectImpl {
+    _diagMessage = @"_connectImpl 已进入";
     if (_connected) {
-        NSLog(@"[ScreenCapture] _connect 已连接，跳过");
+        _diagMessage = @"(已连接，跳过)";
         return;
     }
 
     _loadIOMobileFramebuffer();
-    NSLog(@"[ScreenCapture] _loadIOMobileFramebuffer 完成: %@", _globalDiagInfo);
+    _diagMessage = [NSString stringWithFormat:@"Step1 dlopen/dlsym: %@", _globalDiagInfo];
 
     if (!IOMobileFramebufferGetMainDisplay ||
         !IOMobileFramebufferCreateSurface ||
@@ -136,29 +152,31 @@ static void _loadIOMobileFramebuffer(void) {
         !_IOSurfaceGetWidth ||
         !_IOSurfaceGetHeight ||
         !_IOSurfaceGetBaseAddress) {
-        _diagMessage = _globalDiagInfo ?: @"❌ IOMobileFramebuffer/IOSurface 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
-        NSLog(@"[ScreenCapture] ❌ 符号缺失: %@", _diagMessage);
+        _diagMessage = [NSString stringWithFormat:@"Step2 符号缺失: %@",
+                        _globalDiagInfo ?: @"未知原因"];
         [self _fallbackScreenSize];
         return;
     }
-    NSLog(@"[ScreenCapture] 所有符号检查通过，开始 GetMainDisplay...");
 
+    _diagMessage = @"Step2 符号检查全部通过 → 调用 GetMainDisplay...";
     int ret = IOMobileFramebufferGetMainDisplay(&_connection);
-    NSLog(@"[ScreenCapture] GetMainDisplay 返回: ret=%d, connection=%p", ret, _connection);
+    _diagMessage = [NSString stringWithFormat:@"Step3 GetMainDisplay → ret=%d conn=%p", ret, _connection];
+
     if (ret != 0) {
-        _diagMessage = [NSString stringWithFormat:@"❌ IOMobileFramebufferGetMainDisplay 失败(错误码:%d) → 缺少 entitlement，请用 TrollStore 安装", ret];
-        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        _diagMessage = [NSString stringWithFormat:@"Step3 失败 GetMainDisplay ret=%d (entitlement缺失?)", ret];
         [self _fallbackScreenSize];
         return;
     }
 
     // 用 1x1 先创建 surface 获取宽高信息
+    _diagMessage = [NSString stringWithFormat:@"Step3 成功 → 探测 Surface(%p)", _connection];
     ret = IOMobileFramebufferCreateSurface(_connection, 1, 1, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
-    NSLog(@"[ScreenCapture] CreateSurface(probe) 返回: ret=%d, surface=%p", ret, _surface);
+    _diagMessage = [NSString stringWithFormat:@"Step4 CreateSurface(probe) → ret=%d surf=%p bpr=%d",
+                    ret, _surface, _bytesPerRow];
+
     if (ret != 0 || !_surface) {
-        _diagMessage = [NSString stringWithFormat:@"❌ CreateSurface 探测失败(错误码:%d)", ret];
-        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        _diagMessage = [NSString stringWithFormat:@"Step4 失败 CreateSurface probe ret=%d", ret];
         [self _fallbackScreenSize];
         return;
     }
@@ -166,43 +184,40 @@ static void _loadIOMobileFramebuffer(void) {
     // 获取实际尺寸
     _width  = (int)_IOSurfaceGetWidth(_surface);
     _height = (int)_IOSurfaceGetHeight(_surface);
-    NSLog(@"[ScreenCapture] Surface 尺寸: %dx%d", _width, _height);
+    _diagMessage = [NSString stringWithFormat:@"Step5 探测成功 → %dx%d, 释放探针...", _width, _height];
 
     // 释放 probe surface，用实际尺寸重建
     CFRelease(_surface);
     _surface = NULL;
 
     if (_width <= 0 || _height <= 0) {
-        _diagMessage = [NSString stringWithFormat:@"❌ Surface 返回无效尺寸 %dx%d", _width, _height];
-        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        _diagMessage = [NSString stringWithFormat:@"Step5 失败 无效尺寸 %dx%d", _width, _height];
         [self _fallbackScreenSize];
         return;
     }
 
+    _diagMessage = [NSString stringWithFormat:@"Step5 尺寸有效 → 创建正式 Surface %dx%d...", _width, _height];
     ret = IOMobileFramebufferCreateSurface(_connection, _width, _height, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
-    NSLog(@"[ScreenCapture] CreateSurface(real %dx%d) 返回: ret=%d, surface=%p, bpr=%d",
-          _width, _height, ret, _surface, _bytesPerRow);
+
     if (ret != 0 || !_surface) {
-        _diagMessage = [NSString stringWithFormat:@"❌ CreateSurface(%dx%d) 失败(错误码:%d)", _width, _height, ret];
-        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        _diagMessage = [NSString stringWithFormat:@"Step6 失败 CreateSurface(%dx%d) ret=%d", _width, _height, ret];
         [self _fallbackScreenSize];
         return;
     }
 
     _connected = YES;
-    _diagMessage = [NSString stringWithFormat:@"✅ 已连接: %dx%d, bytesPerRow=%d", _width, _height, _bytesPerRow];
-    NSLog(@"[ScreenCapture] ✅ 连接成功: %@", _diagMessage);
+    _diagMessage = [NSString stringWithFormat:@"✅ Step6 连接成功: %dx%d bpr=%d", _width, _height, _bytesPerRow];
 }
 
 - (void)_fallbackScreenSize {
     CGRect bounds = [[UIScreen mainScreen] nativeBounds];
     _width  = (int)bounds.size.width;
     _height = (int)bounds.size.height;
-    if (!_diagMessage) {
-        _diagMessage = [NSString stringWithFormat:@"⚠️ 屏幕捕获未初始化，分辨率回退为 UIScreen: %dx%d", _width, _height];
-    }
-    NSLog(@"[ScreenCapture] Fallback screen size: %dx%d (screen capture may still fail)", _width, _height);
+    // 始终追加 fallback 信息到已有诊断中
+    NSString *prev = _diagMessage ? [NSString stringWithFormat:@"%@", _diagMessage] : @"(无)";
+    _diagMessage = [NSString stringWithFormat:@"%@ | fallback→UIScreen %dx%d", prev, _width, _height];
+    NSLog(@"[ScreenCapture] Fallback screen size: %dx%d", _width, _height);
 }
 
 - (BOOL)isConnected {
