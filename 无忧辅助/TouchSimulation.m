@@ -15,9 +15,6 @@
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 
-// 事件类型
-#define kIOHIDEventTypeDigitizer 11
-
 // Digitizer 事件子类型
 enum {
     kIOHIDDigitizerEventRange       = 0x00,
@@ -25,14 +22,15 @@ enum {
     kIOHIDDigitizerEventAttribute   = 0x02,
 };
 
-// Digitizer 事件掩码位
+// Digitizer transducer flags
 enum {
     kIOHIDDigitizerTransducerTouch       = (1 << 0),
+    kIOHIDDigitizerTransducerInvert      = (1 << 1),
     kIOHIDDigitizerTransducerIdentity    = (1 << 2),
     kIOHIDDigitizerTransducerRange       = (1 << 3),
 };
 
-// 触摸阶段
+// 触摸阶段（用作 buttonMask）
 enum {
     kIOHIDDigitizerTransducerFingerPhaseBegan      = 0x01,
     kIOHIDDigitizerTransducerFingerPhaseMoved       = 0x02,
@@ -40,23 +38,48 @@ enum {
     kIOHIDDigitizerTransducerFingerPhaseEnded       = 0x08,
 };
 
+// Digitizer event field IDs for IOHIDEventSetFloatValue
+enum {
+    kIOHIDDigitizerEventFieldDidNotUpdateMask       = 0x00000001,
+    kIOHIDDigitizerEventFieldDigitizerX             = 0x00100001,
+    kIOHIDDigitizerEventFieldDigitizerY             = 0x00100002,
+    kIOHIDDigitizerEventFieldDigitizerZ             = 0x00100003,
+    kIOHIDDigitizerEventFieldDigitizerButtonMask    = 0x00100004,
+    kIOHIDDigitizerEventFieldDigitizerRange         = 0x00100006,
+    kIOHIDDigitizerEventFieldDigitizerTouch         = 0x00100007,
+    kIOHIDDigitizerEventFieldDigitizerPressure      = 0x00100009,
+    kIOHIDDigitizerEventFieldDigitizerAuxiliaryPressure = 0x0010000A,
+    kIOHIDDigitizerEventFieldDigitizerTwist          = 0x0010000B,
+    kIOHIDDigitizerEventFieldDigitizerCollection     = 0x00100020,
+    kIOHIDDigitizerEventFieldDigitizerChildEventMask  = 0x00100022,
+    kIOHIDDigitizerEventFieldDigitizerIsDisplayIntegrated = 0x00100024,
+    kIOHIDDigitizerEventFieldDigitizerQuality         = 0x00100026,
+    kIOHIDDigitizerEventFieldDigitizerDensity         = 0x00100027,
+    kIOHIDDigitizerEventFieldDigitizerIrregularity    = 0x00100028,
+    kIOHIDDigitizerEventFieldDigitizerMajorRadius     = 0x00100029,
+    kIOHIDDigitizerEventFieldDigitizerMinorRadius     = 0x0010002A,
+    kIOHIDDigitizerEventFieldDigitizerAccuracy        = 0x0010002B,
+};
+
+// 派发方法
 extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
+
+extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
     CFAllocatorRef allocator,
     uint64_t timestamp,
+    uint32_t type,        // kIOHIDDigitizerEventRange / kIOHIDDigitizerEventTouch
     uint32_t index,
     uint32_t identity,
-    uint32_t eventMask,
+    uint32_t eventMask,   // transducer flags 组合
+    uint32_t buttonMask,  // 触摸阶段
     double x, double y, double z,
-    uint8_t tipPressure, uint8_t twist,
+    uint8_t tipPressure, uint8_t barrelPressure,
     uint8_t range, uint8_t touch,
-    uint32_t quality,
-    uint32_t density,
-    uint32_t irregularity,
-    uint32_t majorRadius,
-    uint32_t minorRadius,
-    double accuracy
+    uint32_t options
 );
+
+extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, float value);
+extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
 extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
 
 // MARK: - TouchSlide 实现
@@ -182,10 +205,12 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
     return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
 }
 
-/// 发送单个触摸事件（与触控精灵完全一致）
+/// 发送单个触摸事件
+/// 使用 IOHIDEventCreateDigitizerEvent 创建父子事件结构，
+/// 这是 iOS 14-16 TrollStore 环境中最可靠的触摸注入方式。
 - (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y
                 phase:(uint8_t)phase
-           fingerID:(uint32_t)fingerID {
+             fingerID:(uint32_t)fingerID {
 
     if (!_client) {
         [self _log:@"[TouchSimulation] ❌ _client 为 NULL，无法发送触摸事件"];
@@ -196,29 +221,69 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
     _lastY = y;
     uint64_t ts = [self _now];
 
-    IOHIDEventRef event = IOHIDEventCreateDigitizerFingerEventWithQuality(
+    uint8_t touchValue = (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? 0 : 1;
+    // transducer flags: Touch + Range 是最小集，Identity 可选
+    uint32_t transducerFlags = kIOHIDDigitizerTransducerTouch | kIOHIDDigitizerTransducerRange;
+    if (phase != kIOHIDDigitizerTransducerFingerPhaseEnded) {
+        transducerFlags |= kIOHIDDigitizerTransducerIdentity;
+    }
+
+    // 1. 创建父事件（Range 事件 - 定义 digitizer 范围）
+    IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
         kCFAllocatorDefault,
         ts,
-        fingerID,   // index
-        fingerID + 2, // identity
-        kIOHIDDigitizerTransducerTouch | kIOHIDDigitizerTransducerIdentity | kIOHIDDigitizerTransducerRange,
-        x, y, 0,    // x, y, z（直接传屏幕像素坐标）
-        30,         // tipPressure
-        0,          // twist
-        80,         // range
-        phase == kIOHIDDigitizerTransducerFingerPhaseEnded ? 0 : 1,  // touch
-        1,          // quality
-        500,        // density
-        0,          // irregularity
-        5,          // majorRadius
-        5,          // minorRadius
-        1.0         // accuracy
+        kIOHIDDigitizerEventRange,
+        0,                      // index
+        0,                      // identity
+        kIOHIDDigitizerTransducerRange,  // eventMask
+        0,                      // buttonMask
+        x, y, 0,                // x, y, z
+        0, 0,                   // tipPressure, barrelPressure
+        touchValue,             // range (1 = in range, 0 = out of range)
+        0,                      // touch
+        0                       // options
     );
 
-    if (!event) {
-        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ❌ 创建 IOHIDEvent 返回 NULL！phase=%d x=%.0f y=%.0f", phase, x, y]];
+    if (!parent) {
+        [self _log:@"[TouchSimulation] ❌ 创建父事件(Range)返回 NULL"];
         return;
     }
+
+    // 设置 display integrated 标志（告诉系统这是内建显示器触摸）
+    IOHIDEventSetFloatValue(parent, kIOHIDDigitizerEventFieldDigitizerIsDisplayIntegrated, 1.0f);
+
+    // 2. 创建子事件（Touch 事件 - 实际的触摸信息）
+    IOHIDEventRef child = IOHIDEventCreateDigitizerEvent(
+        kCFAllocatorDefault,
+        ts,
+        kIOHIDDigitizerEventTouch,
+        fingerID,               // index
+        fingerID + 2,           // identity
+        transducerFlags,        // eventMask
+        phase,                  // buttonMask = 触摸阶段
+        x, y, 0,                // x, y, z
+        30,                     // tipPressure
+        0,                      // barrelPressure
+        touchValue,             // range
+        touchValue,             // touch (1 = touching, 0 = not touching)
+        0                       // options
+    );
+
+    if (!child) {
+        [self _log:@"[TouchSimulation] ❌ 创建子事件(Touch)返回 NULL"];
+        CFRelease(parent);
+        return;
+    }
+
+    // 设置触摸质量属性
+    IOHIDEventSetFloatValue(child, kIOHIDDigitizerEventFieldDigitizerDensity, 500.0f);
+    IOHIDEventSetFloatValue(child, kIOHIDDigitizerEventFieldDigitizerQuality, 1.0f);
+    IOHIDEventSetFloatValue(child, kIOHIDDigitizerEventFieldDigitizerMajorRadius, 5.0f);
+    IOHIDEventSetFloatValue(child, kIOHIDDigitizerEventFieldDigitizerMinorRadius, 5.0f);
+    IOHIDEventSetFloatValue(child, kIOHIDDigitizerEventFieldDigitizerAccuracy, 1.0f);
+
+    // 3. 将子事件附加到父事件
+    IOHIDEventAppendEvent(parent, child, 0);
 
     const char *phaseName = (phase == kIOHIDDigitizerTransducerFingerPhaseBegan) ? "DOWN" :
                             (phase == kIOHIDDigitizerTransducerFingerPhaseMoved) ? "MOVE" :
@@ -227,8 +292,10 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
     [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu",
               phaseName, fingerID, x, y, ts]];
 
-    IOHIDEventSystemClientDispatchEvent(_client, event);
-    CFRelease(event);
+    // 4. 派发父事件（系统会同时处理子事件）
+    IOHIDEventSystemClientDispatchEvent(_client, parent);
+    CFRelease(child);
+    CFRelease(parent);
 
     [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ %s 已派发", phaseName]];
 }
