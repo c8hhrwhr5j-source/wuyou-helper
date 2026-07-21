@@ -8,6 +8,8 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <mach/mach_time.h>
 #import <stdlib.h>
+#import <math.h>
+#import <unistd.h>
 
 // IOHIDEvent 私有 API
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -227,7 +229,8 @@ extern int IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client,
 
     TouchSlide *slide = [self slideWithFingerID:0];
     slide.step(5);
-    slide.delay((int)(ms / MAX(((x2-x1)+(y2-y1))/5, 5)));
+    CGFloat travelDist = ((x2 - x1) + (y2 - y1)) / 5;
+    slide.delay((int)(ms / (travelDist > 5 ? travelDist : 5)));
 
     [slide on:x1 y:y1];
     [slide move:x2 y:y2];
