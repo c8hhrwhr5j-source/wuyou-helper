@@ -6,3 +6,5 @@
 #import "ScriptEngine.h"
 #import "DeviceInfo.h"
 #import "ScreenCapture.h"
+#import "TouchSimulation.h"
+#import "AppDelegate.h"

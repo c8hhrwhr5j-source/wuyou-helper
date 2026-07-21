@@ -7,6 +7,8 @@ import SwiftUI
 
 @main
 struct ____App: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     init() {
         ScriptDirectoryHelper.ensureScriptDirectory()
     }
