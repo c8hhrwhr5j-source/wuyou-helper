@@ -112,7 +112,6 @@ static CGEventSourceRef _eventSource = NULL;
     CGFloat _lastX;
     CGFloat _lastY;
     uint32_t _lastIdentity;
-    BOOL _hidInitialized;
 }
 
 + (instancetype)sharedInstance {
@@ -130,7 +129,6 @@ static CGEventSourceRef _eventSource = NULL;
         _lastX = 0;
         _lastY = 0;
         _lastIdentity = 0;
-        _hidInitialized = NO;
     }
     return self;
 }
@@ -143,9 +141,6 @@ static CGEventSourceRef _eventSource = NULL;
 }
 
 - (BOOL)_initCGEvent {
-    if (_hidInitialized) return (_eventSource != NULL);
-    _hidInitialized = YES;
-
     [self _log:@"[TouchSimulation] 🔧 开始初始化 CGEvent 无障碍方案..."];
 
     // CGEvent 函数在 CoreGraphics framework 中（iOS 私有 API）
@@ -196,7 +191,6 @@ static CGEventSourceRef _eventSource = NULL;
 }
 
 - (void)logDiagnostic {
-    [self _initCGEvent];
     if (_CGEventPost) {
         [self _log:@"[TouchSimulation] ✅ CGEvent 无障碍系统已就绪"];
     } else {
