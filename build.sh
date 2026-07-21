@@ -146,13 +146,27 @@ if command -v ldid &> /dev/null; then
     # 验证关键 entitlements 是否注入成功
     echo "   🔍 验证关键 entitlements..."
     EMBEDDED=$(ldid -e "${APP_BINARY}" 2>/dev/null)
-    for key in "no-sandbox" "no-container" "IOMobileFramebuffer.client" "get-pixel-colors" "allow-screen-capture"; do
+    FAILED=0
+    for key in \
+        "com.apple.private.security.no-sandbox" \
+        "com.apple.private.security.no-container" \
+        "platform-application" \
+        "com.apple.private.iomobileframebuffer.access" \
+        "com.apple.private.screencapture.capture-all-displays" \
+        "com.apple.private.iohid.event-system" \
+        "com.apple.security.exception.files.absolute-path.read-write" \
+        "com.apple.private.tcc.allow"; do
         if echo "${EMBEDDED}" | grep -q "${key}"; then
             echo "     ✅ ${key}"
         else
             echo "     ❌ ${key} 缺失!"
+            FAILED=1
         fi
     done
+    if [ "${FAILED}" = "1" ]; then
+        echo "❌ 验证失败：关键 entitlements 缺失"
+        exit 1
+    fi
 
     # ===== roothelper: ldid 注入 (嵌入式二进制) =====
     echo "   🔏 注入 roothelper entitlements..."
