@@ -4,10 +4,12 @@
 //
 
 #import "ScreenCapture.h"
-#import <IOSurface/IOSurface.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
+
+// IOSurfaceRef 前向声明（替代 #import <IOSurface/IOSurface.h>，避免 CI SDK 路径问题）
+typedef struct __IOSurface *IOSurfaceRef;
 
 // IOMobileFramebuffer 私有 API
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferConnection;
