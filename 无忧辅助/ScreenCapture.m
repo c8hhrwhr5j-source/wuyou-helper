@@ -87,9 +87,19 @@ static void _loadIOMobileFramebuffer(void) {
 
     _loadIOMobileFramebuffer();
 
+    if (!IOMobileFramebufferGetMainDisplay ||
+        !IOMobileFramebufferCreateSurface ||
+        !IOMobileFramebufferLockSurface ||
+        !IOMobileFramebufferUnlockSurface) {
+        NSLog(@"[ScreenCapture] IOMobileFramebuffer symbols not found — running without private API access?");
+        [self _fallbackScreenSize];
+        return;
+    }
+
     int ret = IOMobileFramebufferGetMainDisplay(&_connection);
     if (ret != 0) {
-        NSLog(@"[ScreenCapture] IOMobileFramebufferGetMainDisplay failed: %d", ret);
+        NSLog(@"[ScreenCapture] IOMobileFramebufferGetMainDisplay failed: %d (no entitlements / not TrollStore?)", ret);
+        [self _fallbackScreenSize];
         return;
     }
 
@@ -98,6 +108,7 @@ static void _loadIOMobileFramebuffer(void) {
                                             &_surface, &_bytesPerRow);
     if (ret != 0 || !_surface) {
         NSLog(@"[ScreenCapture] CreateSurface probe failed: %d", ret);
+        [self _fallbackScreenSize];
         return;
     }
 
@@ -109,15 +120,29 @@ static void _loadIOMobileFramebuffer(void) {
     CFRelease(_surface);
     _surface = NULL;
 
+    if (_width <= 0 || _height <= 0) {
+        NSLog(@"[ScreenCapture] Probe surface returned invalid size %dx%d", _width, _height);
+        [self _fallbackScreenSize];
+        return;
+    }
+
     ret = IOMobileFramebufferCreateSurface(_connection, _width, _height, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
     if (ret != 0 || !_surface) {
         NSLog(@"[ScreenCapture] CreateSurface(%d,%d) failed: %d", _width, _height, ret);
+        [self _fallbackScreenSize];
         return;
     }
 
     _connected = YES;
     NSLog(@"[ScreenCapture] Connected: %dx%d, bytesPerRow=%d", _width, _height, _bytesPerRow);
+}
+
+- (void)_fallbackScreenSize {
+    CGRect bounds = [[UIScreen mainScreen] nativeBounds];
+    _width  = (int)bounds.size.width;
+    _height = (int)bounds.size.height;
+    NSLog(@"[ScreenCapture] Fallback screen size: %dx%d (screen capture may still fail)", _width, _height);
 }
 
 - (void)_disconnect {
