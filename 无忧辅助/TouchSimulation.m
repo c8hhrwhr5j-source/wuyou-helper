@@ -1,6 +1,6 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（参考 AutoGo-iOS）
+//  无忧辅助 - 通过 IOHIDUserDevice 进行触控模拟
 //
 
 #import "TouchSimulation.h"
@@ -12,55 +12,157 @@
 #import <mach/mach_time.h>
 #import <dlfcn.h>
 
-// ---- IOHIDEvent 动态加载 ----
-typedef void* IOHIDEventRef;
-typedef void* IOHIDEventSystemClientRef;
+// ---- IOHIDUserDevice 动态加载 ----
+typedef void* IOHIDUserDeviceRef;
 
-typedef IOHIDEventRef (*IOHIDEventCreateDigitizerEventFn)(
-    CFAllocatorRef, uint64_t, int32_t, uint32_t, uint32_t,
-    uint32_t, uint32_t, double, double, double, double, double,
-    bool, bool, uint32_t);
+typedef IOHIDUserDeviceRef (*IOHIDUserDeviceCreateFn)(
+    CFAllocatorRef allocator,
+    CFTypeRef properties);
 
-typedef IOHIDEventSystemClientRef (*IOHIDEventSystemClientCreateFn)(CFAllocatorRef);
-typedef int32_t (*IOHIDEventSystemClientDispatchEventFn)(IOHIDEventSystemClientRef, IOHIDEventRef);
+typedef void (*IOHIDUserDeviceScheduleWithRunLoopFn)(
+    IOHIDUserDeviceRef device,
+    CFRunLoopRef runLoop,
+    CFStringRef runLoopMode);
 
-static IOHIDEventCreateDigitizerEventFn _createDigitizerEvent = NULL;
-static IOHIDEventSystemClientCreateFn _createClient = NULL;
-static IOHIDEventSystemClientDispatchEventFn _dispatchEvent = NULL;
-static IOHIDEventSystemClientRef _hidClient = NULL;
+typedef void (*IOHIDUserDeviceUnscheduleFromRunLoopFn)(
+    IOHIDUserDeviceRef device,
+    CFRunLoopRef runLoop,
+    CFStringRef runLoopMode);
+
+typedef bool (*IOHIDUserDeviceHandleReportFn)(
+    IOHIDUserDeviceRef device,
+    uint8_t *report,
+    CFIndex reportLength);
+
+typedef void (*IOHIDUserDeviceRegisterInputReportCallbackFn)(
+    IOHIDUserDeviceRef device,
+    void *callback,
+    void *context);
+
+static IOHIDUserDeviceCreateFn _createUserDevice = NULL;
+static IOHIDUserDeviceScheduleWithRunLoopFn _scheduleRunLoop = NULL;
+static IOHIDUserDeviceUnscheduleFromRunLoopFn _unscheduleRunLoop = NULL;
+static IOHIDUserDeviceHandleReportFn _handleReport = NULL;
+static IOHIDUserDeviceRegisterInputReportCallbackFn _registerCallback = NULL;
+
+static IOHIDUserDeviceRef _userDevice = NULL;
 static uint32_t _fingerSeq = 1000;
+static CGFloat _screenScale = 1.0;
+static CGSize _screenSize = {0, 0};
 
-// Digitizer event mask (与 AutoGo-iOS 一致)
-#define kDigitizerEventRange    0x01
-#define kDigitizerEventTouch    0x02
-#define kDigitizerEventPosition 0x04
-#define kDigitizerEventIdentity 0x20
-
-static uint64_t mach_abs_time_us(void) {
-    mach_timebase_info_data_t info;
-    mach_timebase_info(&info);
-    uint64_t abs = mach_absolute_time();
-    return abs * info.numer / info.denom;
-}
-
-static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIndex, uint32_t identity) {
-    if (!_createDigitizerEvent || !_dispatchEvent || !_hidClient) return false;
+// HID 报告描述符 - 触摸屏（兼容 iOS）
+static const uint8_t _hidReportDescriptor[] = {
+    0x05, 0x0D,                    // Usage Page (Digitizers)
+    0x09, 0x04,                    // Usage (Touch Screen)
+    0xA1, 0x01,                    // Collection (Application)
     
-    uint32_t mask = kDigitizerEventRange | kDigitizerEventTouch | kDigitizerEventPosition | kDigitizerEventIdentity;
-    IOHIDEventRef event = _createDigitizerEvent(kCFAllocatorDefault, mach_abs_time_us(),
-        0, fingerIndex, identity, mask, 0, x, y, 0, 0, 0, true, touch, 0);
-    if (!event) return false;
+    0x85, 0x01,                    // Report ID (1)
     
-    int32_t result = _dispatchEvent(_hidClient, event);
-    CFRelease(event);
+    0x09, 0x54,                    // Usage (Contact count)
+    0x25, 0x0F,                    // Logical Maximum (15)
+    0x95, 0x01,                    // Report Count (1)
+    0x75, 0x04,                    // Report Size (4 bits)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x95, 0x01,                    // Report Count (1)
+    0x75, 0x04,                    // Report Size (4 bits)
+    0x81, 0x01,                    // Input (Const,Var,Abs)
+    
+    0x09, 0x22,                    // Usage (Finger)
+    0xA1, 0x02,                    // Collection (Logical)
+    
+    0x09, 0x42,                    // Usage (Tip Switch)
+    0x15, 0x00,                    // Logical Minimum (0)
+    0x25, 0x01,                    // Logical Maximum (1)
+    0x75, 0x01,                    // Report Size (1)
+    0x95, 0x01,                    // Report Count (1)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x09, 0x32,                    // Usage (In Range)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x95, 0x02,                    // Report Count (2)
+    0x81, 0x01,                    // Input (Const,Var,Abs)
+    
+    0x09, 0x51,                    // Usage (Contact Identifier)
+    0x25, 0x0F,                    // Logical Maximum (15)
+    0x75, 0x04,                    // Report Size (4)
+    0x95, 0x01,                    // Report Count (1)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x05, 0x01,                    // Usage Page (Generic Desktop)
+    0x09, 0x30,                    // Usage (X)
+    0x16, 0x00, 0x00,              // Logical Minimum (0)
+    0x26, 0xFF, 0x0F,              // Logical Maximum (4095)
+    0x75, 0x10,                    // Report Size (16)
+    0x95, 0x01,                    // Report Count (1)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x09, 0x31,                    // Usage (Y)
+    0x26, 0xFF, 0x0F,              // Logical Maximum (4095)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x0D, 0x47, 0x00, 0x04,        // Usage (Width) - 0x47
+    0x27, 0xFF, 0x0F, 0x00, 0x00,  // Logical Maximum (4095)
+    0x75, 0x10,                    // Report Size (16)
+    0x95, 0x01,                    // Report Count (1)
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0x0D, 0x48, 0x00, 0x04,        // Usage (Height) - 0x48
+    0x81, 0x02,                    // Input (Data,Var,Abs)
+    
+    0xC0,                          // End Collection
+    
+    0xC0                           // End Collection
+};
+
+// 报告格式:
+// [0] = Report ID (0x01)
+// [1] = Contact Count (低4位) + 保留(高4位)
+// [2] = Tip Switch (bit0) + In Range (bit1) + 保留(bit2-3) + Contact ID (bit4-7)
+// [3] = X坐标低字节
+// [4] = X坐标高字节
+// [5] = Y坐标低字节
+// [6] = Y坐标高字节
+// [7] = Width低字节
+// [8] = Width高字节
+// [9] = Height低字节
+// [10] = Height高字节
+
+#define REPORT_SIZE 11
+
+static void _sendTouchReport(uint32_t contactCount, uint32_t contactID, 
+                             bool isTouching, uint32_t x, uint32_t y) {
+    if (!_userDevice || !_handleReport) return;
+    
+    uint8_t report[REPORT_SIZE] = {0};
+    report[0] = 0x01; // Report ID
+    report[1] = contactCount & 0x0F; // Contact Count
+    
+    if (contactCount > 0) {
+        report[2] = ((contactID & 0x0F) << 4) | (isTouching ? 0x03 : 0x00);
+        report[3] = x & 0xFF;
+        report[4] = (x >> 8) & 0xFF;
+        report[5] = y & 0xFF;
+        report[6] = (y >> 8) & 0xFF;
+        report[7] = 0x14; // Width = 20
+        report[8] = 0x00;
+        report[9] = 0x14; // Height = 20
+        report[10] = 0x00;
+    }
+    
+    bool success = _handleReport(_userDevice, report, REPORT_SIZE);
     
     static bool logged = false;
     if (!logged) {
-        NSLog(@"[TouchSimulation] dispatch result=%d", result);
+        NSLog(@"[TouchSimulation] IOHIDUserDevice report sent, success=%d", success);
         logged = true;
     }
-    
-    return result == 0;
+}
+
+static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY) {
+    *outX = (uint32_t)(x * 4095.0 / _screenSize.width);
+    *outY = (uint32_t)(y * 4095.0 / _screenSize.height);
 }
 
 // MARK: - TouchSlide 实现
@@ -149,11 +251,19 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
 - (instancetype)init {
     if (self = [super init]) {
         [self _initHID];
+        [self _initScreenInfo];
         _lastX = 0;
         _lastY = 0;
         _lastIdentity = 0;
     }
     return self;
+}
+
+- (void)_initScreenInfo {
+    _screenScale = [UIScreen mainScreen].scale;
+    _screenSize = [UIScreen mainScreen].nativeBounds.size;
+    NSLog(@"[TouchSimulation] Screen: %.0fx%.0f scale=%.1f", 
+          _screenSize.width, _screenSize.height, _screenScale);
 }
 
 - (void)_initHID {
@@ -166,23 +276,49 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
         return;
     }
     
-    _createDigitizerEvent = dlsym(handle, "IOHIDEventCreateDigitizerEvent");
-    _createClient = dlsym(handle, "IOHIDEventSystemClientCreate");
-    _dispatchEvent = dlsym(handle, "IOHIDEventSystemClientDispatchEvent");
+    _createUserDevice = dlsym(handle, "IOHIDUserDeviceCreate");
+    _scheduleRunLoop = dlsym(handle, "IOHIDUserDeviceScheduleWithRunLoop");
+    _unscheduleRunLoop = dlsym(handle, "IOHIDUserDeviceUnscheduleFromRunLoop");
+    _handleReport = dlsym(handle, "IOHIDUserDeviceHandleReport");
+    _registerCallback = dlsym(handle, "IOHIDUserDeviceRegisterInputReportCallback");
     
-    if (_createClient) {
-        _hidClient = _createClient(kCFAllocatorDefault);
+    if (!_createUserDevice || !_scheduleRunLoop || !_handleReport) {
+        [self _log:@"[TouchSimulation] ❌ 缺少必要的 IOHIDUserDevice 函数"];
+        return;
     }
     
-    if (_createDigitizerEvent && _hidClient && _dispatchEvent) {
-        [self _log:@"[TouchSimulation] ✅ IOHIDEvent 初始化成功"];
+    CFDataRef reportDescriptor = CFDataCreate(kCFAllocatorDefault, 
+                                              _hidReportDescriptor, 
+                                              sizeof(_hidReportDescriptor));
+    
+    NSDictionary *properties = @{
+        (__bridge NSString *)kIOHIDReportDescriptorKey: (__bridge id)reportDescriptor,
+        (__bridge NSString *)kIOHIDPhysicalDeviceUniqueIDKey: @"wuyou-touch-device",
+        (__bridge NSString *)kIOHIDTransportKey: @"USB",
+        (__bridge NSString *)kIOHIDVendorIDKey: @(0x1234),
+        (__bridge NSString *)kIOHIDProductIDKey: @(0xABCD),
+        (__bridge NSString *)kIOHIDVersionNumberKey: @(1),
+        (__bridge NSString *)kIOHIDManufacturerKey: @"WuYou",
+        (__bridge NSString *)kIOHIDProductKey: @"Touch Simulator"
+    };
+    
+    _userDevice = _createUserDevice(kCFAllocatorDefault, (__bridge CFTypeRef)properties);
+    
+    if (reportDescriptor) CFRelease(reportDescriptor);
+    
+    if (_userDevice) {
+        _scheduleRunLoop(_userDevice, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+        [self _log:@"[TouchSimulation] ✅ IOHIDUserDevice 初始化成功"];
     } else {
-        [self _log:@"[TouchSimulation] ❌ IOHIDEvent 初始化失败"];
+        [self _log:@"[TouchSimulation] ❌ IOHIDUserDevice 创建失败"];
     }
 }
 
 - (void)dealloc {
-    if (_hidClient) CFRelease(_hidClient);
+    if (_userDevice) {
+        _unscheduleRunLoop(_userDevice, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+        CFRelease(_userDevice);
+    }
 }
 
 - (void)_log:(NSString *)msg {
@@ -193,8 +329,8 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
 }
 
 - (void)logDiagnostic {
-    if (_hidClient && _createDigitizerEvent && _dispatchEvent) {
-        [self _log:@"[TouchSimulation] ✅ HID Client 有效"];
+    if (_userDevice && _handleReport) {
+        [self _log:@"[TouchSimulation] ✅ HID UserDevice 有效"];
     } else {
         [self _log:@"[TouchSimulation] ❌ HID 初始化不完整——触摸注入完全无效！"];
     }
@@ -208,26 +344,31 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
     
     const char *phaseName = isTouching ? "DOWN" : "UP";
     
-    uint32_t identity = isTouching ? (_fingerSeq++) : 0;
+    uint32_t identity = isTouching ? (_fingerSeq++) : _lastIdentity;
     _lastIdentity = isTouching ? identity : _lastIdentity;
     
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f identity=%u",
-              phaseName, fingerID, x, y, identity]];
+    uint32_t hidX, hidY;
+    _convertCoords(x, y, &hidX, &hidY);
     
-    bool success = dispatch_digitizer((double)x, (double)y, isTouching, 0, identity);
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f (HID: %u,%u) identity=%u",
+              phaseName, fingerID, x, y, hidX, hidY, identity]];
     
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] %s %@", phaseName, success ? @"✅ 已派发" : @"❌ 派发失败"]];
+    _sendTouchReport(isTouching ? 1 : 0, identity & 0x0F, isTouching, hidX, hidY);
+    
+    usleep(5000);
 }
 
 - (void)_sendMoveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
     _lastX = x;
     _lastY = y;
     
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 MOVE finger=%d x=%.0f y=%.0f", fingerID, x, y]];
+    uint32_t hidX, hidY;
+    _convertCoords(x, y, &hidX, &hidY);
     
-    bool success = dispatch_digitizer((double)x, (double)y, true, 0, _lastIdentity);
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 MOVE finger=%d x=%.0f y=%.0f (HID: %u,%u)", 
+              fingerID, x, y, hidX, hidY]];
     
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] MOVE %@", success ? @"✅ 已派发" : @"❌ 派发失败"]];
+    _sendTouchReport(1, _lastIdentity & 0x0F, true, hidX, hidY);
 }
 
 // MARK: - 底层原子操作
