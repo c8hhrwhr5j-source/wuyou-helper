@@ -55,7 +55,7 @@ final class LuaScriptManager: ObservableObject {
     }
 
     private init() {
-        engine = .sharedEngine()
+        engine = ScriptEngine.shared()
 
         engine.logHandler = { [weak self] msg in
             DispatchQueue.main.async {

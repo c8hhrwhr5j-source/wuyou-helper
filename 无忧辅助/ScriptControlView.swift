@@ -118,15 +118,13 @@ struct ScriptControlView: View {
             }
             .navigationTitle("Lua 脚本")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showFileList.toggle()
-                    } label: {
-                        Image(systemName: "folder.fill")
-                    }
+            .navigationBarItems(trailing:
+                Button {
+                    showFileList.toggle()
+                } label: {
+                    Image(systemName: "folder.fill")
                 }
-            }
+            )
             .sheet(isPresented: $showingFilePicker) {
                 DocumentPicker(
                     contentTypes: [.plainText, UTType(filenameExtension: "lua") ?? .plainText],
@@ -172,94 +170,87 @@ struct ScriptControlView: View {
     private var fileToolbar: some View {
         HStack(spacing: 8) {
             // 打开文件
-            Button {
+            toolbarButton("打开", icon: "doc.badge.plus", disabled: engine.isRunning) {
                 showingFilePicker = true
-            } label: {
-                Label("打开", systemImage: "doc.badge.plus")
-                    .font(.caption)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(engine.isRunning)
 
             // 保存
-            Button {
+            toolbarButton("保存", icon: "square.and.arrow.down",
+                          disabled: engine.isRunning || scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                 if let path = engine.currentFilePath {
                     engine.saveScript(scriptCode, toPath: path)
                 } else {
                     saveFileName = ""
                     showingSaveAlert = true
                 }
-            } label: {
-                Label("保存", systemImage: "square.and.arrow.down")
-                    .font(.caption)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(engine.isRunning || scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             // 另存为
-            Button {
+            toolbarButton(icon: "square.and.arrow.down.on.square",
+                          disabled: engine.isRunning || scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                 saveFileName = ""
                 showingSaveAlert = true
-            } label: {
-                Image(systemName: "square.and.arrow.down.on.square")
-                    .font(.caption)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(engine.isRunning || scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             Spacer()
 
             // 运行
-            Button {
+            toolbarButton("运行", icon: "play.fill", prominent: true,
+                          disabled: engine.isRunning || scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                 if !scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     engine.runScript(scriptCode)
                 }
-            } label: {
-                Label("运行", systemImage: "play.fill")
-                    .font(.caption.weight(.bold))
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.green)
-            .controlSize(.small)
-            .disabled(engine.isRunning || scriptCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             // 暂停
-            Button {
+            toolbarButton(icon: "pause.fill",
+                          disabled: !engine.isRunning || engine.isPaused) {
                 engine.pause()
-            } label: {
-                Image(systemName: "pause.fill")
-                    .font(.caption)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(!engine.isRunning || engine.isPaused)
 
             // 继续
-            Button {
+            toolbarButton(icon: "play.fill",
+                          disabled: !engine.isPaused) {
                 engine.resume()
-            } label: {
-                Image(systemName: "play.fill")
-                    .font(.caption)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(!engine.isPaused)
 
             // 停止
-            Button(role: .destructive) {
+            toolbarButton(icon: "stop.fill", destructive: true,
+                          disabled: !engine.isRunning) {
                 engine.stop()
-            } label: {
-                Image(systemName: "stop.fill")
+            }
+        }
+    }
+
+    // MARK: - iOS 14 兼容按钮样式
+    private func toolbarButton(_ text: String? = nil, icon: String,
+                                prominent: Bool = false, destructive: Bool = false,
+                                disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            if let text = text {
+                Label(text, systemImage: icon)
+                    .font(prominent ? .caption.weight(.bold) : .caption)
+            } else {
+                Image(systemName: icon)
                     .font(.caption)
             }
-            .buttonStyle(.bordered)
-            .tint(.red)
-            .controlSize(.small)
-            .disabled(!engine.isRunning)
         }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            prominent ? Color.green :
+            destructive ? Color.red.opacity(0.15) :
+            Color(.systemGray4)
+        )
+        .foregroundColor(
+            prominent ? .white :
+            destructive ? .red :
+            .primary
+        )
+        .cornerRadius(6)
+        .disabled(disabled)
+        .opacity(disabled ? 0.4 : 1.0)
     }
 
     // MARK: - 当前文件提示
