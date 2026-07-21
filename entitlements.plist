@@ -5,6 +5,8 @@
     <!-- 关闭沙盒：必须且最优先 -->
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
 
     <!-- root 身份/切换用户 -->
     <key>com.apple.private.persona-mgmt</key>
@@ -47,10 +49,16 @@
     <key>com.apple.private.iokit.restricted-uc-class</key>
     <true/>
 
-    <!-- ===== 屏幕截图/取色（Lua 脚本核心） ===== -->
+    <!-- ===== 屏幕捕获/取色/截图（Lua 脚本核心） ===== -->
     <key>com.apple.private.iomobileframebuffer.access</key>
     <true/>
+    <key>com.apple.private.IOMobileFramebuffer.client</key>
+    <true/>
     <key>com.apple.private.screencapture.capture-all-displays</key>
+    <true/>
+    <key>com.apple.private.coremedia.allow-screen-capture</key>
+    <true/>
+    <key>com.apple.private.graphics.get-pixel-colors</key>
     <true/>
 
     <!-- ===== 触控模拟（Lua 脚本核心） ===== -->

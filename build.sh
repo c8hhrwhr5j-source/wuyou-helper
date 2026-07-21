@@ -134,25 +134,25 @@ if [ ! -f "${APP_BINARY}" ]; then
 fi
 
 if command -v ldid &> /dev/null; then
-    # ===== 主 App：Xcode ad-hoc 签名已嵌入 entitlements，只做验证 =====
-    echo "   🔍 验证主 App 签名 (Xcode ad-hoc)..."
-    if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "persona-mgmt"; then
-        echo "   ✅ persona-mgmt 已嵌入"
+    # ===== 主 App: 强制重新注入 entitlements (Xcode ad-hoc 签名不可靠) =====
+    echo "   🔏 强制注入主 App entitlements..."
+    if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
+        echo "   ✅ ldid 注入成功 (主 App)"
     else
-        echo "   ⚠️  persona-mgmt 未找到!"
-        echo "   ⚠️  Xcode 可能未正确嵌入 entitlements，TrollStore 安装后可能仍被沙盒"
-        echo "   尝试用 ldid 重新注入..."
-        if ldid -S"${ENTITLEMENTS}" "${APP_BINARY}"; then
-            echo "   ✅ ldid 注入成功"
-        fi
+        echo "   ❌ ldid 注入失败 (主 App)"
+        exit 1
     fi
 
-    # 验证 no-sandbox
-    if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "no-sandbox"; then
-        echo "   ✅ no-sandbox 已嵌入"
-    else
-        echo "   ⚠️  no-sandbox 未找到!"
-    fi
+    # 验证关键 entitlements 是否注入成功
+    echo "   🔍 验证关键 entitlements..."
+    EMBEDDED=$(ldid -e "${APP_BINARY}" 2>/dev/null)
+    for key in "no-sandbox" "no-container" "IOMobileFramebuffer.client" "get-pixel-colors" "allow-screen-capture"; do
+        if echo "${EMBEDDED}" | grep -q "${key}"; then
+            echo "     ✅ ${key}"
+        else
+            echo "     ❌ ${key} 缺失!"
+        fi
+    done
 
     # ===== roothelper: ldid 注入 (嵌入式二进制) =====
     echo "   🔏 注入 roothelper entitlements..."
