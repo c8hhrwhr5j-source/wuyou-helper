@@ -1,6 +1,6 @@
 //
 //  AppDelegate.m
-//  无忧辅助 - UIKit AppDelegate（与触控精灵一致的 UIKit 生命周期）
+//  无忧辅助 - UIKit AppDelegate（仅用于提前初始化 HID 客户端）
 //
 
 #import "AppDelegate.h"
@@ -9,12 +9,8 @@
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    // 创建窗口并设为 key window — 触控精灵也是这么做的
-    // 这确保 UIApplication 完整初始化并正确注册到 window server / SpringBoard
-    self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    [self.window makeKeyAndVisible];
-
-    // TouchSimulation 初始化 HID client（尽早初始化，确保权限到位）
+    // 仅初始化 TouchSimulation HID client，不创建额外窗口
+    // SwiftUI 的 WindowGroup 会自动管理场景窗口
     [[TouchSimulation sharedInstance] logDiagnostic];
 
     return YES;

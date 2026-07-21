@@ -1,6 +1,6 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（与触控精灵完全一致）
+//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（与触控精灵逐字一致）
 //
 
 #import "TouchSimulation.h"
@@ -13,6 +13,9 @@
 // ---- IOHIDEvent 私有声明 ----
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+
+// 事件类型
+#define kIOHIDEventTypeDigitizer 11
 
 // Digitizer transducer flags
 enum {
@@ -170,7 +173,8 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
     return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
 }
 
-/// 发送单个触摸事件 — 与触控精灵完全一致的扁平事件方式
+/// 发送单个触摸事件
+/// 与触控精灵完全一致：FingerEventWithQuality 扁平事件 + identity=2 + index=0
 - (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y
                 phase:(uint8_t)phase
              fingerID:(uint32_t)fingerID {
@@ -184,23 +188,24 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
     _lastY = y;
     uint64_t ts = [self _now];
 
+    // 与触控精灵完全一致的参数
     IOHIDEventRef event = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault,
         ts,
-        fingerID,   // index
-        fingerID + 2, // identity
+        0,                          // index — 触控精灵固定为 0
+        2,                          // identity — 触控精灵固定为 2
         kIOHIDDigitizerTransducerTouch | kIOHIDDigitizerTransducerIdentity | kIOHIDDigitizerTransducerRange,
-        x, y, 0,    // x, y, z
-        30,         // tipPressure
-        0,          // twist
-        80,         // range
+        x, y, 0,                    // x, y, z — 直接传像素坐标，不归一化（触控精灵也是如此）
+        30,                         // tipPressure
+        0,                          // twist
+        80,                         // range
         phase == kIOHIDDigitizerTransducerFingerPhaseEnded ? 0 : 1,  // touch
-        1,          // quality
-        500,        // density
-        0,          // irregularity
-        5,          // majorRadius
-        5,          // minorRadius
-        1.0         // accuracy
+        1,                          // quality
+        500,                        // density
+        0,                          // irregularity
+        5,                          // majorRadius
+        5,                          // minorRadius
+        1.0                         // accuracy
     );
 
     if (!event) {
