@@ -7,8 +7,19 @@
 #import "ScreenCapture.h"
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
+#import <string.h>
 #import <stdlib.h>
 #import <unistd.h>
+#include "lauxlib.h"
+
+// 前向声明 Slide 辅助函数（l_touch_slide 在其定义之前引用）
+static int l_touch_slide_gc(lua_State *L);
+static int l_touch_slide_step(lua_State *L);
+static int l_touch_slide_delay(lua_State *L);
+static int l_touch_slide_on(lua_State *L);
+static int l_touch_slide_move(lua_State *L);
+static int l_touch_slide_up(lua_State *L);
+static TouchSlide *l_checkSlide(lua_State *L, int idx);
 
 // 日志回调
 static void (^g_logCallback)(NSString *) = nil;
@@ -259,9 +270,10 @@ static int l_touch_tapRandom(lua_State *L) {
 static int l_touch_slide(lua_State *L) {
     uint32_t fingerID = (uint32_t)luaL_optinteger(L, 1, arc4random_uniform(11));
 
-    // 创建 userdata 保存 TouchSlide 对象（CFBridgingRetain 绕过 ARC 限制）
-    TouchSlide **pslide = (TouchSlide **)lua_newuserdata(L, sizeof(TouchSlide *));
-    *pslide = (__bridge TouchSlide *)CFBridgingRetain([[TouchSimulation sharedInstance] slideWithFingerID:fingerID]);
+    // 用 void* + memcpy 存储 ObjC 指针，避免 ARC 所有权推断冲突
+    void *ud = lua_newuserdata(L, sizeof(CFTypeRef));
+    CFTypeRef cfObj = CFBridgingRetain([[TouchSimulation sharedInstance] slideWithFingerID:fingerID]);
+    memcpy(ud, &cfObj, sizeof(cfObj));
 
     // 设置 metatable
     luaL_newmetatable(L, "TouchSlide");
@@ -301,17 +313,21 @@ static int l_touch_slide(lua_State *L) {
 
 // Slide 对象方法
 static int l_touch_slide_gc(lua_State *L) {
-    TouchSlide **pslide = (TouchSlide **)luaL_checkudata(L, 1, "TouchSlide");
-    if (pslide && *pslide) {
-        CFBridgingRelease((__bridge void *)*pslide);
-        *pslide = nil;
+    CFTypeRef cfObj;
+    memcpy(&cfObj, luaL_checkudata(L, 1, "TouchSlide"), sizeof(cfObj));
+    if (cfObj) {
+        CFBridgingRelease(cfObj);
+        // 清零防止重入
+        cfObj = NULL;
+        memcpy(lua_touserdata(L, 1), &cfObj, sizeof(cfObj));
     }
     return 0;
 }
 
 static TouchSlide *l_checkSlide(lua_State *L, int idx) {
-    TouchSlide **pslide = (TouchSlide **)luaL_checkudata(L, idx, "TouchSlide");
-    return *pslide;
+    CFTypeRef cfObj;
+    memcpy(&cfObj, luaL_checkudata(L, idx, "TouchSlide"), sizeof(cfObj));
+    return (__bridge TouchSlide *)cfObj;
 }
 
 static int l_touch_slide_step(lua_State *L) {

@@ -3,6 +3,7 @@
 //  无忧辅助 - OC ↔ Lua 函数桥接
 //
 
+#import <Foundation/Foundation.h>
 #include "lua.h"
 
 /// 全局脚本停止标志（ScriptEngine 设置，LuaBridge 检查）
