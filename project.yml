@@ -1,41 +1,28 @@
-# ================================================================
-# 无忧辅助 - TrollStore IPA 项目配置
-# ================================================================
-# 安装 XcodeGen: brew install xcodegen
-# 生成项目:    xcodegen generate
-# 打开项目:    open 无忧辅助.xcodeproj
-#
-# 部署目标: iOS 14.0
-#   TrollStore 核心支持 iOS 14.0 - 17.0，最小系统定为 14.0
-#   因此使用 NavigationView / accentColor / PreviewProvider 等旧 API：
-#   NavigationStack 需要 iOS 16+，在 iOS 14/15 上运行时会崩溃
-#   Swift Version 保持 5.9（Xcode 15+）兼容
-
 name: 无忧辅助
-
 options:
-  bundleIdPrefix: com.wuyou
+  bundleIdPrefix: com.wuyou.helper
   deploymentTarget:
     iOS: "14.0"
-  # xcodeVersion: "15.0"  # 让 XcodeGen 自动适配当前 Xcode 版本
-  generateEmptyDirectories: true
-  createIntermediateGroups: true
+  xcodeVersion: "14.0"
 
 settings:
   base:
-    SWIFT_VERSION: "5.9"
-    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
-    TARGETED_DEVICE_FAMILY: "1"
-    ARCHS: "arm64"
-    VALID_ARCHS: "arm64"
-    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: "NO"
-    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+    INFOPLIST_FILE: 无忧辅助/Info.plist
+    PRODUCT_BUNDLE_IDENTIFIER: com.wuyou.helper
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    CODE_SIGN_ENTITLEMENTS: entitlements.plist
+    OTHER_SWIFT_FLAGS: $(inherited) -suppress-warnings
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    SWIFT_OBJC_BRIDGING_HEADER: 无忧辅助/无忧辅助-Bridging-Header.h
+    HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/lua-build/include
+    LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/lua-build/lib
+    OTHER_LDFLAGS: $(inherited) -framework IOKit -framework CoreFoundation -framework IOSurface -llua
 
 targets:
   无忧辅助:
     type: application
     platform: iOS
-    deploymentTarget: "14.0"
     sources:
       - path: 无忧辅助
         type: group
@@ -45,92 +32,84 @@ targets:
           - "main.c"
     settings:
       base:
-        INFOPLIST_FILE: 无忧辅助/Info.plist
-        PRODUCT_BUNDLE_IDENTIFIER: com.wuyou.helper
+        IPHONEOS_DEPLOYMENT_TARGET: "14.0"
         PRODUCT_NAME: 无忧辅助
-        CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGNING_REQUIRED: "NO"
-        CODE_SIGNING_ALLOWED: "YES"
-        CODE_SIGN_ENTITLEMENTS: entitlements.plist
-        # Xcode ad-hoc 签名会把 entitlements 可靠嵌入 Mach-O
-        # TrollStore 安装时替换签名，但从 Mach-O 正确提取权限
         ENABLE_BITCODE: "NO"
+        CODE_SIGN_IDENTITY: "iPhone Distribution"
+        VALID_ARCHS: arm64
+        ARCHS: arm64
         CLANG_ENABLE_MODULES: "YES"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
-        SWIFT_STRICT_CONCURRENCY: "minimal"
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # kfd / offsets 中直接使用了 IOKit / CoreFoundation
-        OTHER_LDFLAGS: "$(inherited) -framework IOKit -framework CoreFoundation"
-    dependencies: []
+        GCC_PREPROCESSOR_DEFINITIONS: $(inherited) LUA_USE_IOS=1
     preBuildScripts:
-      - name: "Copy roothelper"
-        script: |
-          HELPER_DIR="${SRCROOT}/roothelper"
-          HELPER_DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
-
-          if [ -f "${HELPER_DIR}/roothelper" ]; then
-            echo "✅ 复制已编译的 roothelper..."
-            cp "${HELPER_DIR}/roothelper" "${HELPER_DST}"
-            chmod +x "${HELPER_DST}"
-          else
-            echo "⚠️  roothelper 尚未编译，将尝试编译 (kfd + offsets + main)..."
-            SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-            clang -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 -O2 \
-                  -o "${HELPER_DST}" \
-                  "${HELPER_DIR}/main.c" \
-                  "${HELPER_DIR}/kfd.c" \
-                  "${HELPER_DIR}/offsets.c" \
-                  -framework IOKit \
-                  -framework CoreFoundation \
-                  && chmod +x "${HELPER_DST}" \
-                  && echo "✅ roothelper 编译并复制成功" \
-                  || echo "❌ roothelper 编译失败，请手动编译"
-          fi
+      - name: "Build Lua 5.4.7"
         basedOnDependencyAnalysis: false
-    postBuildScripts:
-      - name: "Inject roothelper entitlements with ldid"
         script: |
-          HELPER_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/roothelper"
-          HELPER_ENTITLEMENTS="${SRCROOT}/helper.entitlements"
-          ENTITLEMENTS="${SRCROOT}/entitlements.plist"
+          set -e
+          LUA_VERSION="5.4.7"
+          LUA_BUILD="${SRCROOT}/lua-build"
 
-          # 主 App 已由 Xcode ad-hoc 签名嵌入 entitlements，不再用 ldid 覆盖
-          echo "🔍 验证主 App 签名中的 entitlements..."
-          APP_BINARY="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/${PRODUCT_NAME}"
-          if ldid -e "${APP_BINARY}" 2>/dev/null | grep -q "persona-mgmt"; then
-            echo "✅ 主 App persona-mgmt 已嵌入"
-          else
-            echo "⚠️  主 App 签名中未找到 persona-mgmt，TrollStore 可能无法关闭沙盒"
+          if [ -f "${LUA_BUILD}/lib/liblua.a" ]; then
+            echo "=== Lua already built, skipping ==="
+            exit 0
           fi
 
-          # roothelper 仍需 ldid 签名（嵌入式二进制，不受 Xcode 管理）
-          if command -v ldid &> /dev/null; then
-            if [ -f "${HELPER_ENTITLEMENTS}" ] && [ -f "${HELPER_BINARY}" ]; then
-              echo "🔏 注入 roothelper entitlements..."
-              if ldid -S"${HELPER_ENTITLEMENTS}" "${HELPER_BINARY}"; then
-                echo "✅ roothelper entitlements 已注入"
-              else
-                echo "⚠️  roothelper ldid 注入失败"
-              fi
-            elif [ -f "${HELPER_BINARY}" ]; then
-              echo "🔏 roothelper 使用主 entitlements fallback..."
-              if ldid -S"${ENTITLEMENTS}" "${HELPER_BINARY}"; then
-                echo "✅ roothelper fallback 完成"
-              fi
+          LUA_DIR="${SRCROOT}/lua-${LUA_VERSION}"
+
+          if [ ! -d "${LUA_DIR}" ]; then
+            echo "=== Downloading Lua ${LUA_VERSION} ==="
+            curl -sL -o /tmp/lua-${LUA_VERSION}.tar.gz "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz"
+            tar xzf /tmp/lua-${LUA_VERSION}.tar.gz -C "${SRCROOT}"
+            rm -f /tmp/lua-${LUA_VERSION}.tar.gz
+          fi
+
+          echo "=== Compiling Lua ${LUA_VERSION} for arm64 ==="
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CFLAGS="-arch arm64 -isysroot ${SDK} -mios-version-min=14.0 -O2 -std=gnu11 -fPIC -DLUA_USE_IOS"
+
+          mkdir -p "${LUA_BUILD}/lib" "${LUA_BUILD}/include"
+          cd "${LUA_DIR}/src"
+
+          OBJ_FILES=""
+          for f in *.c; do
+            if [ "$f" != "lua.c" ] && [ "$f" != "luac.c" ]; then
+              obj="${LUA_BUILD}/${f%.c}.o"
+              clang ${CFLAGS} -c "$f" -o "${obj}"
+              OBJ_FILES="${OBJ_FILES} ${obj}"
             fi
-          else
-            echo "⚠️  ldid 未安装"
-          fi
+          done
+
+          ar rcs "${LUA_BUILD}/lib/liblua.a" ${OBJ_FILES}
+          cp lua.h lualib.h lauxlib.h luaconf.h "${LUA_BUILD}/include/"
+
+          # 清理 .o 文件
+          rm -f ${OBJ_FILES}
+
+          cd "${SRCROOT}"
+          echo "=== Lua ${LUA_VERSION} built successfully ==="
+
+      - name: "Copy roothelper"
         basedOnDependencyAnalysis: false
-    # Info.plist 额外键值
-    info:
-      path: 无忧辅助/Info.plist
-      properties:
-        UILaunchStoryboardName: LaunchScreen
-        UIApplicationSupportsIndirectInputEvents: true
-        UIDeviceFamily: [1]
-        UIRequiredDeviceCapabilities: [arm64, iphone-ipad]
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        LSRequiresIPhoneOS: true
-        MinimumOSVersion: "14.0"
+        script: |
+          set -e
+          SRC="${SRCROOT}/roothelper"
+          DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app"
+
+          echo "=== Building roothelper ==="
+          cd "${SRC}"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CFLAGS="-arch arm64 -isysroot ${SDK} -mios-version-min=14.0 -O2 -std=gnu17"
+
+          clang ${CFLAGS} -c kfd.c -o kfd.o
+          clang ${CFLAGS} -c offsets.c -o offsets.o
+          
+          echo "=== Linking roothelper (raw binary) ==="
+          clang ${CFLAGS} kfd.o offsets.o -o roothelper -Xlinker -r -Xlinker -s
+
+          echo "=== Copying roothelper to app bundle ==="
+          cp roothelper "${DST}/roothelper"
+          chmod 755 "${DST}/roothelper"
+
+          echo "=== Cleaning up ==="
+          rm -f kfd.o offsets.o roothelper
+
+          echo "=== roothelper ready ==="

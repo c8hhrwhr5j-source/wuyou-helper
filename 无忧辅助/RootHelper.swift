@@ -2,7 +2,7 @@
 //  RootHelper.swift
 //  无忧辅助
 //
-//  重启: kfd 提权 → 直接内核写 ucred → reboot(0)
+//  提权: kfd 提权 → 直接内核写 ucred
 //  注销: proc_listpids + kill(SIGKILL)（直接在主进程执行）
 //
 //  说明: iOS 15.8.4 封堵了旧 Landa/IOSurfaceRoot 路径，改用
@@ -50,18 +50,6 @@ private func SecTaskCreateFromSelf(_ allocator: CFAllocator?) -> AnyObject
 @_silgen_name("SecTaskCopyValueForEntitlement")
 private func SecTaskCopyValueForEntitlement(_ task: AnyObject, _ entitlement: CFString, _ error: UnsafeMutablePointer<Unmanaged<CFError>?>?) -> AnyObject?
 
-// FrontBoard 重启 — C 辅助函数 (arm64e PAC 安全, 在 kfd.c 中实现)
-@_silgen_name("fb_shutdown_reboot")
-private func fb_shutdown_reboot() -> Int32
-
-@_silgen_name("sbs_restart")
-private func sbs_restart() -> Int32
-
-@_silgen_name("notify_reboot")
-private func notify_reboot() -> Int32
-
-private let RB_AUTOBOOT: Int32 = 0
-
 final class RootHelper {
     static let shared = RootHelper()
 
@@ -76,149 +64,6 @@ final class RootHelper {
     }
 
     private init() {}
-
-    // MARK: - 重启
-
-    /// 主进程执行整机重启。
-    /// 尝试顺序: 已是 root → FrontBoard 系统服务 → kill SpringBoard → kfd 提权 → roothelper
-    func reboot() -> Bool {
-        Log.shared.add("========== 重启 ==========")
-        Log.shared.add("   当前 UID=\(getuid()) EUID=\(geteuid())")
-
-        // 已经在 root 状态，直接重启
-        if isRoot {
-            Log.shared.add("✅ 当前进程已是 root，直接调用 reboot()")
-            sync()
-            Darwin.reboot(RB_AUTOBOOT)
-            return true
-        }
-
-        // 路径1: FrontBoard 系统服务重启（iOS 内部机制，不需要 root）
-        Log.shared.add("[reboot] 尝试 FrontBoard 系统服务重启...")
-        if frontboardReboot() {
-            return true
-        }
-
-        // 路径2: 杀 SpringBoard + backboardd 触发硬重启
-        Log.shared.add("[reboot] 尝试 kill SpringBoard 触发重启...")
-        if killSpringBoardForReboot() {
-            return true
-        }
-
-        // 路径3: kfd 内核提权（需要内核漏洞）
-        Log.shared.add("[reboot] 尝试主进程 kfd 提权...")
-        if kfdEscalateAndReboot() {
-            return true
-        }
-
-        // 路径4: 回退 roothelper 子进程
-        Log.shared.add("[reboot] 以上均失败，回退到 roothelper")
-        guard let path = helperPath else {
-            Log.shared.add("❌ roothelper 未找到，无法重启")
-            return false
-        }
-
-        let success = spawnHelper(path: path, command: "reboot")
-        if success {
-            Log.shared.add("✅ roothelper reboot 已执行，设备即将重启")
-        } else {
-            Log.shared.add("❌ roothelper reboot 返回非零")
-        }
-        return success
-    }
-
-    // MARK: - FrontBoard 重启
-
-    /// 通过 C 辅助函数触发系统重启（arm64e PAC 安全）。
-    /// ObjC 消息发送在 kfd.c 中用 <objc/message.h> 实现，避免 Swift 的 objc_msgSend 保留符号问题。
-    private func frontboardReboot() -> Bool {
-        // 路径 A: FBSSystemService.shutdownWithOptions:1
-        Log.shared.add("   [A] fb_shutdown_reboot() → FBSSystemService.shutdownWithOptions:")
-        let retA = fb_shutdown_reboot()
-        if retA == 0 {
-            Log.shared.add("   [A] ✅ 已发送重启请求，等待 XPC 传播...")
-            // 给 RunLoop 时间把 XPC 消息发出去
-            let deadline = Date().addingTimeInterval(5.0)
-            while Date() < deadline {
-                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
-            }
-            Log.shared.add("   [A] 等待超时（shutdown 可能未生效）")
-            return true
-        }
-        Log.shared.add("   [A] ❌ fb_shutdown_reboot 失败")
-
-        // 路径 B: SpringBoardServices
-        Log.shared.add("   [B] sbs_restart() → SBSSystemService")
-        let retB = sbs_restart()
-        if retB == 0 {
-            Log.shared.add("   [B] ✅ SBS 重启已发送")
-            return true
-        }
-        Log.shared.add("   [B] ❌ sbs_restart 失败")
-
-        // 路径 C: Darwin notify_post
-        Log.shared.add("   [C] notify_reboot() → Darwin 通知")
-        let retC = notify_reboot()
-        if retC == 0 {
-            Log.shared.add("   [C] ✅ 系统通知已发送")
-            return true
-        }
-        Log.shared.add("   [C] ❌ notify_reboot 失败")
-
-        return false
-    }
-
-    /// 杀掉 SpringBoard + backboardd 触发系统级重启。
-    /// 这与 respring 不同：同时杀两者会触发 launchd 重新初始化显示子系统，
-    /// 效果类似"软重启"（类似 sbreload）。
-    private func killSpringBoardForReboot() -> Bool {
-        var killed = false
-
-        if let pid = getProcessPID(named: "SpringBoard") {
-            Log.shared.add("   杀 SpringBoard (PID=\(pid))...")
-            if kill(pid, SIGKILL) == 0 {
-                Log.shared.add("   ✅ SpringBoard 已终止")
-                killed = true
-            } else {
-                Log.shared.add("   ❌ kill SpringBoard 失败: \(String(cString: strerror(errno)))")
-            }
-        }
-
-        if let pid = getProcessPID(named: "backboardd") {
-            Log.shared.add("   杀 backboardd (PID=\(pid))...")
-            if kill(pid, SIGKILL) == 0 {
-                Log.shared.add("   ✅ backboardd 已终止")
-                killed = true
-            } else {
-                Log.shared.add("   ❌ kill backboardd 失败: \(String(cString: strerror(errno)))")
-            }
-        }
-
-        if killed {
-            Log.shared.add("   SpringBoard/backboardd 已终止，系统正在重启 UI 子系统")
-        }
-        return killed
-    }
-
-    /// 主进程直接调用 kfd 提权并立即 reboot。
-    private func kfdEscalateAndReboot() -> Bool {
-        let ret = _kfd_escalate()
-        if ret != 0 {
-            let err = _kfd_get_error()
-            let msg = err != nil ? String(cString: err!) : "unknown"
-            Log.shared.add("❌ 主进程 kfd 提权失败: \(msg)")
-            return false
-        }
-
-        Log.shared.add("✅ 主进程 kfd 提权成功，UID=\(getuid()) EUID=\(geteuid())")
-        setuid(0)
-        setgid(0)
-        sync()
-        Log.shared.add("[reboot] 调用 reboot(RB_AUTOBOOT)...")
-        Darwin.reboot(RB_AUTOBOOT)
-        Log.shared.add("❌ reboot() 返回，errno=\(errno)")
-        return false
-    }
 
     // MARK: - 提权
 
@@ -284,7 +129,7 @@ final class RootHelper {
         Log.shared.add("   helperPath=\(helperPath ?? "未找到")")
 
         // 检查主进程是否能看到系统文件（判断沙盒是否生效）
-        let paths = ["/sbin/reboot", "/usr/sbin/shutdown", "/sbin/shutdown", "/var/mobile"]
+        let paths = ["/var/mobile"]
         for p in paths {
             let exists = FileManager.default.fileExists(atPath: p)
             Log.shared.add("   \(p): \(exists ? "存在" : "不存在/不可见")")
@@ -310,26 +155,15 @@ final class RootHelper {
         Log.shared.add("--- KFD 内核漏洞测试 ---")
         testKfd()
 
-        // ==== reboot() 直接调用测试 ====
-        Log.shared.add("")
-        Log.shared.add("--- reboot() 直接调用测试 ---")
-        Log.shared.add("   说明: 我们已有 com.apple.private.system.restart 权限")
-        Log.shared.add("         内核可能允许带此权限的进程直接调用 reboot(2)")
-        Log.shared.add("         即使 UID != 0")
-        testReboot()
 
-        // ==== FrontBoard 重启可用性检查 ====
-        Log.shared.add("")
-        Log.shared.add("--- FrontBoard 重启路径检查 ---")
-        testFrontBoardAvailability()
     }
 
     // MARK: - setuid(0) 实战测试
 
     private func testSetuid() {
         // 测试 access()（C 层，比 FileManager 更准确）
-        let testPaths = ["/sbin/reboot", "/var/mobile"]
-        for p in testPaths {
+        let testPaths1 = ["/var/mobile"]
+        for p in testPaths1 {
             let acc = access(p, Int32(F_OK))
             Log.shared.add("   access(\(p), F_OK)=\(acc) errno=\(acc == -1 ? String(cString: strerror(errno)) : "ok")")
         }
@@ -348,7 +182,7 @@ final class RootHelper {
 
         if afterUid == 0 || afterEuid == 0 {
             Log.shared.add("   ✅ setuid(0) 成功！persona-mgmt 有效")
-            for p in testPaths {
+            for p in testPaths1 {
                 let acc = access(p, Int32(F_OK))
                 Log.shared.add("   (root) access(\(p), F_OK)=\(acc) errno=\(acc == -1 ? String(cString: strerror(errno)) : "ok")")
             }
@@ -428,7 +262,7 @@ final class RootHelper {
 
         if afterUid == 0 || afterEuid == 0 || rootAfter == 1 {
             Log.shared.add("   ✅ KFD 提权成功！进程已 root")
-            let testPaths = ["/sbin/reboot", "/etc/master.passwd"]
+            let testPaths = ["/etc/master.passwd"]
             for p in testPaths {
                 let acc = access(p, Int32(F_OK))
                 Log.shared.add("   (root) access(\(p), F_OK)=\(acc)")
@@ -444,83 +278,6 @@ final class RootHelper {
         }
 
         Log.shared.add("   提示：kfd 句柄保持打开，如需关闭请重启 App")
-    }
-
-    // MARK: - reboot() 直接调用测试
-
-    /// 测试直接调用 Darwin.reboot() —— 利用已注册的 system.restart 权限
-    /// XNU 内核的 reboot() 路径会检查 com.apple.private.system.restart 权限
-    /// 如果权限有效，允许非 root 进程执行重启
-    private func testReboot() {
-        // 先确认权限状态
-        let task = SecTaskCreateFromSelf(nil)
-        let hasRestart = SecTaskCopyValueForEntitlement(task, "com.apple.private.system.restart" as CFString, nil)
-        let hasShutdown = SecTaskCopyValueForEntitlement(task, "com.apple.private.system.shutdown" as CFString, nil)
-
-        Log.shared.add("   确认 system.restart: \(hasRestart != nil ? "已注册" : "未注册")")
-        Log.shared.add("   确认 system.shutdown: \(hasShutdown != nil ? "已注册" : "未注册")")
-
-        // 尝试 reboot(0) = RB_AUTOBOOT
-        // ⚠️ 如果内核允许，设备会立即重启，以下代码不会执行
-        Log.shared.add("   尝试 reboot(RB_AUTOBOOT=0)...")
-
-        let ret = Darwin.reboot(0) // RB_AUTOBOOT
-        let err = errno
-        Log.shared.add("   Darwin.reboot(0) 返回=\(ret) errno=\(err) (\(String(cString: strerror(err))))")
-
-        if ret == 0 {
-            Log.shared.add("   ✅ reboot() 成功！设备应正在重启...")
-        } else {
-            Log.shared.add("   ❌ reboot() 失败: 内核拒绝")
-            Log.shared.add("   → system.restart 权限不足以执行 reboot")
-
-            // 再试 sync + reboot (RB_AUTOBOOT)
-            sync()
-            let ret2 = Darwin.reboot(0)
-            let err2 = errno
-            Log.shared.add("   sync后 reboot(0) 返回=\(ret2) errno=\(err2) (\(String(cString: strerror(err2))))")
-        }
-    }
-
-    // MARK: - FrontBoard 重启可用性检查
-
-    /// 检查 FrontBoard 重启路径是否可用（不实际执行重启）
-    private func testFrontBoardAvailability() {
-        let task = SecTaskCreateFromSelf(nil)
-        let hasFrontboard = SecTaskCopyValueForEntitlement(task, "com.apple.frontboard.shutdown" as CFString, nil)
-        let hasSystemApp = SecTaskCopyValueForEntitlement(task, "com.apple.frontboard.systemapp" as CFString, nil)
-        Log.shared.add("   com.apple.frontboard.shutdown: \(hasFrontboard != nil ? "已注册" : "未注册")")
-        Log.shared.add("   com.apple.frontboard.systemapp: \(hasSystemApp != nil ? "已注册" : "未注册")")
-
-        let fbPath = "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices"
-        guard let handle = dlopen(fbPath, RTLD_NOW) else {
-            Log.shared.add("   ❌ FrontBoardServices 框架无法加载: \(String(cString: dlerror()))")
-            return
-        }
-        defer { dlclose(handle) }
-
-        guard let cls = NSClassFromString("FBSSystemService") as? NSObject.Type else {
-            Log.shared.add("   ❌ FBSSystemService 类未找到")
-            return
-        }
-        Log.shared.add("   ✅ FBSSystemService 类存在")
-
-        let sharedSel = NSSelectorFromString("sharedService")
-        if cls.responds(to: sharedSel) {
-            Log.shared.add("   ✅ +sharedService 方法存在")
-            if let svc = cls.perform(sharedSel)?.takeUnretainedValue() {
-                Log.shared.add("   ✅ sharedService 实例已获取")
-                for selName in ["shutdownWithOptions:", "reboot", "shutdown"] {
-                    let sel = NSSelectorFromString(selName)
-                    let has = svc.responds(to: sel)
-                    Log.shared.add("   \(has ? "✅" : "❌") -\(selName)")
-                }
-            } else {
-                Log.shared.add("   ❌ sharedService 返回 nil")
-            }
-        } else {
-            Log.shared.add("   ❌ +sharedService 方法不存在")
-        }
     }
 
     /// 捕获 stdout：重定向 stdout → pipe，执行闭包，恢复 stdout，返回 (返回值, stdout文本)
@@ -585,10 +342,6 @@ final class RootHelper {
             ("com.apple.private.task_for_pid-allow",      "task_for_pid"),
             ("com.apple.system-task-ports",               "系统任务端口"),
             ("com.apple.private.cs.debugger",             "调试器"),
-            ("com.apple.private.system.restart",          "系统重启"),
-            ("com.apple.private.system.shutdown",         "系统关机"),
-            ("com.apple.frontboard.shutdown",             "FrontBoard重启"),
-            ("com.apple.frontboard.systemapp",            "FrontBoard系统应用"),
             ("com.apple.private.security.iokit-user-client-class", "IOKit UC类"),
             ("com.apple.private.iokit.user-client-access", "IOKit UC访问"),
             ("com.apple.developer.kernel.increased-memory-limit", "内核扩内存"),
@@ -637,10 +390,6 @@ final class RootHelper {
             ("com.apple.private.task_for_pid-allow",       "task_for_pid"),
             ("com.apple.system-task-ports",                "系统任务端口"),
             ("com.apple.private.cs.debugger",              "调试器"),
-            ("com.apple.private.system.restart",            "系统重启"),
-            ("com.apple.private.system.shutdown",           "系统关机"),
-            ("com.apple.frontboard.shutdown",               "FrontBoard重启"),
-            ("com.apple.frontboard.systemapp",              "FrontBoard系统应用"),
             ("com.apple.private.security.iokit-user-client-class", "IOKit UC类"),
             ("com.apple.private.iokit.user-client-access",  "IOKit UC访问"),
             ("com.apple.developer.kernel.increased-memory-limit", "内核扩内存"),

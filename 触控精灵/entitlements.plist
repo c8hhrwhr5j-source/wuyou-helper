@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 关闭沙盒 —— 核心必备 -->
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+
+	<!-- 全屏截图权限 -->
+	<key>com.apple.private.screencapture.capture-all-displays</key>
+	<true/>
+
+	<!-- 辅助功能模拟点击核心权限 -->
+	<key>com.apple.private.accessibility.server</key>
+	<true/>
+
+	<!-- 支持 Lua 动态代码运行 -->
+	<key>dynamic-codesigning</key>
+	<true/>
+
+	<!-- 跳过库校验，巨魔运行更稳定 -->
+	<key>com.apple.private.skip-library-validation</key>
+	<true/>
+
+	<!-- 平台应用标识 -->
+	<key>platform-application</key>
+	<true/>
+
+	<!-- IOHID 事件发送权限（触控模拟） -->
+	<key>com.apple.private.iohid.event-system</key>
+	<true/>
+
+	<!-- IOMobileFramebuffer 截图权限 -->
+	<key>com.apple.private.iomobileframebuffer.access</key>
+	<true/>
+
+	<!-- 截图权限（CoreSurface 方式） -->
+	<key>com.apple.private.coresurface.access</key>
+	<true/>
+</dict>
+</plist>

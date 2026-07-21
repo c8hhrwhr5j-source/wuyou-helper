@@ -2,8 +2,7 @@
 //  PhoneControlView.swift
 //  无忧辅助
 //
-//  手机控制区域：【重启设备】【注销设备】【权限诊断】
-//    - 重启: 主进程 kfd 提权 → reboot() syscall（失败回退 roothelper）
+//  手机控制区域：【注销设备】【权限诊断】
 //    - 注销: proc_listpids + kill(SpringBoard, SIGKILL)（参考 TrollServer）
 //    - 诊断: 检查主进程 UID / 沙盒可见文件 / Helper 路径
 //    - 弹窗: 通过 UIKit UIAlertController（避免 SwiftUI .alert + TabView 嵌套 Bug）
@@ -41,23 +40,6 @@ struct PhoneControlView: View {
 
                     // ========== 控制按钮 ==========
                     VStack(spacing: 18) {
-
-                        // 重启手机按钮
-                        ControlButton(
-                            title: "重启设备",
-                            subtitle: "主进程 kfd 提权 → reboot() syscall（失败回退 roothelper）",
-                            icon: "arrow.triangle.2.circlepath",
-                            color: .red,
-                            isExecuting: isExecuting
-                        ) {
-                            showUIKitAlert(
-                                title: "确认重启设备？",
-                                message: "设备将立即强制重启，未保存的数据可能丢失。",
-                                destructiveTitle: "确认重启"
-                            ) {
-                                executeReboot()
-                            }
-                        }
 
                         // 注销设备按钮（Respring）
                         ControlButton(
@@ -114,7 +96,6 @@ struct PhoneControlView: View {
                     // ========== 状态信息 ==========
                     VStack(alignment: .leading, spacing: 12) {
                         InfoRow(label: "注销方式", value: "proc_listpids + kill(SIGKILL)")
-                        InfoRow(label: "重启方式", value: "主进程 kfd → reboot()（失败回退 roothelper）")
                         InfoRow(label: "Helper 路径", value: RootHelper.shared.helperPath ?? "未找到")
                         InfoRow(label: "适配版本", value: "iOS 15 ~ 18")
                     }
@@ -128,10 +109,6 @@ struct PhoneControlView: View {
     }
 
     // MARK: - 执行操作
-
-    private func executeReboot() {
-        performAction(name: "重启", successMsg: "设备即将重启...", action: TrollRootManager.shared.deviceReboot)
-    }
 
     private func executeRespring() {
         performAction(name: "注销", successMsg: "设备正在注销...", action: TrollRootManager.shared.deviceRespring)

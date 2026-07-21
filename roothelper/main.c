@@ -4,7 +4,6 @@
 //
 //  功能：
 //    - escalate: kfd 内核提权 → UID=0
-//    - reboot:   提权后重启 (sync → /sbin/reboot → reboot syscall)
 //    - respring: 注销桌面 (kill SpringBoard)
 //
 //  编译命令:
@@ -33,8 +32,6 @@
 #include "offsets.h"
 
 extern char **environ;
-extern int reboot(int);
-#define RB_AUTOBOOT 0
 
 // ============================================================
 // 工具函数
@@ -118,62 +115,7 @@ static int cmd_escalate(void) {
 }
 
 // ============================================================
-// 2. 整机重启
-// ============================================================
-
-static int cmd_reboot(void) {
-    printf("\n");
-    printf("========================================\n");
-    printf("  RootHelper: 整机重启\n");
-    printf("========================================\n");
-    print_info();
-
-    // 尝试 kfd 提权
-    printf("[reboot] 尝试 kfd 提权...\n");
-    int ret = kfd_escalate();
-    if (ret != 0) {
-        printf("[reboot] ⚠️ kfd_escalate 失败: %s\n", kfd_get_error());
-        printf("[reboot] 将以当前 UID=%d 继续尝试重启...\n", getuid());
-    } else {
-        setgid(0);
-        setuid(0);
-        seteuid(0);
-        printf("[reboot] ✅ 提权成功 UID=%d EUID=%d\n", getuid(), geteuid());
-    }
-    kfd_close();
-
-    print_info();
-
-    // sync 磁盘
-    printf("[reboot] sync() 磁盘同步\n");
-    sync();
-
-    // /sbin/reboot（用 posix_spawn 替代 system()，后者在 iOS SDK 不可用）
-    printf("[reboot] 调用 /sbin/reboot...\n");
-    {
-        char *const argv[] = { "/sbin/reboot", NULL };
-        ret = spawn_program("/sbin/reboot", argv);
-    }
-    printf("[reboot] /sbin/reboot => %d\n", ret);
-
-    // reboot() 系统调用兜底
-    printf("[reboot] 调用 reboot(RB_AUTOBOOT)...\n");
-    int rbr = reboot(RB_AUTOBOOT);
-    printf("[reboot] reboot() => %d, errno=%d (%s)\n",
-           rbr, errno, strerror(errno));
-
-    if (rbr == 0) {
-        printf("[reboot] ✅ 重启指令已执行，设备即将重启\n");
-        return 0;
-    }
-
-    printf("[reboot] ❌ 重启失败\n");
-    print_info();
-    return 1;
-}
-
-// ============================================================
-// 3. 注销桌面 Respring
+// 2. 注销桌面 Respring
 // ============================================================
 
 static int cmd_respring(void) {
@@ -214,15 +156,12 @@ int main(int argc, char *argv[]) {
         printf("==== iOS RootHelper (kfd) ====\n");
         printf("用法:\n");
         printf("  roothelper escalate   提权到 root\n");
-        printf("  roothelper reboot     整机重启\n");
         printf("  roothelper respring   注销桌面\n");
         return 0;
     }
 
     if (strcmp(argv[1], "escalate") == 0) {
         return cmd_escalate();
-    } else if (strcmp(argv[1], "reboot") == 0) {
-        return cmd_reboot();
     } else if (strcmp(argv[1], "respring") == 0) {
         return cmd_respring();
     } else {

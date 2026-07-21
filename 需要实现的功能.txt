@@ -1,10 +1,162 @@
-在脚本控制区域开发一款TrollStore巨魔专用iOS脚本运行工具IPA
-1. 架构：Swift做UI界面，底层用C语言实现屏幕截屏、像素取色、区域找色、全局模拟点击、长按、滑动等自动化功能
-2. 项目内置嵌入Lua脚本解释器，把所有底层自动化功能封装成全局Lua接口
-3. 用户可以自行上传导入lua脚本，在APP内直接运行、暂停、停止脚本
-4. 开放常用Lua API：sleep延时、tap点击、longTap长按、swipe滑动、getColor取色、findColor区域找色、全屏找色、重启桌面、重启设备
-5. 支持颜色相似度容错匹配，适配不同机型分辨率
-6. 配置巨魔最高权限，关闭沙盒，支持跨应用全局操作，无需越狱
-7. 自带脚本文件管理、运行日志输出、简易脚本编辑功能
-8. 输出完整Xcode项目源码、Lua绑定代码、权限文件、打包签名教程
+一、需求文案
+plaintext
+请帮我在这个应用里开发一款适配iOS系统、可以用TrollStore巨魔直接安装的IPA自动化容器程序，
+运行环境：iOS15.0~16.6.1，不需要越狱、不需要root权限、不做内核提权与手机重启功能。
 
+程序核心功能：
+1. 内置Lua5.4解释器，支持本地编辑、导入、运行、暂停、终止Lua脚本
+2. 实现手机全屏屏幕截图功能，获取屏幕像素RGB色值
+3. 封装通用找色函数：单点取色、区域精准找色、模糊相似度找色
+4. 封装手机屏幕模拟操作函数：坐标单击、长按、滑动、延时等待
+5. 把所有截图、找色、点击、延时等原生函数，全部注册暴露给Lua脚本直接调用
+6. 自带简易脚本编辑器、运行日志面板、脚本运行状态控制
+7. 配置巨魔专用权限列表，关闭沙盒，满足全屏截图+辅助点击权限
+8. 全程使用用户态API开发，不依赖任何内核漏洞、不调用root权限、不做系统重启
+
+开发语言优先使用Objective-C，方便iOS底层调用与静态库集成，
+编译环境支持Windows WSL2交叉编译arm64架构，最终打包为TrollStore可直接安装的IPA。
+
+同时给我输出：
+1. 项目完整目录结构
+2. 必备entitlements权限文件内容
+3. Lua静态库集成步骤
+4. 原生函数注册Lua绑定代码
+5. 所有对外Lua接口文档
+6. 可直接测试使用的Lua循环找色点击示例脚本
+7. WSL2一键编译打包IPA命令
+二、详细整体开发框架（分层列明，条理清晰）
+1. 项目整体架构分层
+plaintext
+巨魔Lua脚本自动化容器APP
+├─ 基础层（权限+环境）
+│  ├─ 巨魔专属权限配置
+│  ├─ 关闭系统沙盒
+│  ├─ 屏幕录制权限申请
+│  └─ 辅助功能服务权限申请指引
+├─ 内核运行层（Lua虚拟机）
+│  ├─ Lua5.4静态库集成
+│  ├─ Lua虚拟机创建/销毁/重置
+│  ├─ 脚本字符串解析执行
+│  ├─ 脚本异常捕获防卡死
+│  └─ 多脚本互斥运行控制
+├─ 屏幕图像层（截图+取色+找色）
+│  ├─ 全屏无遮挡截图核心API
+│  ├─ BGRA像素数据解析转换
+│  ├─ 单点坐标RGB颜色获取
+│  ├─ 区域范围遍历找色算法
+│  └─ 颜色相似度匹配算法
+├─ 触控模拟层（点击+滑动）
+│  ├─ 辅助功能事件底层封装
+│  ├─ 屏幕坐标单击/长按
+│  ├─ 多点直线滑动手势
+│  └─ 坐标分辨率自适应适配
+├─ 脚本桥接层（OC与Lua互通）
+│  ├─ OC原生函数注册进Lua全局环境
+│  ├─ Lua调用OC原生功能
+│  ├─ OC接收Lua返回执行结果
+│  └─ 脚本日志回调输出UI
+├─ UI功能层
+│  ├─ 脚本编辑页面
+│  ├─ 脚本列表管理
+│  ├─ 运行/暂停/停止控制按钮
+│  ├─ 运行日志实时显示
+│  └─ 坐标取色快捷悬浮工具
+└─ 打包输出层
+   ├─ arm64架构编译配置
+   ├─ entitlements权限签名
+   └─ 打包TrollStore专用IPA
+2. 必备权限文件（entitlements.plist 固定内容）
+xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 关闭沙盒 核心必备 -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <!-- 全屏屏幕截图权限 -->
+    <key>com.apple.private.screencapture.capture-all-displays</key>
+    <true/>
+    <!-- 辅助功能模拟点击核心权限 -->
+    <key>com.apple.private.accessibility.server</key>
+    <true/>
+    <!-- 支持Lua动态代码运行 -->
+    <key>dynamic-codesigning</key>
+    <true/>
+    <!-- 跳过库校验，巨魔运行更稳定 -->
+    <key>com.apple.private.skip-library-validation</key>
+    <true/>
+</dict>
+</plist>
+3. Lua 环境集成框架
+编译产物：liblua.a arm64 iOS 静态库
+导入头文件：lua.h lualib.h lauxlib.h
+基础生命周期
+初始化虚拟机：luaL_newstate()
+加载基础库：luaL_openlibs()
+注册自定义原生接口
+执行脚本：luaL_dostring()
+销毁虚拟机释放内存
+运行限制：单进程单 Lua 虚拟机，禁止多脚本并发冲突
+4. 所有对外开放 Lua 接口框架（固定命名，统一规范）
+4.1 屏幕图像类接口
+lua
+-- 1. 获取指定坐标RGB颜色
+r, g, b = get_screen_color(x, y)
+
+-- 2. 区域模糊找色，返回第一个匹配坐标，无匹配返回0,0
+find_x, find_y = find_color(x1, y1, x2, y2, target_r, target_g, target_b, similarity)
+-- 参数说明：
+-- x1y1起始坐标 x2y2结束坐标 目标RGB 相似度0-100
+4.2 屏幕操作触控接口
+lua
+-- 坐标单击
+click(x, y)
+
+-- 长按 单位毫秒
+long_click(x, y, delay_ms)
+
+-- 滑动 起点坐标-终点坐标 滑动时长
+swipe(x1, y1, x2, y2, delay_ms)
+4.3 流程控制通用接口
+lua
+-- 延时等待 单位毫秒
+sleep(ms)
+
+-- 打印运行日志
+log("自定义日志内容")
+
+-- 强制停止当前脚本
+stop_script()
+5. 原生开发核心功能规则
+截图功能：使用CGDisplayStream实现，后台静默截图，不弹窗
+找色逻辑：纯内存像素遍历，不保存图片文件，运行高效不卡顿
+点击逻辑：基于 iOS 原生辅助功能 API，无注入、无 Hook，稳定兼容全机型
+分辨率：自动获取手机真实屏幕分辨率，脚本坐标自动适配
+脚本安全：加入死循环检测、语法错误捕获，APP 不会闪退
+6. 标准测试 Lua 脚本模板（直接可用）
+lua
+-- iOS巨魔自动化循环找色点击脚本
+while true do
+    -- 在屏幕200,300 至 600,900 范围找纯白色
+    local tx, ty = find_color(200, 300, 600, 900, 255, 255, 255, 90)
+    if tx > 0 and ty > 0 then
+        log("成功找到目标坐标："..tx..","..ty)
+        click(tx, ty)
+        sleep(800)
+    end
+    -- 循环间隔
+    sleep(300)
+end
+7. 编译打包规范框架
+编译架构：仅编译 arm64 适配苹果手机
+编译环境：Windows WSL2 + iOS 交叉编译工具链
+签名方式：使用 ldid 挂载上面 entitlements 权限签名
+打包格式：标准 Payload 结构，最终输出.ipa
+安装方式：直接导入 TrollStore 一键安装，无需证书
+8. 明确禁止开发内容（提前告知 AI）
+不编写任何内核漏洞利用代码（KFD/Landa/dmaFail 全部舍弃）
+不编写 setuid 提权 root 代码
+不编写手机重启、关机、系统修改相关代码
+不做 APP 注入、全局 Hook、越狱相关功能
+不接入任何第三方付费脚本框架，纯原生独立实现

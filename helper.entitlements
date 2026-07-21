@@ -28,10 +28,5 @@
     <key>com.apple.private.cs.debugger</key>
     <true/>
 
-    <!-- 重启 / 关机 -->
-    <key>com.apple.private.system.restart</key>
-    <true/>
-    <key>com.apple.private.system.shutdown</key>
-    <true/>
 </dict>
 </plist>

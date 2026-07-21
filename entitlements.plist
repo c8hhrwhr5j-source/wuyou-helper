@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- 关闭沙盒：必须且最优先。只保留这一个，避免和 no-container 冲突 -->
+    <!-- 关闭沙盒：必须且最优先 -->
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
 
@@ -28,20 +28,7 @@
     <key>com.apple.private.skip-library-validation</key>
     <true/>
 
-    <!-- 重启 / 关机 -->
-    <key>com.apple.private.system.restart</key>
-    <true/>
-    <key>com.apple.private.system.shutdown</key>
-    <true/>
-
-    <!-- FrontBoard 系统服务重启（iOS 内部重启机制，不需要 root） -->
-    <key>com.apple.frontboard.shutdown</key>
-    <true/>
-    <key>com.apple.frontboard.systemapp</key>
-    <true/>
-
-    <!-- ===== IOKit 访问（Land 内核漏洞必须） ===== -->
-    <!-- 允许打开 IOSurfaceRoot 等受限 IOKit UserClient -->
+    <!-- ===== IOKit 访问（kfd 内核漏洞必须） ===== -->
     <key>com.apple.private.security.iokit-user-client-class</key>
     <array>
         <string>IOSurfaceRootUserClient</string>
@@ -53,17 +40,25 @@
         <string>IOGPUDeviceUserClient</string>
         <string>IOGPUSharedUserClient</string>
     </array>
-
-    <!-- 通用 IOKit 用户客户端访问 -->
     <key>com.apple.private.iokit.user-client-access</key>
     <true/>
-
-    <!-- 内核内存映射（Land 漏洞需要 vm_remap/vm_protect 等） -->
     <key>com.apple.developer.kernel.increased-memory-limit</key>
     <true/>
-
-    <!-- IOKit 服务枚举权限 -->
     <key>com.apple.private.iokit.restricted-uc-class</key>
+    <true/>
+
+    <!-- ===== 屏幕截图/取色（Lua 脚本核心） ===== -->
+    <key>com.apple.private.iomobileframebuffer.access</key>
+    <true/>
+    <key>com.apple.private.screencapture.capture-all-displays</key>
+    <true/>
+
+    <!-- ===== 触控模拟（Lua 脚本核心） ===== -->
+    <key>com.apple.private.iohid.event-system</key>
+    <true/>
+
+    <!-- ===== IOSurface 直接访问（截图加速） ===== -->
+    <key>com.apple.private.coresurface.access</key>
     <true/>
 </dict>
 </plist>
