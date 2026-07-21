@@ -64,13 +64,10 @@ extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
 );
 extern void IOHIDEventAppendEvent(IOHIDEventRef event, IOHIDEventRef child, uint32_t unused);
 extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
+extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
 
-// Digitizer 事件子类型
-enum {
-    kIOHIDDigitizerEventRange       = 0x00,
-    kIOHIDDigitizerEventTouch       = 0x01,
-    kIOHIDDigitizerEventAttribute   = 0x02,
-};
+#define kIOHIDEventFieldDigitizerIsDisplayIntegrated 0x000B0001
+#define kIOHIDEventFieldDigitizerFingerPhase         0x000B0021
 
 // MARK: - TouchSlide 实现
 
@@ -215,16 +212,13 @@ enum {
                             (phase == kIOHIDDigitizerTransducerFingerPhaseMoved) ? "MOVE" :
                             (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? "UP" : "???";
 
-    CGFloat logicalX = x / _screenScale;
-    CGFloat logicalY = y / _screenScale;
-
     IOHIDEventRef fingerEvent = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault,
         ts,
         0,                          // index
         2,                          // identity
         kIOHIDDigitizerTransducerTouch | kIOHIDDigitizerTransducerIdentity | kIOHIDDigitizerTransducerRange,
-        logicalX, logicalY, 0,      // x, y, z — 转换为逻辑坐标（点坐标）
+        x, y, 0,                    // x, y, z — 使用原始像素坐标（与触控精灵一致）
         30,                         // tipPressure
         0,                          // twist
         80,                         // range
@@ -242,19 +236,22 @@ enum {
         return;
     }
 
+    IOHIDEventSetIntegerValue(fingerEvent, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+    IOHIDEventSetIntegerValue(fingerEvent, kIOHIDEventFieldDigitizerFingerPhase, phase);
+
     IOHIDEventRef rangeEvent = IOHIDEventCreateDigitizerEvent(
         kCFAllocatorDefault,
         ts,
-        kIOHIDDigitizerEventRange,
-        0,
-        0,
+        kIOHIDEventTypeDigitizer,   // type: 必须是 kIOHIDEventTypeDigitizer (11)
+        0,                          // index
+        0,                          // identity
         kIOHIDDigitizerTransducerRange,
-        0,
-        0, 0, 0,
-        0, 0,
-        80,
-        touchVal,
-        0
+        0,                          // buttonMask
+        x, y, 0,                    // x, y, z — 使用实际触摸坐标，不是 0,0
+        0, 0,                       // tipPressure, barrelPressure
+        80,                         // range
+        touchVal,                   // touch
+        0                           // options
     );
 
     if (!rangeEvent) {
@@ -266,8 +263,8 @@ enum {
     IOHIDEventAppendEvent(rangeEvent, fingerEvent, 0);
     CFRelease(fingerEvent);
 
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f (logical: %.1f, %.1f) ts=%llu",
-              phaseName, fingerID, x, y, logicalX, logicalY, ts]];
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu",
+              phaseName, fingerID, x, y, ts]];
 
     IOHIDEventSystemClientDispatchEvent(_client, rangeEvent);
     CFRelease(rangeEvent);
