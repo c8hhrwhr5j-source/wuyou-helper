@@ -102,6 +102,7 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
     CGFloat _lastX;
     CGFloat _lastY;
     uint32_t _lastIdentity;
+    BOOL _hidInitialized;
 }
 
 + (instancetype)sharedInstance {
@@ -116,10 +117,10 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
 - (instancetype)init {
     if (self = [super init]) {
         [self _initScreenInfo];
-        [self _initHIDDevice];
         _lastX = 0;
         _lastY = 0;
         _lastIdentity = 0;
+        _hidInitialized = NO;
     }
     return self;
 }
@@ -264,6 +265,10 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
 }
 
 - (void)logDiagnostic {
+    if (!_hidInitialized) {
+        _hidInitialized = YES;
+        [self _initHIDDevice];
+    }
     if (_hidDevice) {
         [self _log:@"[TouchSimulation] ✅ HID设备已初始化"];
     } else {
@@ -274,6 +279,10 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
 // MARK: - HID 报告发送
 
 - (void)_sendTouchReport:(BOOL)down atX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
+    if (!_hidInitialized) {
+        _hidInitialized = YES;
+        [self _initHIDDevice];
+    }
     if (!_hidDevice || !_IOHIDUserDeviceSetReport) {
         [self _log:@"[TouchSimulation] ❌ HID设备不可用"];
         return;
