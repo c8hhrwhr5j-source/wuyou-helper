@@ -46,6 +46,12 @@ typedef struct {
 /// 区域截图保存到路径
 - (BOOL)snapshotToPath:(NSString *)path x:(int)x y:(int)y w:(int)w h:(int)h;
 
+/// 屏幕捕获是否可用（已连接 IOMobileFramebuffer）
+- (BOOL)isConnected;
+
+/// 诊断信息（供 UI 展示）
+- (NSString *)diagnosticDescription;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -51,6 +51,9 @@ static void _loadIOMobileFramebuffer(void) {
     int _height;
     BOOL _connected;
 
+    // 诊断
+    NSString *_diagMessage;
+
     // 屏幕保持缓存
     BOOL _keeping;
     unsigned char *_cachedBuffer;
@@ -91,14 +94,16 @@ static void _loadIOMobileFramebuffer(void) {
         !IOMobileFramebufferCreateSurface ||
         !IOMobileFramebufferLockSurface ||
         !IOMobileFramebufferUnlockSurface) {
-        NSLog(@"[ScreenCapture] IOMobileFramebuffer symbols not found — running without private API access?");
+        _diagMessage = @"❌ IOMobileFramebuffer 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
 
     int ret = IOMobileFramebufferGetMainDisplay(&_connection);
     if (ret != 0) {
-        NSLog(@"[ScreenCapture] IOMobileFramebufferGetMainDisplay failed: %d (no entitlements / not TrollStore?)", ret);
+        _diagMessage = [NSString stringWithFormat:@"❌ IOMobileFramebufferGetMainDisplay 失败(错误码:%d) → 缺少 entitlement，请用 TrollStore 安装", ret];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
@@ -107,7 +112,8 @@ static void _loadIOMobileFramebuffer(void) {
     ret = IOMobileFramebufferCreateSurface(_connection, 1, 1, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
     if (ret != 0 || !_surface) {
-        NSLog(@"[ScreenCapture] CreateSurface probe failed: %d", ret);
+        _diagMessage = [NSString stringWithFormat:@"❌ CreateSurface 探测失败(错误码:%d)", ret];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
@@ -121,7 +127,8 @@ static void _loadIOMobileFramebuffer(void) {
     _surface = NULL;
 
     if (_width <= 0 || _height <= 0) {
-        NSLog(@"[ScreenCapture] Probe surface returned invalid size %dx%d", _width, _height);
+        _diagMessage = [NSString stringWithFormat:@"❌ Surface 返回无效尺寸 %dx%d", _width, _height];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
@@ -129,20 +136,49 @@ static void _loadIOMobileFramebuffer(void) {
     ret = IOMobileFramebufferCreateSurface(_connection, _width, _height, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
     if (ret != 0 || !_surface) {
-        NSLog(@"[ScreenCapture] CreateSurface(%d,%d) failed: %d", _width, _height, ret);
+        _diagMessage = [NSString stringWithFormat:@"❌ CreateSurface(%dx%d) 失败(错误码:%d)", _width, _height, ret];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
 
     _connected = YES;
-    NSLog(@"[ScreenCapture] Connected: %dx%d, bytesPerRow=%d", _width, _height, _bytesPerRow);
+    _diagMessage = [NSString stringWithFormat:@"✅ 已连接: %dx%d, bytesPerRow=%d", _width, _height, _bytesPerRow];
+    NSLog(@"[ScreenCapture] %@", _diagMessage);
 }
 
 - (void)_fallbackScreenSize {
     CGRect bounds = [[UIScreen mainScreen] nativeBounds];
     _width  = (int)bounds.size.width;
     _height = (int)bounds.size.height;
+    if (!_diagMessage) {
+        _diagMessage = [NSString stringWithFormat:@"⚠️ 屏幕捕获未初始化，分辨率回退为 UIScreen: %dx%d", _width, _height];
+    }
     NSLog(@"[ScreenCapture] Fallback screen size: %dx%d (screen capture may still fail)", _width, _height);
+}
+
+- (BOOL)isConnected {
+    return _connected;
+}
+
+- (NSString *)diagnosticDescription {
+    // 补充安装方式检测
+    NSMutableString *desc = [NSMutableString string];
+    [desc appendFormat:@"屏幕捕获: %@\n", _diagMessage ?: @"(未初始化)"];
+
+    NSString *installPath = [[NSBundle mainBundle] bundlePath];
+    if ([installPath containsString:@"/private/var/containers/Bundle/Application"]) {
+        [desc appendString:@"安装方式: ⚠️ 沙盒内 (普通侧载/AltStore)\n"];
+    } else if ([installPath containsString:@"/Applications"]) {
+        [desc appendString:@"安装方式: ✅ /Applications (TrollStore/越狱)\n"];
+    } else {
+        [desc appendFormat:@"安装路径: %@\n", installPath];
+    }
+
+    [desc appendFormat:@"分辨率: %dx%d\n", _width, _height];
+    [desc appendFormat:@"取色可用: %@", _connected ? @"✅ 是" : @"❌ 否"];
+
+    return desc;
 }
 
 - (void)_disconnect {

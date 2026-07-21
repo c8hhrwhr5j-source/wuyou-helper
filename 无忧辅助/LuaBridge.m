@@ -276,6 +276,13 @@ static int l_screen_snapshot(lua_State *L) {
     return 1;
 }
 
+// --- screen.isReady() → bool ---
+static int l_screen_isReady(lua_State *L) {
+    BOOL ready = [[ScreenCapture sharedInstance] isConnected];
+    lua_pushboolean(L, ready);
+    return 1;
+}
+
 // MARK: - 触控模块 touch.*
 
 // --- touch.down(id, x, y) ---
@@ -441,6 +448,7 @@ static const luaL_Reg g_screenLib[] = {
     {"getColorRGB",  l_screen_getColorRGB},
     {"findColor",    l_screen_findColor},
     {"snapshot",     l_screen_snapshot},
+    {"isReady",      l_screen_isReady},
     {NULL, NULL},
 };
 

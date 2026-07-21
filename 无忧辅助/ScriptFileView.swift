@@ -174,6 +174,7 @@ struct ScriptFileView: View {
             .onAppear {
                 setupEngineCallbacks()
                 refreshFileList()
+                runDiagnostics()
             }
         }
     }
@@ -244,6 +245,18 @@ struct ScriptFileView: View {
     private func stopScript() {
         engine.stop()
         Log.shared.add("⏹ 手动停止脚本")
+    }
+
+    // MARK: - 启动诊断
+
+    private func runDiagnostics() {
+        let diag = ScreenCapture.sharedInstance().diagnosticDescription()
+        Log.shared.add("🔍 启动诊断:\n\(diag ?? "(无)")")
+
+        if !ScreenCapture.sharedInstance().isConnected() {
+            Log.shared.add("⚠️ 屏幕捕获不可用，取色/找色/截图功能将返回空值")
+            Log.shared.add("   请确认: 1)用TrollStore安装 2)entitlements已嵌入")
+        }
     }
 }
 

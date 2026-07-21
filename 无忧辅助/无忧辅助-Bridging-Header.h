@@ -5,3 +5,4 @@
 
 #import "ScriptEngine.h"
 #import "DeviceInfo.h"
+#import "ScreenCapture.h"
