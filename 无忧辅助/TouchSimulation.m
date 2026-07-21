@@ -7,13 +7,14 @@
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
-#import <AXUIElement.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
+#import <dlfcn.h>
 
 static CGSize _screenSize = {0, 0};
 static uint32_t _fingerSeq = 1000;
+static BOOL (*_AXIsProcessTrusted)(void) = NULL;
 
 // MARK: - TouchSlide 实现
 
@@ -101,11 +102,19 @@ static uint32_t _fingerSeq = 1000;
 - (instancetype)init {
     if (self = [super init]) {
         [self _initScreenInfo];
+        [self _initAXFunctions];
         _lastX = 0;
         _lastY = 0;
         _lastIdentity = 0;
     }
     return self;
+}
+
+- (void)_initAXFunctions {
+    void* handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY);
+    if (handle) {
+        _AXIsProcessTrusted = dlsym(handle, "AXIsProcessTrusted");
+    }
 }
 
 - (void)_initScreenInfo {
@@ -121,11 +130,15 @@ static uint32_t _fingerSeq = 1000;
 }
 
 - (void)logDiagnostic {
-    BOOL isTrusted = AXIsProcessTrusted();
-    if (isTrusted) {
-        [self _log:@"[TouchSimulation] ✅ 辅助功能信任权限已获取 - CGEvent 可跨应用投递"];
+    if (_AXIsProcessTrusted) {
+        BOOL isTrusted = _AXIsProcessTrusted();
+        if (isTrusted) {
+            [self _log:@"[TouchSimulation] ✅ 辅助功能信任权限已获取 - CGEvent 可跨应用投递"];
+        } else {
+            [self _log:@"[TouchSimulation] ⚠️ 辅助功能信任权限未获取 - CGEvent 仅能投递到自身 App"];
+        }
     } else {
-        [self _log:@"[TouchSimulation] ⚠️ 辅助功能信任权限未获取 - CGEvent 仅能投递到自身 App"];
+        [self _log:@"[TouchSimulation] ⚠️ 无法检测辅助功能权限状态"];
     }
     
     CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
