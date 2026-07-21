@@ -101,15 +101,16 @@ targets:
 
           clang ${CFLAGS} -c kfd.c -o kfd.o
           clang ${CFLAGS} -c offsets.c -o offsets.o
+          clang ${CFLAGS} -c main.c -o main.o
           
-          echo "=== Linking roothelper (raw binary) ==="
-          clang ${CFLAGS} kfd.o offsets.o -o roothelper -Xlinker -r -Xlinker -s
+          echo "=== Linking roothelper (standalone executable) ==="
+          clang ${CFLAGS} kfd.o offsets.o main.o -o roothelper -framework IOKit -framework CoreFoundation
 
           echo "=== Copying roothelper to app bundle ==="
           cp roothelper "${DST}/roothelper"
           chmod 755 "${DST}/roothelper"
 
           echo "=== Cleaning up ==="
-          rm -f kfd.o offsets.o roothelper
+          rm -f kfd.o offsets.o main.o roothelper
 
           echo "=== roothelper ready ==="
