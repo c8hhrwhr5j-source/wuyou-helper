@@ -14,7 +14,7 @@ struct ScriptFileView: View {
     @State private var luaFiles: [String] = []
     @State private var selectedFile: String? = nil
     @State private var isRunning = false
-    @State private var scriptPath: String = "/var/mobile/Media/script/lua"
+    @State private var scriptPath: String = ScriptDirectoryHelper.scriptPath
 
     private let engine = ScriptEngine.shared()
 
