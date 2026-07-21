@@ -40,18 +40,26 @@ static void _loadIOMobileFramebuffer(void) {
             RTLD_NOW
         );
 
-        void *h = fw ?: RTLD_DEFAULT;
+        const char *dlErr = dlerror(); // 立即消费错误信息
+
+        if (!fw) {
+            _globalDiagInfo = [NSString stringWithFormat:@"dlopen IOMobileFramebuffer 失败: %s → 沙盒内或权限不足", dlErr ?: "(无错误信息)"];
+            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
+            return;
+        }
+
+        void *h = fw;
         IOMobileFramebufferGetMainDisplay  = dlsym(h, "IOMobileFramebufferGetMainDisplay");
         IOMobileFramebufferCreateSurface   = dlsym(h, "IOMobileFramebufferCreateSurface");
         IOMobileFramebufferLockSurface     = dlsym(h, "IOMobileFramebufferLockSurface");
         IOMobileFramebufferUnlockSurface   = dlsym(h, "IOMobileFramebufferUnlockSurface");
         IOMobileFramebufferRelease         = dlsym(h, "IOMobileFramebufferRelease");
 
-        if (!fw) {
-            _globalDiagInfo = @"dlopen IOMobileFramebuffer 失败 → 应用未脱离沙盒";
+        if (!IOMobileFramebufferGetMainDisplay) {
+            _globalDiagInfo = @"dlopen 成功但 dlsym 解析失败 → 该 iOS 版本可能已移除/重命名此私有 API";
             NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
-        } else if (!IOMobileFramebufferGetMainDisplay) {
-            _globalDiagInfo = @"dlopen 成功但符号解析失败 → iOS 版本可能已移除该私有 API";
+        } else {
+            _globalDiagInfo = @"✅ IOMobileFramebuffer 符号加载成功";
             NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
         }
     });
