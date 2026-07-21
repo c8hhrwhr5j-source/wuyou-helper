@@ -249,14 +249,14 @@ jobs:
             "com.apple.private.iomobileframebuffer.access" \
             "com.apple.private.screencapture.capture-all-displays" \
             "com.apple.private.coresurface.access" \
-            "com.apple.private.graphics.get-pixel-colors" \
-            "com.apple.private.coremedia.allow-screen-capture" \
-            "com.apple.private.accessibility.server" \
             "com.apple.private.iohid.event-system" \
+            "com.apple.private.iohidfamily.userclient" \
+            "com.apple.private.hid.client.event-injection" \
+            "com.apple.private.hid.event-injection" \
+            "com.apple.private.accessibility.server" \
+            "com.apple.private.graphics.get-pixel-colors" \
             "com.apple.private.tcc.allow" \
-            "com.apple.security.exception.files.absolute-path.read-write" \
-            "com.apple.private.security.container-manager" \
-            "com.apple.private.MobileContainerManager.allowed"; do
+            "com.apple.security.exception.files.absolute-path.read-write"; do
             label=$(echo "$key" | sed 's/.*\.//')
             if echo "$ENTITLEMENTS_OUTPUT" | grep -qF "$key"; then
               echo "    ✅ $label"

@@ -90,14 +90,22 @@
 	<key>com.apple.private.mediaexperience.screenaccess</key>
 	<true/>
 
-	<!-- ===== 触控模拟 ===== -->
+	<!-- ===== 触控模拟 / HID 事件注入（关键：缺一条都不行） ===== -->
 	<key>com.apple.private.iohid.event-system</key>
 	<true/>
 	<key>com.apple.private.iohid.client</key>
 	<true/>
+	<key>com.apple.private.iohidfamily.userclient</key>
+	<true/>
+	<key>com.apple.private.hid.client.event-injection</key>
+	<true/>
+	<key>com.apple.private.hid.event-injection</key>
+	<true/>
 	<key>com.apple.private.multitouch.host</key>
 	<true/>
 	<key>com.apple.private.hid.manager.event-observer</key>
+	<true/>
+	<key>com.apple.private.hid.input-logging</key>
 	<true/>
 
 	<!-- ===== 辅助功能 / Accessibility ===== -->
@@ -106,6 +114,8 @@
 	<key>com.apple.accessibility.AccessibilityEnchantments</key>
 	<true/>
 	<key>com.apple.private.accessibility.media</key>
+	<true/>
+	<key>com.apple.private.accessibility.accessibilitytemporaryenhancements</key>
 	<true/>
 
 	<!-- ===== IOKit user-client 白名单（屏幕/内核/漏洞相关） ===== -->

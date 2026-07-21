@@ -148,7 +148,9 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
         _lastX = 0;
         _lastY = 0;
         if (!_client) {
-            NSLog(@"[TouchSimulation] IOHIDEventSystemClientCreate failed");
+            NSLog(@"[TouchSimulation] ❌ IOHIDEventSystemClientCreate 返回 NULL！触控注入将完全失效");
+        } else {
+            NSLog(@"[TouchSimulation] ✅ IOHIDEventSystemClient 创建成功: %p", _client);
         }
     }
     return self;
@@ -170,7 +172,10 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
                 phase:(uint8_t)phase
            fingerID:(uint32_t)fingerID {
 
-    if (!_client) return;
+    if (!_client) {
+        NSLog(@"[TouchSimulation] ❌ _client 为 NULL，无法发送触摸事件");
+        return;
+    }
 
     _lastX = x;
     _lastY = y;
@@ -195,10 +200,22 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
         1.0         // accuracy
     );
 
-    if (event) {
-        IOHIDEventSystemClientDispatchEvent(_client, event);
-        CFRelease(event);
+    if (!event) {
+        NSLog(@"[TouchSimulation] ❌ IOHIDEventCreateDigitizerFingerEventWithQuality 返回 NULL！phase=%d x=%.0f y=%.0f", phase, x, y);
+        return;
     }
+
+    const char *phaseName = (phase == kIOHIDDigitizerTransducerFingerPhaseBegan) ? "DOWN" :
+                            (phase == kIOHIDDigitizerTransducerFingerPhaseMoved) ? "MOVE" :
+                            (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? "UP" : "???";
+
+    NSLog(@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu event=%p",
+          phaseName, fingerID, x, y, ts, event);
+
+    IOHIDEventSystemClientDispatchEvent(_client, event);
+    CFRelease(event);
+
+    NSLog(@"[TouchSimulation] ✅ %s 已派发", phaseName);
 }
 
 // MARK: - 底层原子操作
