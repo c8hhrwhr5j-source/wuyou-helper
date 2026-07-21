@@ -6,6 +6,30 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - iOS 版本兼容 View 扩展
+
+extension View {
+    /// 兼容 iOS 14 隐藏滚动内容背景
+    @ViewBuilder
+    func hideScrollBackground() -> some View {
+        if #available(iOS 16.0, *) {
+            self.scrollContentBackground(.hidden)
+        } else {
+            self
+        }
+    }
+
+    /// 兼容 iOS 14 启用文本选择
+    @ViewBuilder
+    func allowTextSelection() -> some View {
+        if #available(iOS 15.0, *) {
+            self.textSelection(.enabled)
+        } else {
+            self
+        }
+    }
+}
+
 // MARK: - 脚本模板
 
 struct ScriptTemplate: Identifiable {
@@ -149,19 +173,8 @@ struct ScriptControlView: View {
             }
         }
         .navigationViewStyle(.stack)
-        .alert("保存脚本", isPresented: $showingSaveAlert) {
-            TextField("文件名（不含 .lua）", text: $saveFileName)
-                .autocapitalization(.none)
-            Button("保存") {
-                var name = saveFileName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if name.isEmpty { name = "untitled" }
-                if !name.hasSuffix(".lua") { name += ".lua" }
-                let path = (LuaScriptManager.scriptsDirectory as NSString).appendingPathComponent(name)
-                engine.saveScript(scriptCode, toPath: path)
-                engine.currentFilePath = path
-                saveFileName = ""
-            }
-            Button("取消", role: .cancel) {}
+        .sheet(isPresented: $showingSaveAlert) {
+            saveSheetView
         }
     }
 
@@ -253,6 +266,37 @@ struct ScriptControlView: View {
         .opacity(disabled ? 0.4 : 1.0)
     }
 
+    // MARK: - 保存名称输入 Sheet（替代 iOS 15+ alert TextField）
+
+    private var saveSheetView: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                TextField("文件名（不含 .lua）", text: $saveFileName)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .padding(.horizontal)
+                    .padding(.top, 20)
+                Spacer()
+            }
+            .navigationTitle("保存脚本")
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarItems(
+                leading: Button("取消") { showingSaveAlert = false },
+                trailing: Button("保存") {
+                    var name = saveFileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if name.isEmpty { name = "untitled" }
+                    if !name.hasSuffix(".lua") { name += ".lua" }
+                    let path = (LuaScriptManager.scriptsDirectory as NSString).appendingPathComponent(name)
+                    engine.saveScript(scriptCode, toPath: path)
+                    engine.currentFilePath = path
+                    saveFileName = ""
+                    showingSaveAlert = false
+                }
+            )
+        }
+    }
+
     // MARK: - 当前文件提示
 
     private var currentFileBar: some View {
@@ -288,7 +332,7 @@ struct ScriptControlView: View {
             .font(.system(size: 13, design: .monospaced))
             .disableAutocorrection(true)
             .autocapitalization(.none)
-            .scrollContentBackground(.hidden)
+            .hideScrollBackground()
             .background(Color(.systemGray6))
             .cornerRadius(10)
             .padding(.horizontal, 10)
@@ -445,7 +489,7 @@ struct ScriptControlView: View {
                                 Text(line.text)
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(line.color)
-                                    .textSelection(.enabled)
+                                    .allowTextSelection()
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 1)
                             }
