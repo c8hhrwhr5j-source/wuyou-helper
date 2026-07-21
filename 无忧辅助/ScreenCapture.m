@@ -10,11 +10,6 @@
 #import <dlfcn.h>
 #import <IOSurface/IOSurfaceRef.h>
 
-// IOSurface API 前向声明（IOSurface.h 在此 SDK 中不可用）
-extern size_t IOSurfaceGetWidth(IOSurfaceRef surface);
-extern size_t IOSurfaceGetHeight(IOSurfaceRef surface);
-extern void *IOSurfaceGetBaseAddress(IOSurfaceRef surface);
-
 // IOMobileFramebuffer 私有 API —— 运行时通过 dlsym 加载（不在任何 SDK 中）
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferConnection;
 
@@ -27,6 +22,11 @@ static int (*IOMobileFramebufferLockSurface)(IOMobileFramebufferConnection conne
 static int (*IOMobileFramebufferUnlockSurface)(IOMobileFramebufferConnection connection,
                                                 IOSurfaceRef surface, int lockToken);
 static int (*IOMobileFramebufferRelease)(IOMobileFramebufferConnection connection);
+
+// IOSurface 函数 —— 同样运行时加载，避免与 iOS 18+ SDK 公开声明冲突
+static size_t (*_IOSurfaceGetWidth)(IOSurfaceRef surface);
+static size_t (*_IOSurfaceGetHeight)(IOSurfaceRef surface);
+static void *(*_IOSurfaceGetBaseAddress)(IOSurfaceRef surface);
 
 // 诊断信息（供外部读取）
 static NSString *_globalDiagInfo = nil;
@@ -55,11 +55,19 @@ static void _loadIOMobileFramebuffer(void) {
         IOMobileFramebufferUnlockSurface   = dlsym(h, "IOMobileFramebufferUnlockSurface");
         IOMobileFramebufferRelease         = dlsym(h, "IOMobileFramebufferRelease");
 
+        // 加载 IOSurface 函数（iOS 18+ SDK 已公开，但为兼容老版本仍运行时加载）
+        _IOSurfaceGetWidth       = dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
+        _IOSurfaceGetHeight      = dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
+        _IOSurfaceGetBaseAddress = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+
         if (!IOMobileFramebufferGetMainDisplay) {
             _globalDiagInfo = @"dlopen 成功但 dlsym 解析失败 → 该 iOS 版本可能已移除/重命名此私有 API";
             NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
+        } else if (!_IOSurfaceGetWidth || !_IOSurfaceGetHeight || !_IOSurfaceGetBaseAddress) {
+            _globalDiagInfo = @"IOMobileFramebuffer 符号加载成功，但 IOSurface 符号缺失";
+            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
         } else {
-            _globalDiagInfo = @"✅ IOMobileFramebuffer 符号加载成功";
+            _globalDiagInfo = @"✅ IOMobileFramebuffer / IOSurface 符号加载成功";
             NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
         }
     });
@@ -118,8 +126,11 @@ static void _loadIOMobileFramebuffer(void) {
     if (!IOMobileFramebufferGetMainDisplay ||
         !IOMobileFramebufferCreateSurface ||
         !IOMobileFramebufferLockSurface ||
-        !IOMobileFramebufferUnlockSurface) {
-        _diagMessage = _globalDiagInfo ?: @"❌ IOMobileFramebuffer 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
+        !IOMobileFramebufferUnlockSurface ||
+        !_IOSurfaceGetWidth ||
+        !_IOSurfaceGetHeight ||
+        !_IOSurfaceGetBaseAddress) {
+        _diagMessage = _globalDiagInfo ?: @"❌ IOMobileFramebuffer/IOSurface 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
         NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
@@ -144,8 +155,8 @@ static void _loadIOMobileFramebuffer(void) {
     }
 
     // 获取实际尺寸
-    _width  = (int)IOSurfaceGetWidth(_surface);
-    _height = (int)IOSurfaceGetHeight(_surface);
+    _width  = (int)_IOSurfaceGetWidth(_surface);
+    _height = (int)_IOSurfaceGetHeight(_surface);
 
     // 释放 probe surface，用实际尺寸重建
     CFRelease(_surface);
@@ -232,7 +243,7 @@ static void _loadIOMobileFramebuffer(void) {
         return NULL;
     }
 
-    void *baseAddr = (void *)IOSurfaceGetBaseAddress(_surface);
+    void *baseAddr = (void *)_IOSurfaceGetBaseAddress(_surface);
     if (!baseAddr) {
         IOMobileFramebufferUnlockSurface(_connection, _surface, lockToken);
         return NULL;
@@ -279,7 +290,7 @@ static void _loadIOMobileFramebuffer(void) {
         return result;
     }
 
-    void *baseAddr = (void *)IOSurfaceGetBaseAddress(_surface);
+    void *baseAddr = (void *)_IOSurfaceGetBaseAddress(_surface);
     if (baseAddr) {
         int offset = y * _bytesPerRow + x * 4;  // BGRA 格式
         unsigned char *pixel = (unsigned char *)baseAddr + offset;
