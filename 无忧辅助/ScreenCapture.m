@@ -1,81 +1,56 @@
 //
 //  ScreenCapture.m
 //  无忧辅助 - 通过 IOMobileFramebuffer 进行屏幕截图与取色
+//  iOS 15.x 兼容版：使用 GetLayerDefaultSurface + IOSurfaceLock/Unlock
 //
 
 #import "ScreenCapture.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
-#import <mach/mach.h>
 #import <dlfcn.h>
 #import <unistd.h>
 #import <IOSurface/IOSurfaceRef.h>
 
-// IOMobileFramebuffer 私有 API —— 运行时通过 dlsym 加载（不在任何 SDK 中）
+// IOMobileFramebuffer 私有 API —— 运行时通过 dlsym 加载
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferConnection;
 
-static int (*IOMobileFramebufferGetMainDisplay)(IOMobileFramebufferConnection *connection);
-static int (*IOMobileFramebufferCreateSurface)(IOMobileFramebufferConnection connection,
-                                                int width, int height, int pixelFormat,
-                                                IOSurfaceRef *surface, int *bytesPerRow);
-static int (*IOMobileFramebufferLockSurface)(IOMobileFramebufferConnection connection,
-                                              IOSurfaceRef surface, int param, int *lockToken);
-static int (*IOMobileFramebufferUnlockSurface)(IOMobileFramebufferConnection connection,
-                                                IOSurfaceRef surface, int lockToken);
-static int (*IOMobileFramebufferRelease)(IOMobileFramebufferConnection connection);
+// 这两个符号在 iOS 14-16 上真实存在
+static kern_return_t (*IOMobileFramebufferGetMainDisplay)(IOMobileFramebufferConnection *connection);
+static kern_return_t (*IOMobileFramebufferGetLayerDefaultSurface)(
+    IOMobileFramebufferConnection connection, int layer, IOSurfaceRef *surface);
 
-// IOSurface 函数 —— 同样运行时加载，避免与 iOS 18+ SDK 公开声明冲突
-static size_t (*_IOSurfaceGetWidth)(IOSurfaceRef surface);
-static size_t (*_IOSurfaceGetHeight)(IOSurfaceRef surface);
-static void *(*_IOSurfaceGetBaseAddress)(IOSurfaceRef surface);
-
-// 诊断信息（供外部读取）
+// 诊断信息
 static NSString *_globalDiagInfo = nil;
 
 static void _loadIOMobileFramebuffer(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        // 先尝试加载私有框架（TrollStore/越狱环境下才能成功）
         void *fw = dlopen(
             "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",
             RTLD_NOW
         );
-
-        const char *dlErr = dlerror(); // 立即消费错误信息
+        const char *dlErr = dlerror();
 
         if (!fw) {
-            _globalDiagInfo = [NSString stringWithFormat:@"dlopen IOMobileFramebuffer 失败: %s → 沙盒内或权限不足", dlErr ?: "(无错误信息)"];
+            _globalDiagInfo = [NSString stringWithFormat:@"dlopen IOMobileFramebuffer 失败: %s", dlErr ?: "(无错误信息)"];
             NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
             return;
         }
 
-        void *h = fw;
-        IOMobileFramebufferGetMainDisplay  = dlsym(h, "IOMobileFramebufferGetMainDisplay");
-        IOMobileFramebufferCreateSurface   = dlsym(h, "IOMobileFramebufferCreateSurface");
-        IOMobileFramebufferLockSurface     = dlsym(h, "IOMobileFramebufferLockSurface");
-        IOMobileFramebufferUnlockSurface   = dlsym(h, "IOMobileFramebufferUnlockSurface");
-        IOMobileFramebufferRelease         = dlsym(h, "IOMobileFramebufferRelease");
+        IOMobileFramebufferGetMainDisplay        = dlsym(fw, "IOMobileFramebufferGetMainDisplay");
+        IOMobileFramebufferGetLayerDefaultSurface = dlsym(fw, "IOMobileFramebufferGetLayerDefaultSurface");
 
-        // 加载 IOSurface 函数（iOS 18+ SDK 已公开，但为兼容老版本仍运行时加载）
-        _IOSurfaceGetWidth       = dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
-        _IOSurfaceGetHeight      = dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
-        _IOSurfaceGetBaseAddress = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
-
-        if (!IOMobileFramebufferGetMainDisplay) {
-            _globalDiagInfo = @"dlopen 成功但 dlsym 解析失败 → 该 iOS 版本可能已移除/重命名此私有 API";
-            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
-        } else if (!_IOSurfaceGetWidth || !_IOSurfaceGetHeight || !_IOSurfaceGetBaseAddress) {
-            _globalDiagInfo = @"IOMobileFramebuffer 符号加载成功，但 IOSurface 符号缺失";
-            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
+        if (IOMobileFramebufferGetMainDisplay && IOMobileFramebufferGetLayerDefaultSurface) {
+            _globalDiagInfo = @"✅ IOMobileFramebuffer GetMainDisplay + GetLayerDefaultSurface 加载成功";
         } else {
-            _globalDiagInfo = @"✅ IOMobileFramebuffer / IOSurface 符号加载成功";
-            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
+            NSMutableArray *m = [NSMutableArray array];
+            if (!IOMobileFramebufferGetMainDisplay)        [m addObject:@"GetMainDisplay"];
+            if (!IOMobileFramebufferGetLayerDefaultSurface) [m addObject:@"GetLayerDefaultSurface"];
+            _globalDiagInfo = [NSString stringWithFormat:@"缺失符号: %@", [m componentsJoinedByString:@", "]];
         }
+        NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
     });
 }
-
-// kCVPixelFormatType_32BGRA = 'BGRA'
-#define PIXEL_FORMAT 0x42475241
 
 @implementation ScreenCapture {
     IOMobileFramebufferConnection _connection;
@@ -85,10 +60,8 @@ static void _loadIOMobileFramebuffer(void) {
     int _height;
     BOOL _connected;
 
-    // 诊断
     NSString *_diagMessage;
 
-    // 屏幕保持缓存
     BOOL _keeping;
     unsigned char *_cachedBuffer;
     size_t _cachedSize;
@@ -109,7 +82,7 @@ static void _loadIOMobileFramebuffer(void) {
         _keeping = NO;
         _cachedBuffer = NULL;
         _cachedSize = 0;
-        _diagMessage = @"(init 开始, _connect 尚未执行)";
+        _diagMessage = @"(初始化中...)";
         _connection = NULL;
         _surface = NULL;
         _width = 0;
@@ -125,116 +98,72 @@ static void _loadIOMobileFramebuffer(void) {
     [self _disconnect];
 }
 
+// MARK: - 连接 Framebuffer
+
 - (void)_connect {
     @try {
         [self _connectImpl];
     } @catch (NSException *e) {
-        _diagMessage = [NSString stringWithFormat:@"❌ _connect 抛出异常: %@ - %@", e.name, e.reason];
+        _diagMessage = [NSString stringWithFormat:@"❌ _connect 异常: %@ - %@", e.name, e.reason];
         NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
     }
 }
 
 - (void)_connectImpl {
-    _diagMessage = @"_connectImpl 已进入";
-    if (_connected) {
-        _diagMessage = @"(已连接，跳过)";
-        return;
-    }
+    if (_connected) return;
 
     _loadIOMobileFramebuffer();
-    _diagMessage = [NSString stringWithFormat:@"Step1 dlopen/dlsym: %@\n"
-                    "   GMD=%p CS=%p LS=%p US=%p RL=%p\n"
-                    "   IGW=%p IGH=%p IGBA=%p",
-                    _globalDiagInfo,
-                    IOMobileFramebufferGetMainDisplay,
-                    IOMobileFramebufferCreateSurface,
-                    IOMobileFramebufferLockSurface,
-                    IOMobileFramebufferUnlockSurface,
-                    IOMobileFramebufferRelease,
-                    _IOSurfaceGetWidth,
-                    _IOSurfaceGetHeight,
-                    _IOSurfaceGetBaseAddress];
 
-    // 逐个检测并报告缺失的符号
-    NSMutableArray *missing = [NSMutableArray array];
-    if (!IOMobileFramebufferGetMainDisplay) [missing addObject:@"GetMainDisplay"];
-    if (!IOMobileFramebufferCreateSurface)  [missing addObject:@"CreateSurface"];
-    if (!IOMobileFramebufferLockSurface)    [missing addObject:@"LockSurface"];
-    if (!IOMobileFramebufferUnlockSurface)  [missing addObject:@"UnlockSurface"];
-    if (!IOMobileFramebufferRelease)        [missing addObject:@"Release"];
-    if (!_IOSurfaceGetWidth)                [missing addObject:@"IOSurfaceGetWidth"];
-    if (!_IOSurfaceGetHeight)               [missing addObject:@"IOSurfaceGetHeight"];
-    if (!_IOSurfaceGetBaseAddress)          [missing addObject:@"IOSurfaceGetBaseAddress"];
-
-    if (missing.count > 0) {
-        _diagMessage = [NSString stringWithFormat:@"Step2 缺失符号(%lu): %@",
-                        (unsigned long)missing.count,
-                        [missing componentsJoinedByString:@", "]];
+    // 检查必要符号
+    if (!IOMobileFramebufferGetMainDisplay || !IOMobileFramebufferGetLayerDefaultSurface) {
+        _diagMessage = [NSString stringWithFormat:@"符号缺失: %@", _globalDiagInfo];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
 
-    _diagMessage = @"Step2 符号检查全部通过 → 调用 GetMainDisplay...";
-    int ret = IOMobileFramebufferGetMainDisplay(&_connection);
-    _diagMessage = [NSString stringWithFormat:@"Step3 GetMainDisplay → ret=%d conn=%p", ret, _connection];
-
-    if (ret != 0) {
-        _diagMessage = [NSString stringWithFormat:@"Step3 失败 GetMainDisplay ret=%d (entitlement缺失?)", ret];
+    // Step 1: 获取主屏幕 Framebuffer
+    kern_return_t ret = IOMobileFramebufferGetMainDisplay(&_connection);
+    if (ret != KERN_SUCCESS || !_connection) {
+        _diagMessage = [NSString stringWithFormat:@"GetMainDisplay 失败 (ret=0x%x)", ret];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
 
-    // 用 1x1 先创建 surface 获取宽高信息
-    _diagMessage = [NSString stringWithFormat:@"Step3 成功 → 探测 Surface(%p)", _connection];
-    ret = IOMobileFramebufferCreateSurface(_connection, 1, 1, PIXEL_FORMAT,
-                                            &_surface, &_bytesPerRow);
-    _diagMessage = [NSString stringWithFormat:@"Step4 CreateSurface(probe) → ret=%d surf=%p bpr=%d",
-                    ret, _surface, _bytesPerRow];
-
-    if (ret != 0 || !_surface) {
-        _diagMessage = [NSString stringWithFormat:@"Step4 失败 CreateSurface probe ret=%d", ret];
+    // Step 2: 获取 Layer 0 的 IOSurface（iOS 14-16 上真实存在的 API）
+    ret = IOMobileFramebufferGetLayerDefaultSurface(_connection, 0, &_surface);
+    if (ret != KERN_SUCCESS || !_surface) {
+        _diagMessage = [NSString stringWithFormat:@"GetLayerDefaultSurface 失败 (ret=0x%x)", ret];
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
 
-    // 获取实际尺寸
-    _width  = (int)_IOSurfaceGetWidth(_surface);
-    _height = (int)_IOSurfaceGetHeight(_surface);
-    _diagMessage = [NSString stringWithFormat:@"Step5 探测成功 → %dx%d, 释放探针...", _width, _height];
-
-    // 释放 probe surface，用实际尺寸重建
-    CFRelease(_surface);
-    _surface = NULL;
+    // Step 3: 获取尺寸信息（IOSurface 公开 API，无需 dlsym）
+    _width  = (int)IOSurfaceGetWidth(_surface);
+    _height = (int)IOSurfaceGetHeight(_surface);
+    _bytesPerRow = (int)IOSurfaceGetBytesPerRow(_surface);
 
     if (_width <= 0 || _height <= 0) {
-        _diagMessage = [NSString stringWithFormat:@"Step5 失败 无效尺寸 %dx%d", _width, _height];
-        [self _fallbackScreenSize];
-        return;
-    }
-
-    _diagMessage = [NSString stringWithFormat:@"Step5 尺寸有效 → 创建正式 Surface %dx%d...", _width, _height];
-    ret = IOMobileFramebufferCreateSurface(_connection, _width, _height, PIXEL_FORMAT,
-                                            &_surface, &_bytesPerRow);
-
-    if (ret != 0 || !_surface) {
-        _diagMessage = [NSString stringWithFormat:@"Step6 失败 CreateSurface(%dx%d) ret=%d", _width, _height, ret];
+        _diagMessage = [NSString stringWithFormat:@"无效尺寸 %dx%d", _width, _height];
         [self _fallbackScreenSize];
         return;
     }
 
     _connected = YES;
-    _diagMessage = [NSString stringWithFormat:@"✅ Step6 连接成功: %dx%d bpr=%d", _width, _height, _bytesPerRow];
+    _diagMessage = [NSString stringWithFormat:@"✅ 连接成功: %dx%d bpr=%d", _width, _height, _bytesPerRow];
+    NSLog(@"[ScreenCapture] %@", _diagMessage);
 }
 
 - (void)_fallbackScreenSize {
     CGRect bounds = [[UIScreen mainScreen] nativeBounds];
     _width  = (int)bounds.size.width;
     _height = (int)bounds.size.height;
-    // 始终追加 fallback 信息到已有诊断中
-    NSString *prev = _diagMessage ? [NSString stringWithFormat:@"%@", _diagMessage] : @"(无)";
-    _diagMessage = [NSString stringWithFormat:@"%@ | fallback→UIScreen %dx%d", prev, _width, _height];
-    NSLog(@"[ScreenCapture] Fallback screen size: %dx%d", _width, _height);
+    NSString *prev = _diagMessage ?: @"";
+    _diagMessage = [NSString stringWithFormat:@"%@ → fallback UIScreen %dx%d", prev, _width, _height];
+    NSLog(@"[ScreenCapture] Fallback: %dx%d", _width, _height);
 }
 
 - (BOOL)isConnected {
@@ -245,22 +174,17 @@ static void _loadIOMobileFramebuffer(void) {
     NSMutableString *desc = [NSMutableString string];
     [desc appendFormat:@"屏幕捕获: %@\n", _diagMessage ?: _globalDiagInfo ?: @"(未初始化)"];
 
-    // 运行时检测沙盒状态：路径不可靠（TrollStore 非越狱也装在容器路径），
-    // 改用实际访问系统文件 + SecTask 查询 no-sandbox entitlement 来判断
-    NSString *installPath = [[NSBundle mainBundle] bundlePath];
     BOOL canAccessSystem = (access("/var/mobile/Library", F_OK) == 0);
-    BOOL dlopenWorked = (_globalDiagInfo && [_globalDiagInfo containsString:@"符号加载成功"]);
+    BOOL dlopenWorked = (_globalDiagInfo && [_globalDiagInfo containsString:@"加载成功"]);
 
     if (dlopenWorked && canAccessSystem) {
         [desc appendString:@"安装方式: ✅ TrollStore (no-sandbox 生效)\n"];
     } else if (canAccessSystem) {
         [desc appendString:@"安装方式: ✅ 越狱 (可访问系统文件)\n"];
     } else if (dlopenWorked) {
-        [desc appendString:@"安装方式: ?? (dlopen 成功但系统文件不可访问，权限异常)\n"];
-    } else if ([installPath containsString:@"/Applications"]) {
-        [desc appendString:@"安装方式: /Applications (越狱检测)\n"];
+        [desc appendString:@"安装方式: ?? (dlopen 成功但系统文件不可访问)\n"];
     } else {
-        [desc appendString:@"安装方式: ❌ 沙盒内 (普通侧载/AltStore) — 请用 TrollStore 重装\n"];
+        [desc appendString:@"安装方式: ❌ 沙盒内 — 请用 TrollStore 重装\n"];
     }
 
     [desc appendFormat:@"分辨率: %dx%d\n", _width, _height];
@@ -269,61 +193,58 @@ static void _loadIOMobileFramebuffer(void) {
     return desc;
 }
 
+// MARK: - 断开连接
+
 - (void)_disconnect {
     if (_surface) {
         CFRelease(_surface);
         _surface = NULL;
     }
-    if (_connection) {
-        IOMobileFramebufferRelease(_connection);
-        _connection = NULL;
-    }
+    _connection = NULL;
     _connected = NO;
 }
 
-/// 获取当前屏幕数据的指针（缓存或实时）
+// MARK: - 锁定/解锁 IOSurface（公开 API）
+
 - (unsigned char *)_lockAndGetBuffer {
     if (_keeping && _cachedBuffer) {
         return _cachedBuffer;
     }
 
-    if (!_connected) return NULL;
+    if (!_connected || !_surface) return NULL;
 
-    int lockToken = 0;
-    int ret = IOMobileFramebufferLockSurface(_connection, _surface, 0, &lockToken);
-    if (ret != 0) {
-        NSLog(@"[ScreenCapture] LockSurface failed: %d", ret);
+    // IOSurfaceLock / IOSurfaceUnlock 是公开 API，无需 dlsym
+    kern_return_t ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
+    if (ret != KERN_SUCCESS) {
+        NSLog(@"[ScreenCapture] IOSurfaceLock 失败: 0x%x", ret);
         return NULL;
     }
 
-    void *baseAddr = (void *)_IOSurfaceGetBaseAddress(_surface);
+    void *baseAddr = IOSurfaceGetBaseAddress(_surface);
     if (!baseAddr) {
-        IOMobileFramebufferUnlockSurface(_connection, _surface, lockToken);
+        IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
         return NULL;
     }
 
-    // 拷贝数据出来，避免长时间持有锁
     size_t totalSize = (size_t)_height * _bytesPerRow;
     if (_cachedSize != totalSize) {
         free(_cachedBuffer);
         _cachedBuffer = (unsigned char *)malloc(totalSize);
         _cachedSize = totalSize;
     }
-    memcpy(_cachedBuffer, baseAddr, totalSize);
+    if (_cachedBuffer) {
+        memcpy(_cachedBuffer, baseAddr, totalSize);
+    }
 
-    IOMobileFramebufferUnlockSurface(_connection, _surface, lockToken);
+    IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
     return _cachedBuffer;
 }
 
-// MARK: - 公开接口
-
-- (CGSize)screenSize {
-    return CGSizeMake(_width, _height);
-}
+// MARK: - 取色
 
 - (ScreenColor)colorAtX:(int)x y:(int)y {
     ScreenColor result = {0, 0, 0};
-    if (!_connected || x < 0 || y < 0 || x >= _width || y >= _height) {
+    if (!_connected || !_surface || x < 0 || y < 0 || x >= _width || y >= _height) {
         return result;
     }
 
@@ -336,25 +257,23 @@ static void _loadIOMobileFramebuffer(void) {
         return result;
     }
 
-    int lockToken = 0;
-    int ret = IOMobileFramebufferLockSurface(_connection, _surface, 0, &lockToken);
-    if (ret != 0) {
-        NSLog(@"[ScreenCapture] LockSurface failed: %d", ret);
-        return result;
-    }
+    kern_return_t ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
+    if (ret != KERN_SUCCESS) return result;
 
-    void *baseAddr = (void *)_IOSurfaceGetBaseAddress(_surface);
+    void *baseAddr = IOSurfaceGetBaseAddress(_surface);
     if (baseAddr) {
-        int offset = y * _bytesPerRow + x * 4;  // BGRA 格式
+        int offset = y * _bytesPerRow + x * 4;
         unsigned char *pixel = (unsigned char *)baseAddr + offset;
         result.b = pixel[0];
         result.g = pixel[1];
         result.r = pixel[2];
     }
 
-    IOMobileFramebufferUnlockSurface(_connection, _surface, lockToken);
+    IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
     return result;
 }
+
+// MARK: - 找色
 
 - (CGPoint)findColor:(ScreenColor)color
             tolerance:(int)tolerance
@@ -362,7 +281,6 @@ static void _loadIOMobileFramebuffer(void) {
                    x2:(int)x2 y2:(int)y2 {
     if (!_connected) return CGPointMake(-1, -1);
 
-    // 参数校验
     if (x2 <= 0 || x2 > _width)  x2 = _width;
     if (y2 <= 0 || y2 > _height) y2 = _height;
     if (x1 < 0) x1 = 0;
@@ -396,7 +314,6 @@ static void _loadIOMobileFramebuffer(void) {
                                    x1:(int)x1 y1:(int)y1
                                    x2:(int)x2 y2:(int)y2 {
     NSMutableArray<NSValue *> *results = [NSMutableArray array];
-
     if (!_connected) return results;
 
     if (x2 <= 0 || x2 > _width)  x2 = _width;
@@ -427,9 +344,10 @@ static void _loadIOMobileFramebuffer(void) {
     return results;
 }
 
+// MARK: - 屏幕缓存
+
 - (void)keepScreen {
     if (_keeping) return;
-    // 立即缓存当前屏幕
     [self _lockAndGetBuffer];
     _keeping = YES;
     NSLog(@"[ScreenCapture] Screen kept");
@@ -438,6 +356,12 @@ static void _loadIOMobileFramebuffer(void) {
 - (void)releaseScreen {
     _keeping = NO;
     NSLog(@"[ScreenCapture] Screen released");
+}
+
+// MARK: - 截图为 PNG
+
+- (CGSize)screenSize {
+    return CGSizeMake(_width, _height);
 }
 
 - (BOOL)snapshotToPath:(NSString *)path {
@@ -456,15 +380,11 @@ static void _loadIOMobileFramebuffer(void) {
     unsigned char *buffer = [self _lockAndGetBuffer];
     if (!buffer) return NO;
 
-    // BGRA → RGBA 转换，创建 CGImage
-    size_t bytesPerPixel = 4;
-    size_t bitsPerComponent = 8;
-    size_t bitsPerPixel = 32;
-    size_t dataLength = (size_t)h * w * bytesPerPixel;
-
+    size_t dataLength = (size_t)h * w * 4;
     unsigned char *rgbaData = (unsigned char *)malloc(dataLength);
     if (!rgbaData) return NO;
 
+    // BGRA → RGBA
     for (int row = 0; row < h; row++) {
         unsigned char *src = buffer + (y + row) * _bytesPerRow + x * 4;
         unsigned char *dst = rgbaData + row * w * 4;
@@ -477,23 +397,17 @@ static void _loadIOMobileFramebuffer(void) {
     }
 
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(rgbaData, w, h, bitsPerComponent,
-                                              w * bytesPerPixel, colorSpace,
+    CGContextRef ctx = CGBitmapContextCreate(rgbaData, w, h, 8,
+                                              w * 4, colorSpace,
                                               kCGImageAlphaPremultipliedLast);
     CGColorSpaceRelease(colorSpace);
 
-    if (!ctx) {
-        free(rgbaData);
-        return NO;
-    }
+    if (!ctx) { free(rgbaData); return NO; }
 
     CGImageRef image = CGBitmapContextCreateImage(ctx);
     CGContextRelease(ctx);
 
-    if (!image) {
-        free(rgbaData);
-        return NO;
-    }
+    if (!image) { free(rgbaData); return NO; }
 
     UIImage *uiImage = [UIImage imageWithCGImage:image];
     CGImageRelease(image);

@@ -49,24 +49,30 @@
     <key>com.apple.private.iokit.restricted-uc-class</key>
     <true/>
 
-    <!-- ===== 屏幕捕获/取色/截图（Lua 脚本核心） ===== -->
-    <key>com.apple.private.iomobileframebuffer.access</key>
-    <true/>
-    <key>com.apple.private.IOMobileFramebuffer.client</key>
-    <true/>
-    <key>com.apple.private.screencapture.capture-all-displays</key>
-    <true/>
-    <key>com.apple.private.coremedia.allow-screen-capture</key>
-    <true/>
-    <key>com.apple.private.graphics.get-pixel-colors</key>
-    <true/>
+	<!-- ===== 屏幕捕获/取色/截图（Lua 脚本核心） ===== -->
+	<key>com.apple.private.iomobileframebuffer.access</key>
+	<true/>
+	<key>com.apple.private.IOMobileFramebuffer.client</key>
+	<true/>
+	<key>com.apple.private.screencapture.capture-all-displays</key>
+	<true/>
+	<key>com.apple.private.coremedia.allow-screen-capture</key>
+	<true/>
+	<key>com.apple.private.graphics.get-pixel-colors</key>
+	<true/>
+	<key>com.apple.private.allow-explicit-graphics-priority</key>
+	<true/>
 
-    <!-- ===== 触控模拟（Lua 脚本核心） ===== -->
-    <key>com.apple.private.iohid.event-system</key>
-    <true/>
+	<!-- ===== 触控模拟（Lua 脚本核心） ===== -->
+	<key>com.apple.private.iohid.event-system</key>
+	<true/>
 
-    <!-- ===== IOSurface 直接访问（截图加速） ===== -->
-    <key>com.apple.private.coresurface.access</key>
-    <true/>
+	<!-- ===== IOSurface 直接访问（截图加速） ===== -->
+	<key>com.apple.private.coresurface.access</key>
+	<true/>
+
+	<!-- ===== 防止被系统杀掉 ===== -->
+	<key>com.apple.private.process.allow-background-execution</key>
+	<true/>
 </dict>
 </plist>
