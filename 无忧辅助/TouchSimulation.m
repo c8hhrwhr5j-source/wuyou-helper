@@ -1,6 +1,6 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 IOHIDEventSystemClient 进行触控模拟（TrollStore 跨应用方案）
+//  无忧辅助 - 通过 CGEvent 无障碍方案进行跨应用触控模拟（TrollStore 特权版）
 //
 
 #import "TouchSimulation.h"
@@ -10,34 +10,41 @@
 #import <math.h>
 #import <unistd.h>
 #import <dlfcn.h>
-#import <mach/mach_time.h>
 
 static CGSize _screenSize = {0, 0};
 static uint32_t _fingerSeq = 1000;
 
-typedef void* IOHIDEventSystemClientRef;
-typedef void* IOHIDEventRef;
+// CGEvent 类型常量（与 macOS 一致，iOS 私有 API 同样使用）
+#define kCGHIDEventTap           0
+#define kCGEventLeftMouseDown    1
+#define kCGEventLeftMouseUp      2
+#define kCGEventMouseMoved       5
+#define kCGEventSourceStateHIDSystemState 1
+#define kCGMouseButtonLeft       0
 
-typedef IOHIDEventSystemClientRef (*IOHIDEventSystemClientCreateFn)(CFAllocatorRef allocator);
-typedef IOHIDEventRef (*IOHIDEventCreateDigitizerEventFn)(CFAllocatorRef allocator, uint64_t timeStamp, uint32_t type, uint32_t subtype, uint32_t index, uint32_t identity, uint8_t attributeMask, uint8_t range, uint8_t touch, uint32_t options);
-typedef IOHIDEventRef (*IOHIDEventCreateDigitizerFingerEventFn)(CFAllocatorRef allocator, uint64_t timeStamp, uint32_t index, uint32_t identity, uint8_t attributeMask, uint8_t range, uint8_t touch, uint32_t type, float x, float y, float z, float tipPressure, float barrelPressure, uint32_t options);
-typedef void (*IOHIDEventAppendEventFn)(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
-typedef void (*IOHIDEventSystemClientDispatchEventFn)(IOHIDEventSystemClientRef client, IOHIDEventRef event);
-typedef void (*IOHIDEventReleaseFn)(IOHIDEventRef event);
+typedef void* CGEventRef;
+typedef void* CGEventSourceRef;
+typedef uint32_t CGEventType;
+typedef uint32_t CGMouseButton;
+typedef uint32_t CGEventTapLocation;
+typedef uint32_t CGEventSourceStateID;
 
-static IOHIDEventSystemClientCreateFn _IOHIDEventSystemClientCreate = NULL;
-static IOHIDEventCreateDigitizerEventFn _IOHIDEventCreateDigitizerEvent = NULL;
-static IOHIDEventCreateDigitizerFingerEventFn _IOHIDEventCreateDigitizerFingerEvent = NULL;
-static IOHIDEventAppendEventFn _IOHIDEventAppendEvent = NULL;
-static IOHIDEventSystemClientDispatchEventFn _IOHIDEventSystemClientDispatchEvent = NULL;
-static IOHIDEventReleaseFn _IOHIDEventRelease = NULL;
+typedef struct {
+    double x;
+    double y;
+} CGPointStruct;
 
-static IOHIDEventSystemClientRef _eventClient = NULL;
+typedef CGEventRef (*CGEventCreateMouseEventFn)(CGEventSourceRef source, CGEventType type, CGPointStruct point, CGMouseButton button);
+typedef void (*CGEventPostFn)(CGEventTapLocation tap, CGEventRef event);
+typedef CGEventSourceRef (*CGEventSourceCreateFn)(CGEventSourceStateID stateID);
+typedef void (*CGEventReleaseFn)(CGEventRef event);
 
-#define kIOHIDDigitizerEventRange     0
-#define kIOHIDDigitizerEventTouch     1
-#define kIOHIDDigitizerEventPosition  2
-#define kIOHIDDigitizerTransducerFinger 2
+static CGEventCreateMouseEventFn _CGEventCreateMouseEvent = NULL;
+static CGEventPostFn _CGEventPost = NULL;
+static CGEventSourceCreateFn _CGEventSourceCreate = NULL;
+// CGEventRelease 实际就是 CFRelease，不需要单独获取
+
+static CGEventSourceRef _eventSource = NULL;
 
 // MARK: - TouchSlide 实现
 
@@ -130,160 +137,125 @@ static IOHIDEventSystemClientRef _eventClient = NULL;
     NSLog(@"%@", msg);
 }
 
-- (BOOL)_initHID {
-    if (_hidInitialized) return (_eventClient != NULL);
+- (BOOL)_initCGEvent {
+    if (_hidInitialized) return (_eventSource != NULL);
     _hidInitialized = YES;
 
-    [self _log:@"[TouchSimulation] 🔧 开始初始化 IOHIDEventSystemClient..."];
+    [self _log:@"[TouchSimulation] 🔧 开始初始化 CGEvent 无障碍方案..."];
 
-    void* handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+    // CGEvent 函数在 CoreGraphics framework 中（iOS 私有 API）
+    void* handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
     if (!handle) {
-        [self _log:@"[TouchSimulation] ❌ dlopen IOKit 失败"];
+        // 尝试 ApplicationServices
+        handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY);
+    }
+    if (!handle) {
+        [self _log:@"[TouchSimulation] ❌ dlopen CoreGraphics 失败"];
         return NO;
     }
-    [self _log:@"[TouchSimulation] ✅ dlopen IOKit 成功"];
+    [self _log:@"[TouchSimulation] ✅ dlopen CoreGraphics 成功"];
 
-    _IOHIDEventSystemClientCreate = dlsym(handle, "IOHIDEventSystemClientCreate");
-    _IOHIDEventCreateDigitizerEvent = dlsym(handle, "IOHIDEventCreateDigitizerEvent");
-    _IOHIDEventCreateDigitizerFingerEvent = dlsym(handle, "IOHIDEventCreateDigitizerFingerEvent");
-    _IOHIDEventAppendEvent = dlsym(handle, "IOHIDEventAppendEvent");
-    _IOHIDEventSystemClientDispatchEvent = dlsym(handle, "IOHIDEventSystemClientDispatchEvent");
-    _IOHIDEventRelease = dlsym(handle, "IOHIDEventRelease");
+    _CGEventCreateMouseEvent = dlsym(handle, "CGEventCreateMouseEvent");
+    _CGEventPost = dlsym(handle, "CGEventPost");
+    _CGEventSourceCreate = dlsym(handle, "CGEventSourceCreate");
 
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 函数指针: Create=%p Digitizer=%p Finger=%p Append=%p Dispatch=%p Release=%p",
-        _IOHIDEventSystemClientCreate, _IOHIDEventCreateDigitizerEvent, _IOHIDEventCreateDigitizerFingerEvent,
-        _IOHIDEventAppendEvent, _IOHIDEventSystemClientDispatchEvent, _IOHIDEventRelease]];
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 函数指针: CreateMouseEvent=%p Post=%p SourceCreate=%p",
+        _CGEventCreateMouseEvent, _CGEventPost, _CGEventSourceCreate]];
 
-    if (!_IOHIDEventSystemClientCreate || !_IOHIDEventCreateDigitizerEvent ||
-        !_IOHIDEventCreateDigitizerFingerEvent || !_IOHIDEventAppendEvent ||
-        !_IOHIDEventSystemClientDispatchEvent || !_IOHIDEventRelease) {
-        [self _log:@"[TouchSimulation] ❌ 部分函数指针获取失败"];
+    if (!_CGEventCreateMouseEvent || !_CGEventPost) {
+        [self _log:@"[TouchSimulation] ❌ CGEvent 函数获取失败"];
         return NO;
     }
-    [self _log:@"[TouchSimulation] ✅ 所有函数指针获取成功"];
+    [self _log:@"[TouchSimulation] ✅ CGEvent 函数获取成功"];
 
-    _eventClient = _IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-    if (!_eventClient) {
-        [self _log:@"[TouchSimulation] ❌ IOHIDEventSystemClientCreate 失败"];
-        return NO;
+    // 创建事件源（如果可用）
+    if (_CGEventSourceCreate) {
+        _eventSource = _CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+        if (_eventSource) {
+            [self _log:@"[TouchSimulation] ✅ CGEventSource 创建成功"];
+        } else {
+            [self _log:@"[TouchSimulation] ⚠️ CGEventSource 创建失败，将使用 NULL source"];
+        }
+    } else {
+        [self _log:@"[TouchSimulation] ⚠️ CGEventSourceCreate 不可用，将使用 NULL source"];
     }
-    [self _log:@"[TouchSimulation] ✅ IOHIDEventSystemClient 创建成功"];
+
+    [self _log:@"[TouchSimulation] ✅ CGEvent 无障碍方案初始化完成"];
     return YES;
 }
 
 - (void)logDiagnostic {
-    [self _initHID];
-    if (_eventClient) {
-        [self _log:@"[TouchSimulation] ✅ HID事件系统已就绪"];
+    [self _initCGEvent];
+    if (_CGEventPost) {
+        [self _log:@"[TouchSimulation] ✅ CGEvent 无障碍系统已就绪"];
     } else {
-        [self _log:@"[TouchSimulation] ❌ HID事件系统未初始化"];
+        [self _log:@"[TouchSimulation] ❌ CGEvent 无障碍系统未初始化"];
     }
 }
 
-// MARK: - HID 事件发送
+// MARK: - CGEvent 发送
+
+- (void)_sendMouseEvent:(CGEventType)type atX:(CGFloat)x y:(CGFloat)y {
+    if (![self _initCGEvent]) {
+        [self _log:@"[TouchSimulation] ❌ CGEvent 系统不可用"];
+        return;
+    }
+
+    CGPointStruct point;
+    point.x = x;
+    point.y = y;
+
+    CGEventRef event = _CGEventCreateMouseEvent(_eventSource, type, point, kCGMouseButtonLeft);
+    if (!event) {
+        [self _log:@"[TouchSimulation] ❌ CGEvent 创建失败"];
+        return;
+    }
+
+    _CGEventPost(kCGHIDEventTap, event);
+
+    // CGEventRelease 就是 CFRelease
+    CFRelease(event);
+}
 
 - (void)_sendTouchEvent:(BOOL)isDown atX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    if (![self _initHID]) {
-        [self _log:@"[TouchSimulation] ❌ HID事件系统不可用"];
+    if (![self _initCGEvent]) {
+        [self _log:@"[TouchSimulation] ❌ CGEvent 系统不可用"];
         return;
     }
 
-    uint64_t timestamp = mach_absolute_time();
-    float normX = (float)(x / _screenSize.width);
-    float normY = (float)(y / _screenSize.height);
+    CGPointStruct point;
+    point.x = x;
+    point.y = y;
 
-    // 创建手指事件
-    IOHIDEventRef fingerEvent = _IOHIDEventCreateDigitizerFingerEvent(
-        kCFAllocatorDefault,
-        timestamp,
-        0,              // index
-        fingerID,       // identity
-        0,              // attributeMask
-        isDown ? 1 : 0, // range
-        isDown ? 1 : 0, // touch
-        kIOHIDDigitizerTransducerFinger, // type
-        normX, normY,
-        0.0f,           // z
-        isDown ? 1.0f : 0.0f,  // tipPressure
-        0.0f,           // barrelPressure
-        0               // options
-    );
-
-    if (!fingerEvent) {
-        [self _log:@"[TouchSimulation] ❌ 手指事件创建失败"];
+    CGEventType type = isDown ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
+    CGEventRef event = _CGEventCreateMouseEvent(_eventSource, type, point, kCGMouseButtonLeft);
+    if (!event) {
+        [self _log:@"[TouchSimulation] ❌ CGEvent 创建失败"];
         return;
     }
 
-    // 创建容器事件（Range 事件）
-    IOHIDEventRef digitizerEvent = _IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault,
-        timestamp,
-        kIOHIDDigitizerEventRange,  // type
-        0,                          // subtype
-        0,                          // index
-        fingerID,                   // identity
-        0,                          // attributeMask
-        isDown ? 1 : 0,             // range
-        isDown ? 1 : 0,             // touch
-        0                           // options
-    );
-
-    if (!digitizerEvent) {
-        [self _log:@"[TouchSimulation] ❌ 容器事件创建失败"];
-        _IOHIDEventRelease(fingerEvent);
-        return;
-    }
-
-    // 将手指事件添加到容器事件
-    _IOHIDEventAppendEvent(digitizerEvent, fingerEvent, 0);
-
-    // 派发事件
-    _IOHIDEventSystemClientDispatchEvent(_eventClient, digitizerEvent);
-
-    // 释放事件
-    _IOHIDEventRelease(digitizerEvent);
+    _CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
 
     const char *typeName = isDown ? "DOWN" : "UP";
     [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f finger=%u", typeName, x, y, fingerID]];
 }
 
 - (void)_sendMoveEventAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    if (![self _initHID]) {
-        [self _log:@"[TouchSimulation] ❌ HID事件系统不可用"];
+    if (![self _initCGEvent]) {
+        [self _log:@"[TouchSimulation] ❌ CGEvent 系统不可用"];
         return;
     }
 
-    uint64_t timestamp = mach_absolute_time();
-    float normX = (float)(x / _screenSize.width);
-    float normY = (float)(y / _screenSize.height);
+    CGPointStruct point;
+    point.x = x;
+    point.y = y;
 
-    IOHIDEventRef fingerEvent = _IOHIDEventCreateDigitizerFingerEvent(
-        kCFAllocatorDefault,
-        timestamp,
-        0, 1,
-        0, 1, 1,
-        kIOHIDDigitizerTransducerFinger,
-        normX, normY,
-        0.0f, 1.0f, 0.0f, 0
-    );
+    CGEventRef event = _CGEventCreateMouseEvent(_eventSource, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    if (!event) return;
 
-    if (!fingerEvent) return;
-
-    IOHIDEventRef digitizerEvent = _IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault,
-        timestamp,
-        kIOHIDDigitizerEventPosition,
-        0, 0, 1, 0, 1, 1, 0
-    );
-
-    if (!digitizerEvent) {
-        _IOHIDEventRelease(fingerEvent);
-        return;
-    }
-
-    _IOHIDEventAppendEvent(digitizerEvent, fingerEvent, 0);
-    _IOHIDEventSystemClientDispatchEvent(_eventClient, digitizerEvent);
-    _IOHIDEventRelease(digitizerEvent);
+    _CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
 }
 
 // MARK: - 内部核心方法
