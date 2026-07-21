@@ -2,44 +2,117 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- ===== 核心沙盒解除 ===== -->
+	<!-- ===== 核心沙盒/容器解除（TrollStore 自动化应用必备） ===== -->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.security.no-container</key>
 	<true/>
+	<key>com.apple.private.security.container-manager</key>
+	<true/>
+	<key>com.apple.private.MobileContainerManager.allowed</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
+	<key>com.apple.private.security.storage.MobileDocuments</key>
+	<true/>
+	<key>com.apple.private.security.storage.Tips</key>
+	<true/>
+	<key>com.apple.private.security.storage.Safari</key>
+	<true/>
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.security.exception.files.home-relative-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
 
-	<!-- ===== TrollStore 运行基础 ===== -->
+	<!-- ===== 平台应用/签名/代码执行 ===== -->
 	<key>platform-application</key>
+	<true/>
+	<key>get-task-allow</key>
 	<true/>
 	<key>dynamic-codesigning</key>
 	<true/>
 	<key>com.apple.private.skip-library-validation</key>
 	<true/>
-	<key>get-task-allow</key>
+	<key>com.apple.private.cs.debugger</key>
+	<true/>
+	<key>com.apple.private.cs.installer</key>
+	<true/>
+	<key>com.apple.private.amfi.can-load-cdhash</key>
+	<true/>
+	<key>com.apple.private.amfi.can-generate-cdhash</key>
+	<true/>
+	<key>com.apple.private.kernel.override-cp</key>
+	<true/>
+	<key>com.apple.private.task_for_pid-allow</key>
+	<true/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>com.apple.private.process.allow-background-execution</key>
+	<true/>
+	<key>com.apple.private.can-get-task-allow</key>
 	<true/>
 
-	<!-- ===== 屏幕捕获 / 取色 / 截图 ===== -->
+	<!-- ===== 安装/卸载/管理其他应用（TrollStore 风格） ===== -->
+	<key>com.apple.private.MobileInstallationHelperService.allowed</key>
+	<true/>
+	<key>com.apple.private.MobileInstallationHelperService.InstallDaemonOpsEnabled</key>
+	<true/>
+	<key>com.apple.private.uninstall.deletion</key>
+	<true/>
+	<key>com.apple.lsapplicationworkspace.rebuildappdatabases</key>
+	<true/>
+	<key>com.apple.private.coreservices.canmaplsdatabase</key>
+	<true/>
+	<key>com.apple.springboard.opensensitiveurl</key>
+	<true/>
+
+	<!-- ===== 屏幕捕获 / 取色 / 截图 / 图形 ===== -->
 	<key>com.apple.private.iomobileframebuffer.access</key>
+	<true/>
+	<key>com.apple.private.IOMobileFramebuffer.client</key>
 	<true/>
 	<key>com.apple.private.screencapture.capture-all-displays</key>
 	<true/>
-	<key>com.apple.private.coresurface.access</key>
+	<key>com.apple.private.coremedia.allow-screen-capture</key>
 	<true/>
 	<key>com.apple.private.graphics.get-pixel-colors</key>
 	<true/>
-	<key>com.apple.private.coremedia.allow-screen-capture</key>
+	<key>com.apple.private.allow-explicit-graphics-priority</key>
 	<true/>
-	<key>com.apple.private.accessibility.server</key>
+	<key>com.apple.private.coresurface.access</key>
+	<true/>
+	<key>com.apple.private.mediaexperience.screenaccess</key>
 	<true/>
 
 	<!-- ===== 触控模拟 ===== -->
 	<key>com.apple.private.iohid.event-system</key>
 	<true/>
+	<key>com.apple.private.iohid.client</key>
+	<true/>
+	<key>com.apple.private.multitouch.host</key>
+	<true/>
+	<key>com.apple.private.hid.manager.event-observer</key>
+	<true/>
 
-	<!-- ===== kfd 内核漏洞 ===== -->
+	<!-- ===== 辅助功能 / Accessibility ===== -->
+	<key>com.apple.private.accessibility.server</key>
+	<true/>
+	<key>com.apple.accessibility.AccessibilityEnchantments</key>
+	<true/>
+	<key>com.apple.private.accessibility.media</key>
+	<true/>
+
+	<!-- ===== IOKit user-client 白名单（屏幕/内核/漏洞相关） ===== -->
 	<key>com.apple.private.security.iokit-user-client-class</key>
 	<array>
 		<string>IOSurfaceRootUserClient</string>
+		<string>IOMobileFramebufferUserClient</string>
 		<string>IOAccelSharedUserClient2</string>
 		<string>IOAccelSurface2</string>
 		<string>IOAccelContext2</string>
@@ -47,8 +120,124 @@
 		<string>AGXSharedUserClient</string>
 		<string>IOGPUDeviceUserClient</string>
 		<string>IOGPUSharedUserClient</string>
+		<string>IOHIDEventServiceUserClient</string>
+		<string>IOHIDLibUserClient</string>
+		<string>AppleSPU.UserClient</string>
+		<string>AppleSPU</string>
 	</array>
+	<key>com.apple.security.exception.iokit-user-client-class</key>
+	<array>
+		<string>IOSurfaceRootUserClient</string>
+		<string>IOMobileFramebufferUserClient</string>
+		<string>IOAccelSharedUserClient2</string>
+		<string>IOAccelSurface2</string>
+		<string>IOAccelContext2</string>
+		<string>AGXDeviceUserClient</string>
+		<string>AGXSharedUserClient</string>
+		<string>IOGPUDeviceUserClient</string>
+		<string>IOGPUSharedUserClient</string>
+		<string>IOHIDEventServiceUserClient</string>
+		<string>IOHIDLibUserClient</string>
+	</array>
+	<key>com.apple.private.iokit.restricted-uc-class</key>
+	<array>
+		<string>IOSurfaceRootUserClient</string>
+		<string>IOMobileFramebufferUserClient</string>
+	</array>
+	<key>com.apple.private.iokit.user-client-access</key>
+	<true/>
 	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<key>com.apple.private.kernel.mig-allow</key>
+	<true/>
+
+	<!-- ===== TCC 隐私权限全部绕过（与 TrollAutoScript 一致） ===== -->
+	<key>com.apple.private.tcc.allow</key>
+	<array>
+		<string>kTCCServiceMicrophone</string>
+		<string>kTCCServiceCamera</string>
+		<string>kTCCServicePhotoLibrary</string>
+		<string>kTCCServicePhotoLibraryAdd</string>
+		<string>kTCCServiceLocation</string>
+		<string>kTCCServiceLocationAlways</string>
+		<string>kTCCServiceContacts</string>
+		<string>kTCCServiceCalendar</string>
+		<string>kTCCServiceReminders</string>
+		<string>kTCCServiceBluetoothAlways</string>
+		<string>kTCCServiceBluetoothPeripheral</string>
+		<string>kTCCServiceMotion</string>
+		<string>kTCCServiceHomeKit</string>
+		<string>kTCCServiceMediaLibrary</string>
+		<string>kTCCServiceSiri</string>
+		<string>kTCCServiceSpeechRecognition</string>
+		<string>kTCCServiceFaceID</string>
+		<string>kTCCServicePasteboard</string>
+		<string>kTCCServiceKeyboardNetwork</string>
+		<string>kTCCServiceCalls</string>
+		<string>kTCCServiceExposureNotification</string>
+		<string>kTCCServiceAll</string>
+	</array>
+	<key>com.apple.private.tcc.manager</key>
+	<true/>
+	<key>com.apple.private.systempolicy.all-files</key>
+	<true/>
+	<key>com.apple.private.SystemPolicyAllFiles</key>
+	<true/>
+
+	<!-- ===== Keychain / 钥匙串访问 ===== -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>com.apple.hap.pairing</string>
+		<string>com.apple.VideoSubscriberAccount</string>
+		<string>com.apple.mobilemail.smime</string>
+		<string>com.apple.identities</string>
+		<string>com.apple.safari.credit-cards</string>
+		<string>appleaccount</string>
+		<string>com.apple.videouploadplugins.credentials</string>
+		<string>com.apple.ProtectedCloudStorage</string>
+		<string>apple</string>
+		<string>com.apple.youtube.credentials</string>
+		<string>com.apple.PassbookUIService</string>
+		<string>com.apple.PublicCloudStorage</string>
+		<string>com.apple.preferences</string>
+		<string>com.apple.cfnetwork</string>
+		<string>com.apple.airplay</string>
+		<string>com.apple.certificates</string>
+		<string>com.wuyou.helper</string>
+	</array>
+	<key>com.apple.private.keychain.access-groups</key>
+	<array>
+		<string>com.apple.hap.pairing</string>
+		<string>com.apple.VideoSubscriberAccount</string>
+		<string>com.apple.identities</string>
+		<string>appleaccount</string>
+		<string>apple</string>
+		<string>com.wuyou.helper</string>
+	</array>
+	<key>com.apple.private.keychain.sysctl</key>
+	<true/>
+
+	<!-- ===== 网络 / 通信 ===== -->
+	<key>com.apple.CommCenter.fine-grained</key>
+	<array>
+		<string>public</string>
+		<string>phone</string>
+		<string>data-usage</string>
+		<string>identity</string>
+	</array>
+	<key>com.apple.private.networkextension.configuration</key>
+	<true/>
+	<key>com.apple.private.network.socket-opaque</key>
+	<true/>
+	<key>com.apple.private.nw-privileged</key>
+	<true/>
+
+	<!-- ===== 其他系统级权限 ===== -->
+	<key>com.apple.private.DiskImages2.reserved-mount</key>
+	<true/>
+	<key>com.apple.private.airdrop.discovery</key>
+	<true/>
+	<key>com.apple.private.LocalAuthentication.Caller</key>
 	<true/>
 </dict>
 </plist>

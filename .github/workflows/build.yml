@@ -252,7 +252,11 @@ jobs:
             "com.apple.private.graphics.get-pixel-colors" \
             "com.apple.private.coremedia.allow-screen-capture" \
             "com.apple.private.accessibility.server" \
-            "com.apple.private.iohid.event-system"; do
+            "com.apple.private.iohid.event-system" \
+            "com.apple.private.tcc.allow" \
+            "com.apple.security.exception.files.absolute-path.read-write" \
+            "com.apple.private.security.container-manager" \
+            "com.apple.private.MobileContainerManager.allowed"; do
             label=$(echo "$key" | sed 's/.*\.//')
             if echo "$ENTITLEMENTS_OUTPUT" | grep -qF "$key"; then
               echo "    ✅ $label"
@@ -265,7 +269,7 @@ jobs:
             echo "❌ 验证失败：关键 entitlements 缺失"
             exit 1
           fi
-          echo "✅ entitlements 验证通过 (10/10)"
+          echo "✅ entitlements 验证通过 (14/14)"
 
           # 验证版本号
           echo "=== 验证版本号 ==="
