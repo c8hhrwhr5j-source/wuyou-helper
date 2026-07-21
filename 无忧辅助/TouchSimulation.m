@@ -1,6 +1,6 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（与触控精灵逐字一致）
+//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（参考 AutoGo-iOS）
 //
 
 #import "TouchSimulation.h"
@@ -9,65 +9,52 @@
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
+#import <mach/mach_time.h>
+#import <dlfcn.h>
 
-// ---- IOHIDEvent 私有声明 ----
-typedef struct __IOHIDEvent *IOHIDEventRef;
-typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+// ---- IOHIDEvent 动态加载 ----
+typedef void* IOHIDEventRef;
+typedef void* IOHIDEventSystemClientRef;
 
-// 事件类型
-#define kIOHIDEventTypeDigitizer 11
+typedef IOHIDEventRef (*IOHIDEventCreateDigitizerEventFn)(
+    CFAllocatorRef, uint64_t, int32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, double, double, double, double, double,
+    bool, bool, uint32_t);
 
-// Digitizer transducer flags
-enum {
-    kIOHIDDigitizerTransducerTouch       = (1 << 0),
-    kIOHIDDigitizerTransducerIdentity    = (1 << 2),
-    kIOHIDDigitizerTransducerRange       = (1 << 3),
-};
+typedef IOHIDEventSystemClientRef (*IOHIDEventSystemClientCreateFn)(CFAllocatorRef);
+typedef int32_t (*IOHIDEventSystemClientDispatchEventFn)(IOHIDEventSystemClientRef, IOHIDEventRef);
 
-// 触摸阶段
-enum {
-    kIOHIDDigitizerTransducerFingerPhaseBegan      = 0x01,
-    kIOHIDDigitizerTransducerFingerPhaseMoved       = 0x02,
-    kIOHIDDigitizerTransducerFingerPhaseStationary  = 0x04,
-    kIOHIDDigitizerTransducerFingerPhaseEnded       = 0x08,
-};
+static IOHIDEventCreateDigitizerEventFn _createDigitizerEvent = NULL;
+static IOHIDEventSystemClientCreateFn _createClient = NULL;
+static IOHIDEventSystemClientDispatchEventFn _dispatchEvent = NULL;
+static IOHIDEventSystemClientRef _hidClient = NULL;
+static uint32_t _fingerSeq = 1000;
 
-extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
-    CFAllocatorRef allocator,
-    uint64_t timestamp,
-    uint32_t type,
-    uint32_t index,
-    uint32_t identity,
-    uint32_t eventMask,
-    uint32_t buttonMask,
-    double x, double y, double z,
-    uint8_t tipPressure, uint8_t barrelPressure,
-    uint8_t range, uint8_t touch,
-    uint32_t options
-);
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
-    CFAllocatorRef allocator,
-    uint64_t timestamp,
-    uint32_t index,
-    uint32_t identity,
-    uint32_t eventMask,
-    double x, double y, double z,
-    uint8_t tipPressure, uint8_t twist,
-    uint8_t range, uint8_t touch,
-    uint32_t quality,
-    uint32_t density,
-    uint32_t irregularity,
-    uint32_t majorRadius,
-    uint32_t minorRadius,
-    double accuracy
-);
-extern void IOHIDEventAppendEvent(IOHIDEventRef event, IOHIDEventRef child, uint32_t unused);
-extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
-extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
+// Digitizer event mask (与 AutoGo-iOS 一致)
+#define kDigitizerEventRange    0x01
+#define kDigitizerEventTouch    0x02
+#define kDigitizerEventPosition 0x04
+#define kDigitizerEventIdentity 0x20
 
-#define kIOHIDEventFieldDigitizerIsDisplayIntegrated 0x000B0001
-#define kIOHIDEventFieldDigitizerFingerPhase         0x000B0021
+static uint64_t mach_abs_time_us(void) {
+    mach_timebase_info_data_t info;
+    mach_timebase_info(&info);
+    uint64_t abs = mach_absolute_time();
+    return abs * info.numer / info.denom;
+}
+
+static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIndex, uint32_t identity) {
+    if (!_createDigitizerEvent || !_dispatchEvent || !_hidClient) return false;
+    
+    uint32_t mask = kDigitizerEventRange | kDigitizerEventTouch | kDigitizerEventPosition | kDigitizerEventIdentity;
+    IOHIDEventRef event = _createDigitizerEvent(kCFAllocatorDefault, mach_abs_time_us(),
+        0, fingerIndex, identity, mask, 0, x, y, 0, 0, 0, true, touch, 0);
+    if (!event) return false;
+    
+    int32_t result = _dispatchEvent(_hidClient, event);
+    CFRelease(event);
+    return result == 0;
+}
 
 // MARK: - TouchSlide 实现
 
@@ -138,10 +125,9 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 // MARK: - TouchSimulation 实现
 
 @implementation TouchSimulation {
-    IOHIDEventSystemClientRef _client;
     CGFloat _lastX;
     CGFloat _lastY;
-    CGFloat _screenScale;
+    uint32_t _lastIdentity;
 }
 
 + (instancetype)sharedInstance {
@@ -155,21 +141,41 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 
 - (instancetype)init {
     if (self = [super init]) {
-        _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+        [self _initHID];
         _lastX = 0;
         _lastY = 0;
-        _screenScale = [UIScreen mainScreen].scale;
-        if (!_client) {
-            [self _log:@"[TouchSimulation] ❌ IOHIDEventSystemClientCreate 返回 NULL！触控注入将完全失效"];
-        } else {
-            [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ IOHIDEventSystemClient 创建成功: %p scale=%.1f", _client, _screenScale]];
-        }
+        _lastIdentity = 0;
     }
     return self;
 }
 
+- (void)_initHID {
+    void* handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+    if (!handle) {
+        handle = dlopen("/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit", RTLD_LAZY);
+    }
+    if (!handle) {
+        [self _log:@"[TouchSimulation] ❌ 无法加载 IOKit.framework"];
+        return;
+    }
+    
+    _createDigitizerEvent = dlsym(handle, "IOHIDEventCreateDigitizerEvent");
+    _createClient = dlsym(handle, "IOHIDEventSystemClientCreate");
+    _dispatchEvent = dlsym(handle, "IOHIDEventSystemClientDispatchEvent");
+    
+    if (_createClient) {
+        _hidClient = _createClient(kCFAllocatorDefault);
+    }
+    
+    if (_createDigitizerEvent && _hidClient && _dispatchEvent) {
+        [self _log:@"[TouchSimulation] ✅ IOHIDEvent 初始化成功"];
+    } else {
+        [self _log:@"[TouchSimulation] ❌ IOHIDEvent 初始化失败"];
+    }
+}
+
 - (void)dealloc {
-    if (_client) CFRelease(_client);
+    if (_hidClient) CFRelease(_hidClient);
 }
 
 - (void)_log:(NSString *)msg {
@@ -180,83 +186,55 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 }
 
 - (void)logDiagnostic {
-    if (_client) {
-        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ HID Client: %p 有效", _client]];
+    if (_hidClient && _createDigitizerEvent && _dispatchEvent) {
+        [self _log:@"[TouchSimulation] ✅ HID Client 有效"];
     } else {
-        [self _log:@"[TouchSimulation] ❌ HID Client 为 NULL——触摸注入完全无效！请检查 HID 相关 entitlements"];
+        [self _log:@"[TouchSimulation] ❌ HID 初始化不完整——触摸注入完全无效！"];
     }
 }
 
 // MARK: - 内部核心方法
 
-- (uint64_t)_now {
-    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
-}
-
-- (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y
-                phase:(uint8_t)phase
-             fingerID:(uint32_t)fingerID {
-
-    if (!_client) {
-        [self _log:@"[TouchSimulation] ❌ _client 为 NULL，无法发送触摸事件"];
-        return;
-    }
-
+- (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y isTouching:(bool)isTouching fingerID:(uint32_t)fingerID {
     _lastX = x;
     _lastY = y;
-    uint64_t ts = [self _now];
+    
+    const char *phaseName = isTouching ? "DOWN" : "UP";
+    
+    uint32_t identity = isTouching ? (_fingerSeq++) : 0;
+    _lastIdentity = isTouching ? identity : _lastIdentity;
+    
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f identity=%u",
+              phaseName, fingerID, x, y, identity]];
+    
+    bool success = dispatch_digitizer((double)x, (double)y, isTouching, 0, identity);
+    
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] %s %s", phaseName, success ? @"✅ 已派发" : @"❌ 派发失败"]];
+}
 
-    uint8_t touchVal = (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? 0 : 1;
-
-    const char *phaseName = (phase == kIOHIDDigitizerTransducerFingerPhaseBegan) ? "DOWN" :
-                            (phase == kIOHIDDigitizerTransducerFingerPhaseMoved) ? "MOVE" :
-                            (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? "UP" : "???";
-
-    IOHIDEventRef touchEvent = IOHIDEventCreateDigitizerFingerEventWithQuality(
-        kCFAllocatorDefault,
-        ts,
-        0,                          // index
-        2,                          // identity
-        kIOHIDDigitizerTransducerTouch | kIOHIDDigitizerTransducerIdentity | kIOHIDDigitizerTransducerRange,
-        x, y, 0,                    // x, y, z — 使用原始像素坐标（与触控精灵一致）
-        30,                         // tipPressure
-        0,                          // twist
-        80,                         // range
-        touchVal,                   // touch
-        1,                          // quality
-        500,                        // density
-        0,                          // irregularity
-        5,                          // majorRadius
-        5,                          // minorRadius
-        1.0                         // accuracy
-    );
-
-    if (!touchEvent) {
-        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ❌ 创建手指事件失败！phase=%d x=%.0f y=%.0f", phase, x, y]];
-        return;
-    }
-
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu",
-              phaseName, fingerID, x, y, ts]];
-
-    IOHIDEventSystemClientDispatchEvent(_client, touchEvent);
-    CFRelease(touchEvent);
-
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ %s 已派发", phaseName]];
+- (void)_sendMoveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
+    _lastX = x;
+    _lastY = y;
+    
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 MOVE finger=%d x=%.0f y=%.0f", fingerID, x, y]];
+    
+    bool success = dispatch_digitizer((double)x, (double)y, true, 0, _lastIdentity);
+    
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] MOVE %s", success ? @"✅ 已派发" : @"❌ 派发失败"]];
 }
 
 // MARK: - 底层原子操作
 
 - (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    [self _sendTouchAtX:x y:y phase:kIOHIDDigitizerTransducerFingerPhaseBegan fingerID:fingerID];
+    [self _sendTouchAtX:x y:y isTouching:true fingerID:fingerID];
 }
 
 - (void)moveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    [self _sendTouchAtX:x y:y phase:kIOHIDDigitizerTransducerFingerPhaseMoved fingerID:fingerID];
+    [self _sendMoveAtX:x y:y fingerID:fingerID];
 }
 
 - (void)upFinger:(uint32_t)fingerID {
-    [self _sendTouchAtX:_lastX y:_lastY phase:kIOHIDDigitizerTransducerFingerPhaseEnded fingerID:fingerID];
+    [self _sendTouchAtX:_lastX y:_lastY isTouching:false fingerID:fingerID];
 }
 
 // MARK: - 高级封装
@@ -292,8 +270,6 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 - (void)swipeFromX:(CGFloat)x1 y:(CGFloat)y1
                toX:(CGFloat)x2 y:(CGFloat)y2
           duration:(NSInteger)ms {
-
-    if (!_client) return;
 
     TouchSlide *slide = [self slideWithFingerID:0];
     [slide step:5];
