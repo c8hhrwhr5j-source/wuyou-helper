@@ -204,7 +204,11 @@ static void _loadIOMobileFramebuffer(void) {
 
     // 运行时自检关键 entitlements
     [desc appendString:@"\n── 自身 entitlements 检查 ──\n"];
-    [desc appendString:[self _checkEntitlements]];
+    @try {
+        [desc appendString:[self _checkEntitlements]];
+    } @catch (NSException *e) {
+        [desc appendFormat:@"  (entitlements 检查失败: %@)\n", e.reason];
+    }
 
     return desc;
 }
@@ -213,50 +217,54 @@ static void _loadIOMobileFramebuffer(void) {
 #if TARGET_OS_SIMULATOR
     return @"(模拟器 — 不检查 entitlements)\n";
 #else
-    // 用 dlsym 动态加载 Security 私有 API
-    typedef void *(*SecTaskCreateFromSelfFunc)(void);
-    typedef CFTypeRef (*SecTaskCopyValueForEntitlementFunc)(void *, CFStringRef, CFErrorRef *);
+    @try {
+        // 用 dlsym 动态加载 Security 私有 API
+        typedef void *(*SecTaskCreateFromSelfFunc)(CFAllocatorRef);
+        typedef CFTypeRef (*SecTaskCopyValueForEntitlementFunc)(void *, CFStringRef, CFErrorRef *);
 
-    SecTaskCreateFromSelfFunc createTask = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
-    SecTaskCopyValueForEntitlementFunc copyValue = dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+        SecTaskCreateFromSelfFunc createTask = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+        SecTaskCopyValueForEntitlementFunc copyValue = dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
 
-    if (!createTask || !copyValue) {
-        return @"(SecTask API 不可用)\n";
-    }
-
-    void *task = createTask();
-    if (!task) return @"(无法创建 SecTask)\n";
-
-    NSMutableString *s = [NSMutableString string];
-    NSArray *keys = @[
-        @"com.apple.private.security.no-sandbox",
-        @"com.apple.private.security.no-container",
-        @"com.apple.private.iomobileframebuffer.access",
-        @"com.apple.private.IOMobileFramebuffer.client",
-        @"platform-application",
-    ];
-    NSArray *labels = @[
-        @"no-sandbox",
-        @"no-container",
-        @"iofb.access",
-        @"iofb.client",
-        @"platform-app",
-    ];
-
-    for (NSUInteger i = 0; i < keys.count; i++) {
-        CFTypeRef val = copyValue(task, (__bridge CFStringRef)keys[i], NULL);
-        if (val) {
-            if (CFGetTypeID(val) == CFBooleanGetTypeID() && CFBooleanGetValue(val)) {
-                [s appendFormat:@"  ✅ %@\n", labels[i]];
-            } else {
-                [s appendFormat:@"  ⚠️ %@ = %@\n", labels[i], val];
-            }
-            CFRelease(val);
-        } else {
-            [s appendFormat:@"  ❌ %@ 缺失\n", labels[i]];
+        if (!createTask || !copyValue) {
+            return @"(SecTask API 不可用)\n";
         }
+
+        void *task = createTask(kCFAllocatorDefault);
+        if (!task) return @"(无法创建 SecTask — 可能未脱离沙盒)\n";
+
+        NSMutableString *s = [NSMutableString string];
+        NSArray *keys = @[
+            @"com.apple.private.security.no-sandbox",
+            @"com.apple.private.security.no-container",
+            @"com.apple.private.iomobileframebuffer.access",
+            @"com.apple.private.IOMobileFramebuffer.client",
+            @"platform-application",
+        ];
+        NSArray *labels = @[
+            @"no-sandbox",
+            @"no-container",
+            @"iofb.access",
+            @"iofb.client",
+            @"platform-app",
+        ];
+
+        for (NSUInteger i = 0; i < keys.count; i++) {
+            CFTypeRef val = copyValue(task, (__bridge CFStringRef)keys[i], NULL);
+            if (val) {
+                if (CFGetTypeID(val) == CFBooleanGetTypeID() && CFBooleanGetValue(val)) {
+                    [s appendFormat:@"  ✅ %@\n", labels[i]];
+                } else {
+                    [s appendFormat:@"  ⚠️ %@ = %@\n", labels[i], val];
+                }
+                CFRelease(val);
+            } else {
+                [s appendFormat:@"  ❌ %@ 缺失\n", labels[i]];
+            }
+        }
+        return s;
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"(entitlements 检查异常: %@)\n", e.reason];
     }
-    return s;
 #endif
 }
 
