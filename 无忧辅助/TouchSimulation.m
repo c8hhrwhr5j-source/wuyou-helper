@@ -1,6 +1,6 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（多指支持）
+//  无忧辅助 - 通过 IOHIDEvent 进行触控模拟（与触控精灵一致）
 //
 
 #import "TouchSimulation.h"
@@ -11,33 +11,53 @@
 #import <math.h>
 #import <unistd.h>
 
-// IOHIDEvent 私有 API
+// ---- IOHIDEvent 私有声明 ----
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 
-extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef allocator,
-    uint64_t timeStamp, uint32_t type, uint32_t index, uint32_t identity,
-    uint32_t eventMask, uint32_t buttonMask, uint32_t range, uint32_t touch,
-    uint32_t pressure, ...);
-extern int IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client,
-                                                IOHIDEventRef event);
+// 事件类型
+#define kIOHIDEventTypeDigitizer 11
+
+// Digitizer 事件子类型
+enum {
+    kIOHIDDigitizerEventRange       = 0x00,
+    kIOHIDDigitizerEventTouch       = 0x01,
+    kIOHIDDigitizerEventAttribute   = 0x02,
+};
+
+// Digitizer 事件掩码位
+enum {
+    kIOHIDDigitizerTransducerTouch       = (1 << 0),
+    kIOHIDDigitizerTransducerIdentity    = (1 << 2),
+    kIOHIDDigitizerTransducerRange       = (1 << 3),
+};
 
 // 触摸阶段
-#define kDigitizerPhaseBegan     0
-#define kDigitizerPhaseMoved     1
-#define kDigitizerPhaseEnded     2
+enum {
+    kIOHIDDigitizerTransducerFingerPhaseBegan      = 0x01,
+    kIOHIDDigitizerTransducerFingerPhaseMoved       = 0x02,
+    kIOHIDDigitizerTransducerFingerPhaseStationary  = 0x04,
+    kIOHIDDigitizerTransducerFingerPhaseEnded       = 0x08,
+};
 
-// 触摸类型
-#define kDigitizerTypeHand       2
-
-// 事件掩码
-#define kDigitizerEventMaskTouch       0x0001
-#define kDigitizerEventMaskAttribute   0x0002
-
-// 字段键
-#define kIOHIDEventFieldDigitizerX     0x00040001
-#define kIOHIDEventFieldDigitizerY     0x00040002
+extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
+extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
+    CFAllocatorRef allocator,
+    uint64_t timestamp,
+    uint32_t index,
+    uint32_t identity,
+    uint32_t eventMask,
+    double x, double y, double z,
+    uint8_t tipPressure, uint8_t twist,
+    uint8_t range, uint8_t touch,
+    uint32_t quality,
+    uint32_t density,
+    uint32_t irregularity,
+    uint32_t majorRadius,
+    uint32_t minorRadius,
+    double accuracy
+);
+extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
 
 // MARK: - TouchSlide 实现
 
@@ -55,6 +75,8 @@ extern int IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client,
         _fingerID = fingerID;
         _step = 10;
         _delayMs = 5;
+        _curX = 0;
+        _curY = 0;
     }
     return self;
 }
@@ -136,39 +158,41 @@ extern int IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client,
 
 // MARK: - 内部核心方法
 
-/// 发送单个 IOHIDEvent
-- (void)_sendEventAtX:(CGFloat)x y:(CGFloat)y
-                 phase:(uint32_t)phase
-             fingerID:(uint32_t)fingerID
-         touchContact:(uint32_t)touchContact {
-
-    if (!_client) return;
-
+- (uint64_t)_nextTimestamp {
     if (_baseTimestamp == 0) {
-        _baseTimestamp = mach_absolute_time();
+        _baseTimestamp = (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
     } else {
         _baseTimestamp += 1000000;  // +1ms
     }
+    return _baseTimestamp;
+}
 
-    uint32_t eventMask = kDigitizerEventMaskTouch;
-    if (phase == kDigitizerPhaseBegan) {
-        eventMask |= kDigitizerEventMaskAttribute;
-    }
+/// 发送单个触摸事件（与触控精灵完全一致）
+- (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y
+                phase:(uint8_t)phase
+           fingerID:(uint32_t)fingerID {
 
-    IOHIDEventRef event = IOHIDEventCreateDigitizerEvent(
+    if (!_client) return;
+
+    uint64_t ts = [self _nextTimestamp];
+
+    IOHIDEventRef event = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault,
-        _baseTimestamp,
-        kDigitizerTypeHand,
-        (uint32_t)fingerID,   // index — 每个手指用不同 index
-        fingerID + 2,         // identity — 用 fingerID+2 区分不同手指
-        eventMask,
-        0,                    // buttonMask
-        0,                    // range
-        touchContact,         // touch (1=接触, 0=离开)
-        0,                    // pressure
-        kIOHIDEventFieldDigitizerX, (int)(x * 1000),
-        kIOHIDEventFieldDigitizerY, (int)(y * 1000),
-        0                     // sentinel
+        ts,
+        fingerID,   // index
+        fingerID + 2, // identity
+        kIOHIDDigitizerTransducerTouch | kIOHIDDigitizerTransducerIdentity | kIOHIDDigitizerTransducerRange,
+        x, y, 0,    // x, y, z（直接传屏幕像素坐标）
+        30,         // tipPressure
+        0,          // twist
+        80,         // range
+        phase == kIOHIDDigitizerTransducerFingerPhaseEnded ? 0 : 1,  // touch
+        1,          // quality
+        500,        // density
+        0,          // irregularity
+        5,          // majorRadius
+        5,          // minorRadius
+        1.0         // accuracy
     );
 
     if (event) {
@@ -180,15 +204,16 @@ extern int IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client,
 // MARK: - 底层原子操作
 
 - (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    [self _sendEventAtX:x y:y phase:kDigitizerPhaseBegan fingerID:fingerID touchContact:1];
+    [self _sendTouchAtX:x y:y phase:kIOHIDDigitizerTransducerFingerPhaseBegan fingerID:fingerID];
 }
 
 - (void)moveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    [self _sendEventAtX:x y:y phase:kDigitizerPhaseMoved fingerID:fingerID touchContact:1];
+    [self _sendTouchAtX:x y:y phase:kIOHIDDigitizerTransducerFingerPhaseMoved fingerID:fingerID];
 }
 
 - (void)upFinger:(uint32_t)fingerID {
-    [self _sendEventAtX:0 y:0 phase:kDigitizerPhaseEnded fingerID:fingerID touchContact:0];
+    // up 时坐标用 0,0 即可，phase ended 表示手指已离开
+    [self _sendTouchAtX:0 y:0 phase:kIOHIDDigitizerTransducerFingerPhaseEnded fingerID:fingerID];
 }
 
 // MARK: - 高级封装
