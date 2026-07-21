@@ -14,23 +14,12 @@
 static CGSize _screenSize = {0, 0};
 static uint32_t _fingerSeq = 1000;
 
-typedef struct {
-    uint8_t reportId;
-    uint8_t fingers;
-    uint8_t fingerId;
-    uint16_t x;
-    uint16_t y;
-    uint8_t pressure;
-    uint8_t eventType;
-} TouchReport;
-
 typedef void* IOHIDUserDeviceRef;
 
 typedef IOHIDUserDeviceRef (*IOHIDUserDeviceCreateFn)(CFAllocatorRef allocator, CFDictionaryRef properties);
 typedef void (*IOHIDUserDeviceScheduleWithRunLoopFn)(IOHIDUserDeviceRef device, CFRunLoopRef runLoop, CFStringRef runLoopMode);
 typedef void (*IOHIDUserDeviceUnscheduleFromRunLoopFn)(IOHIDUserDeviceRef device, CFRunLoopRef runLoop, CFStringRef runLoopMode);
 typedef void (*IOHIDUserDeviceCloseFn)(IOHIDUserDeviceRef device);
-typedef CFTypeRef (*IOHIDUserDeviceCopyPropertyFn)(IOHIDUserDeviceRef device, CFStringRef key);
 typedef bool (*IOHIDUserDeviceSetReportFn)(IOHIDUserDeviceRef device, uint32_t type, uint32_t reportID, const uint8_t *report, CFIndex reportLength);
 
 static IOHIDUserDeviceCreateFn _IOHIDUserDeviceCreate = NULL;
@@ -150,17 +139,44 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
         [self _log:@"[TouchSimulation] ❌ 无法加载 IOKit 框架"];
         return NO;
     }
+    [self _log:@"[TouchSimulation] ✅ 成功加载 IOKit 框架"];
 
     _IOHIDUserDeviceCreate = dlsym(handle, "IOHIDUserDeviceCreate");
-    _IOHIDUserDeviceScheduleWithRunLoop = dlsym(handle, "IOHIDUserDeviceScheduleWithRunLoop");
-    _IOHIDUserDeviceUnscheduleFromRunLoop = dlsym(handle, "IOHIDUserDeviceUnscheduleFromRunLoop");
-    _IOHIDUserDeviceClose = dlsym(handle, "IOHIDUserDeviceClose");
-    _IOHIDUserDeviceSetReport = dlsym(handle, "IOHIDUserDeviceSetReport");
-
-    if (!_IOHIDUserDeviceCreate || !_IOHIDUserDeviceScheduleWithRunLoop || !_IOHIDUserDeviceClose || !_IOHIDUserDeviceSetReport) {
-        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDevice 函数"];
+    if (!_IOHIDUserDeviceCreate) {
+        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDeviceCreate"];
+        dlclose(handle);
         return NO;
     }
+
+    _IOHIDUserDeviceScheduleWithRunLoop = dlsym(handle, "IOHIDUserDeviceScheduleWithRunLoop");
+    if (!_IOHIDUserDeviceScheduleWithRunLoop) {
+        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDeviceScheduleWithRunLoop"];
+        dlclose(handle);
+        return NO;
+    }
+
+    _IOHIDUserDeviceUnscheduleFromRunLoop = dlsym(handle, "IOHIDUserDeviceUnscheduleFromRunLoop");
+    if (!_IOHIDUserDeviceUnscheduleFromRunLoop) {
+        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDeviceUnscheduleFromRunLoop"];
+        dlclose(handle);
+        return NO;
+    }
+
+    _IOHIDUserDeviceClose = dlsym(handle, "IOHIDUserDeviceClose");
+    if (!_IOHIDUserDeviceClose) {
+        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDeviceClose"];
+        dlclose(handle);
+        return NO;
+    }
+
+    _IOHIDUserDeviceSetReport = dlsym(handle, "IOHIDUserDeviceSetReport");
+    if (!_IOHIDUserDeviceSetReport) {
+        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDeviceSetReport"];
+        dlclose(handle);
+        return NO;
+    }
+
+    [self _log:@"[TouchSimulation] ✅ 成功获取所有 IOHIDUserDevice 函数"];
 
     uint8_t reportDescriptor[] = {
         0x05, 0x0D, // Usage Page (Digitizer)
@@ -209,12 +225,12 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
     CFDataRef reportDesc = CFDataCreate(NULL, reportDescriptor, sizeof(reportDescriptor));
 
     NSDictionary *properties = @{
-        @"DeviceReportDescriptor": (__bridge id)reportDesc,
-        @"PhysicalDeviceUniqueID": @"WuyouTouchDevice001",
-        @"Manufacturer": @"Wuyou",
-        @"Product": @"Touch Helper",
-        @"ProductID": @(0x0001),
-        @"VendorID": @(0x1234),
+        @"IOHIDReportDescriptor": (__bridge id)reportDesc,
+        @"IOHIDPhysicalDeviceUniqueID": @"WuyouTouchDevice001",
+        @"IOHIDManufacturer": @"Wuyou",
+        @"IOHIDProduct": @"Touch Helper",
+        @"IOHIDProductID": @(0x0001),
+        @"IOHIDVendorID": @(0x1234),
     };
 
     _hidDevice = _IOHIDUserDeviceCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)properties);
