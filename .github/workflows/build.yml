@@ -76,7 +76,8 @@ jobs:
           ls -la 无忧辅助/Assets.xcassets/ 2>/dev/null || echo "(Assets.xcassets 不存在)"
           ls -la 无忧辅助/LaunchScreen.storyboard 2>/dev/null || echo "(LaunchScreen.storyboard 不存在)"
 
-          # 编译并捕获完整日志
+          # 编译（禁用 pipefail 以便捕获错误后继续诊断）
+          set +o pipefail
           xcodebuild build \
             -project "无忧辅助.xcodeproj" \
             -scheme "无忧辅助" \
@@ -95,41 +96,37 @@ jobs:
             STRIP_SWIFT_SYMBOLS=YES \
             COPY_PHASE_STRIP=NO \
             2>&1 | tee build.log
+          BUILD_EXIT=$?
+          set -o pipefail
 
           # 如果失败，输出错误摘要
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+          if [ $BUILD_EXIT -ne 0 ]; then
             echo ""
             echo "====== FULL ERRORS (build.log) ======"
             grep -i -E "(error:|warning:|note:|undefined|redefinition|duplicate|conflicting|undeclared|^ld:)" build.log | head -50
-            echo "====== LAST 30 LINES OF BUILD LOG ======"
-            tail -30 build.log
+            echo "====== LAST 50 LINES OF BUILD LOG ======"
+            tail -50 build.log
             echo "========================================"
 
             # 诊断性编译：单独编译故障文件以获取完整错误
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-            FAILED_FILE=""
-            LUA_INCLUDE=""
-            if grep -q "TouchSimulation.o.*failed" build.log 2>/dev/null; then
-              FAILED_FILE="无忧辅助/TouchSimulation.m"
-            elif grep -q "ScriptEngine.o.*failed" build.log 2>/dev/null; then
-              FAILED_FILE="无忧辅助/ScriptEngine.m"
-              LUA_INCLUDE="-I./lua-build/include"
-            elif grep -q "ScreenCapture.o.*failed" build.log 2>/dev/null; then
-              FAILED_FILE="无忧辅助/ScreenCapture.m"
-            elif grep -q "LuaBridge.o.*failed" build.log 2>/dev/null; then
-              FAILED_FILE="无忧辅助/LuaBridge.m"
-              LUA_INCLUDE="-I./lua-build/include"
-            fi
-            if [ -n "$FAILED_FILE" ]; then
-              echo ""
-              echo "====== DIAGNOSTIC: compiling $FAILED_FILE alone ======"
-              clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                -fobjc-arc -fmodules ${LUA_INCLUDE} \
-                -framework Foundation -framework UIKit -framework CoreGraphics \
-                -framework CoreFoundation -framework IOKit -framework IOSurface \
-                -c "$FAILED_FILE" -o /dev/null 2>&1 || true
-              echo "==========================================================="
-            fi
+            for PATTERN in "TouchSimulation" "ScriptEngine" "ScreenCapture" "LuaBridge"; do
+              if grep -q "${PATTERN}.o.*failed" build.log 2>/dev/null; then
+                FAILED_FILE="无忧辅助/${PATTERN}.m"
+                LUA_INC=""
+                case "$PATTERN" in
+                  ScriptEngine|LuaBridge) LUA_INC="-I./lua-build/include" ;;
+                esac
+                echo ""
+                echo "====== DIAGNOSTIC: $FAILED_FILE ======"
+                clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
+                  -fobjc-arc -fmodules ${LUA_INC} \
+                  -framework Foundation -framework UIKit -framework CoreGraphics \
+                  -framework CoreFoundation -framework IOKit -framework IOSurface \
+                  -c "$FAILED_FILE" -o /dev/null 2>&1 || true
+                echo "======================================"
+              fi
+            done
 
             exit 1
           fi
