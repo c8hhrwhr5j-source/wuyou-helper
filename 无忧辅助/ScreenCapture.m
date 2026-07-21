@@ -28,15 +28,32 @@ static int (*IOMobileFramebufferUnlockSurface)(IOMobileFramebufferConnection con
                                                 IOSurfaceRef surface, int lockToken);
 static int (*IOMobileFramebufferRelease)(IOMobileFramebufferConnection connection);
 
+// 诊断信息（供外部读取）
+static NSString *_globalDiagInfo = nil;
+
 static void _loadIOMobileFramebuffer(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        void *h = RTLD_DEFAULT;
+        // 先尝试加载私有框架（TrollStore/越狱环境下才能成功）
+        void *fw = dlopen(
+            "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",
+            RTLD_NOW
+        );
+
+        void *h = fw ?: RTLD_DEFAULT;
         IOMobileFramebufferGetMainDisplay  = dlsym(h, "IOMobileFramebufferGetMainDisplay");
         IOMobileFramebufferCreateSurface   = dlsym(h, "IOMobileFramebufferCreateSurface");
         IOMobileFramebufferLockSurface     = dlsym(h, "IOMobileFramebufferLockSurface");
         IOMobileFramebufferUnlockSurface   = dlsym(h, "IOMobileFramebufferUnlockSurface");
         IOMobileFramebufferRelease         = dlsym(h, "IOMobileFramebufferRelease");
+
+        if (!fw) {
+            _globalDiagInfo = @"dlopen IOMobileFramebuffer 失败 → 应用未脱离沙盒";
+            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
+        } else if (!IOMobileFramebufferGetMainDisplay) {
+            _globalDiagInfo = @"dlopen 成功但符号解析失败 → iOS 版本可能已移除该私有 API";
+            NSLog(@"[ScreenCapture] %@", _globalDiagInfo);
+        }
     });
 }
 
@@ -94,7 +111,7 @@ static void _loadIOMobileFramebuffer(void) {
         !IOMobileFramebufferCreateSurface ||
         !IOMobileFramebufferLockSurface ||
         !IOMobileFramebufferUnlockSurface) {
-        _diagMessage = @"❌ IOMobileFramebuffer 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
+        _diagMessage = _globalDiagInfo ?: @"❌ IOMobileFramebuffer 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
         NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
@@ -164,7 +181,7 @@ static void _loadIOMobileFramebuffer(void) {
 - (NSString *)diagnosticDescription {
     // 补充安装方式检测
     NSMutableString *desc = [NSMutableString string];
-    [desc appendFormat:@"屏幕捕获: %@\n", _diagMessage ?: @"(未初始化)"];
+    [desc appendFormat:@"屏幕捕获: %@\n", _diagMessage ?: _globalDiagInfo ?: @"(未初始化)"];
 
     NSString *installPath = [[NSBundle mainBundle] bundlePath];
     if ([installPath containsString:@"/private/var/containers/Bundle/Application"]) {
