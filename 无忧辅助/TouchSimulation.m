@@ -22,12 +22,17 @@ static uint32_t _fingerSeq = 1000;
 #define kCGEventSourceStateHIDSystemState 1
 #define kCGMouseButtonLeft       0
 
+// 关键：设置鼠标事件子类型为 Touch（必须设置，否则 iOS 会忽略）
+#define kCGMouseEventSubType     2  // field code for subType
+#define kCGMouseEventSubTypeTouch 1  // touch subType
+
 typedef void* CGEventRef;
 typedef void* CGEventSourceRef;
 typedef uint32_t CGEventType;
 typedef uint32_t CGMouseButton;
 typedef uint32_t CGEventTapLocation;
 typedef uint32_t CGEventSourceStateID;
+typedef uint64_t CGEventField;
 
 typedef struct {
     double x;
@@ -37,12 +42,12 @@ typedef struct {
 typedef CGEventRef (*CGEventCreateMouseEventFn)(CGEventSourceRef source, CGEventType type, CGPointStruct point, CGMouseButton button);
 typedef void (*CGEventPostFn)(CGEventTapLocation tap, CGEventRef event);
 typedef CGEventSourceRef (*CGEventSourceCreateFn)(CGEventSourceStateID stateID);
-typedef void (*CGEventReleaseFn)(CGEventRef event);
+typedef void (*CGEventSetIntegerValueFieldFn)(CGEventRef event, CGEventField field, int64_t value);
 
 static CGEventCreateMouseEventFn _CGEventCreateMouseEvent = NULL;
 static CGEventPostFn _CGEventPost = NULL;
 static CGEventSourceCreateFn _CGEventSourceCreate = NULL;
-// CGEventRelease 实际就是 CFRelease，不需要单独获取
+static CGEventSetIntegerValueFieldFn _CGEventSetIntegerValueField = NULL;
 
 static CGEventSourceRef _eventSource = NULL;
 
@@ -158,15 +163,21 @@ static CGEventSourceRef _eventSource = NULL;
     _CGEventCreateMouseEvent = dlsym(handle, "CGEventCreateMouseEvent");
     _CGEventPost = dlsym(handle, "CGEventPost");
     _CGEventSourceCreate = dlsym(handle, "CGEventSourceCreate");
+    _CGEventSetIntegerValueField = dlsym(handle, "CGEventSetIntegerValueField");
 
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 函数指针: CreateMouseEvent=%p Post=%p SourceCreate=%p",
-        _CGEventCreateMouseEvent, _CGEventPost, _CGEventSourceCreate]];
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 函数指针: CreateMouseEvent=%p Post=%p SourceCreate=%p SetInteger=%p",
+        _CGEventCreateMouseEvent, _CGEventPost, _CGEventSourceCreate, _CGEventSetIntegerValueField]];
 
     if (!_CGEventCreateMouseEvent || !_CGEventPost) {
-        [self _log:@"[TouchSimulation] ❌ CGEvent 函数获取失败"];
+        [self _log:@"[TouchSimulation] ❌ CGEvent 核心函数获取失败"];
         return NO;
     }
-    [self _log:@"[TouchSimulation] ✅ CGEvent 函数获取成功"];
+    [self _log:@"[TouchSimulation] ✅ CGEvent 核心函数获取成功"];
+    if (_CGEventSetIntegerValueField) {
+        [self _log:@"[TouchSimulation] ✅ CGEventSetIntegerValueField 获取成功"];
+    } else {
+        [self _log:@"[TouchSimulation] ⚠️ CGEventSetIntegerValueField 获取失败（可能影响点击效果）"];
+    }
 
     // 创建事件源（如果可用）
     if (_CGEventSourceCreate) {
@@ -211,9 +222,12 @@ static CGEventSourceRef _eventSource = NULL;
         return;
     }
 
-    _CGEventPost(kCGHIDEventTap, event);
+    // 设置鼠标事件子类型为 Touch
+    if (_CGEventSetIntegerValueField) {
+        _CGEventSetIntegerValueField(event, kCGMouseEventSubType, kCGMouseEventSubTypeTouch);
+    }
 
-    // CGEventRelease 就是 CFRelease
+    _CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
 }
 
@@ -232,6 +246,11 @@ static CGEventSourceRef _eventSource = NULL;
     if (!event) {
         [self _log:@"[TouchSimulation] ❌ CGEvent 创建失败"];
         return;
+    }
+
+    // 关键：设置鼠标事件子类型为 Touch，否则 iOS 会将其视为纯鼠标点击并忽略
+    if (_CGEventSetIntegerValueField) {
+        _CGEventSetIntegerValueField(event, kCGMouseEventSubType, kCGMouseEventSubTypeTouch);
     }
 
     _CGEventPost(kCGHIDEventTap, event);
@@ -253,6 +272,11 @@ static CGEventSourceRef _eventSource = NULL;
 
     CGEventRef event = _CGEventCreateMouseEvent(_eventSource, kCGEventMouseMoved, point, kCGMouseButtonLeft);
     if (!event) return;
+
+    // 设置鼠标事件子类型为 Touch
+    if (_CGEventSetIntegerValueField) {
+        _CGEventSetIntegerValueField(event, kCGMouseEventSubType, kCGMouseEventSubTypeTouch);
+    }
 
     _CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
