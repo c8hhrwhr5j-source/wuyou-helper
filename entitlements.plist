@@ -165,6 +165,7 @@
 	<key>com.apple.private.tcc.allow</key>
 	<array>
 		<string>kTCCServiceAccessibility</string>
+		<string>kTCCServiceListenEvent</string>
 		<string>kTCCServiceMicrophone</string>
 		<string>kTCCServiceCamera</string>
 		<string>kTCCServicePhotoLibrary</string>
@@ -185,7 +186,15 @@
 		<string>kTCCServicePasteboard</string>
 		<string>kTCCServiceKeyboardNetwork</string>
 		<string>kTCCServiceCalls</string>
+		<string>kTCCServiceCallsAlways</string>
 		<string>kTCCServiceExposureNotification</string>
+		<string>kTCCServiceFacebook</string>
+		<string>kTCCServiceTwitter</string>
+		<string>kTCCServiceSinaWeibo</string>
+		<string>kTCCServiceTencentWeibo</string>
+		<string>kTCCServiceShareKit</string>
+		<string>kTCCServiceUbiquity</string>
+		<string>kTCCServiceLiverpool</string>
 		<string>kTCCServiceAll</string>
 	</array>
 	<key>com.apple.private.tcc.manager</key>
