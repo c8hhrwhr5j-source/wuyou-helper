@@ -2,77 +2,47 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- 关闭沙盒：必须且最优先 -->
-    <key>com.apple.private.security.no-sandbox</key>
-    <true/>
-    <key>com.apple.private.security.no-container</key>
-    <true/>
-
-    <!-- root 身份/切换用户 -->
-    <key>com.apple.private.persona-mgmt</key>
-    <true/>
-
-    <!-- TrollStore / 自签运行基础 -->
-    <key>platform-application</key>
-    <true/>
-    <key>get-task-allow</key>
-    <true/>
-    <key>dynamic-codesigning</key>
-    <true/>
-
-    <!-- 进程/调试 -->
-    <key>com.apple.private.task_for_pid-allow</key>
-    <true/>
-    <key>com.apple.system-task-ports</key>
-    <true/>
-    <key>com.apple.private.cs.debugger</key>
-    <true/>
-    <key>com.apple.private.skip-library-validation</key>
-    <true/>
-
-    <!-- ===== IOKit 访问（kfd 内核漏洞必须） ===== -->
-    <key>com.apple.private.security.iokit-user-client-class</key>
-    <array>
-        <string>IOSurfaceRootUserClient</string>
-        <string>IOAccelSharedUserClient2</string>
-        <string>IOAccelSurface2</string>
-        <string>IOAccelContext2</string>
-        <string>AGXDeviceUserClient</string>
-        <string>AGXSharedUserClient</string>
-        <string>IOGPUDeviceUserClient</string>
-        <string>IOGPUSharedUserClient</string>
-    </array>
-    <key>com.apple.private.iokit.user-client-access</key>
-    <true/>
-    <key>com.apple.developer.kernel.increased-memory-limit</key>
-    <true/>
-    <key>com.apple.private.iokit.restricted-uc-class</key>
-    <true/>
-
-	<!-- ===== 屏幕捕获/取色/截图（Lua 脚本核心） ===== -->
-	<key>com.apple.private.iomobileframebuffer.access</key>
+	<!-- ===== 核心沙盒解除 ===== -->
+	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
-	<key>com.apple.private.IOMobileFramebuffer.client</key>
+	<key>com.apple.private.security.no-container</key>
+	<true/>
+
+	<!-- ===== TrollStore 运行基础 ===== -->
+	<key>platform-application</key>
+	<true/>
+	<key>dynamic-codesigning</key>
+	<true/>
+	<key>com.apple.private.skip-library-validation</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+
+	<!-- ===== 屏幕捕获 / 取色 / 截图 ===== -->
+	<key>com.apple.private.iomobileframebuffer.access</key>
 	<true/>
 	<key>com.apple.private.screencapture.capture-all-displays</key>
 	<true/>
-	<key>com.apple.private.coremedia.allow-screen-capture</key>
-	<true/>
-	<key>com.apple.private.graphics.get-pixel-colors</key>
-	<true/>
-	<key>com.apple.private.allow-explicit-graphics-priority</key>
-	<true/>
-
-	<!-- ===== 触控模拟（Lua 脚本核心） ===== -->
-	<key>com.apple.private.iohid.event-system</key>
-	<true/>
-
-	<!-- ===== IOSurface 直接访问（截图加速） ===== -->
 	<key>com.apple.private.coresurface.access</key>
 	<true/>
 
-	<!-- ===== 防止被系统杀掉 ===== -->
-	<key>com.apple.private.process.allow-background-execution</key>
+	<!-- ===== 触控模拟 ===== -->
+	<key>com.apple.private.iohid.event-system</key>
+	<true/>
+
+	<!-- ===== kfd 内核漏洞 ===== -->
+	<key>com.apple.private.security.iokit-user-client-class</key>
+	<array>
+		<string>IOSurfaceRootUserClient</string>
+		<string>IOAccelSharedUserClient2</string>
+		<string>IOAccelSurface2</string>
+		<string>IOAccelContext2</string>
+		<string>AGXDeviceUserClient</string>
+		<string>AGXSharedUserClient</string>
+		<string>IOGPUDeviceUserClient</string>
+		<string>IOGPUSharedUserClient</string>
+	</array>
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
 	<true/>
 </dict>
 </plist>
