@@ -68,6 +68,64 @@ static int l_sleep(lua_State *L) {
     return 0;
 }
 
+// MARK: - 兼容旧 API（click / hold / swipe / find_color）
+
+// --- click(x, y) ---
+static int l_click(lua_State *L) {
+    CGFloat x = luaL_checknumber(L, 1);
+    CGFloat y = luaL_checknumber(L, 2);
+    [[TouchSimulation sharedInstance] clickAtX:x y:y];
+    return 0;
+}
+
+// --- hold(x, y, ms?) ---
+static int l_hold(lua_State *L) {
+    CGFloat x = luaL_checknumber(L, 1);
+    CGFloat y = luaL_checknumber(L, 2);
+    NSInteger ms = luaL_optinteger(L, 3, 500);
+    [[TouchSimulation sharedInstance] holdAtX:x y:y duration:ms];
+    return 0;
+}
+
+// --- swipe(x1, y1, x2, y2, durationMs?) ---
+static int l_swipe(lua_State *L) {
+    CGFloat x1 = luaL_checknumber(L, 1);
+    CGFloat y1 = luaL_checknumber(L, 2);
+    CGFloat x2 = luaL_checknumber(L, 3);
+    CGFloat y2 = luaL_checknumber(L, 4);
+    NSInteger ms = luaL_optinteger(L, 5, 500);
+    [[TouchSimulation sharedInstance] swipeFromX:x1 y:y1 toX:x2 y:y2 duration:ms];
+    return 0;
+}
+
+// --- find_color(r, g, b, fuzzy?, ltx?, lty?, rbx?, rby?) → x, y ---
+static int l_find_color(lua_State *L) {
+    int r = (int)luaL_checkinteger(L, 1);
+    int g = (int)luaL_checkinteger(L, 2);
+    int b = (int)luaL_checkinteger(L, 3);
+    int fuzzy = (int)luaL_optinteger(L, 4, 100);
+    int ltx   = (int)luaL_optinteger(L, 5, 0);
+    int lty   = (int)luaL_optinteger(L, 6, 0);
+    int rbx   = (int)luaL_optinteger(L, 7, 0);
+    int rby   = (int)luaL_optinteger(L, 8, 0);
+
+    int tolerance = (int)((100.0 - fuzzy) / 100.0 * 128);
+    if (tolerance < 0) tolerance = 0;
+
+    ScreenColor target = {r, g, b};
+    CGPoint result = [[ScreenCapture sharedInstance] findColor:target
+                                                     tolerance:tolerance
+                                                           x1:ltx y1:lty x2:rbx y2:rby];
+    if (result.x < 0) {
+        lua_pushnil(L);
+        lua_pushnil(L);
+        return 2;
+    }
+    lua_pushinteger(L, (lua_Integer)result.x);
+    lua_pushinteger(L, (lua_Integer)result.y);
+    return 2;
+}
+
 // MARK: - 屏幕模块 screen.*
 
 // --- screen.resolution() → width, height ---
@@ -401,9 +459,12 @@ static const luaL_Reg g_touchLib[] = {
 static const luaL_Reg g_globalFunctions[] = {
     {"log",              l_log},
     {"sleep",            l_sleep},
+    {"click",            l_click},
+    {"hold",             l_hold},
+    {"swipe",            l_swipe},
+    {"find_color",       l_find_color},
     {"get_resolution",   l_screen_resolution},    // 别名
     {"get_screen_color", l_screen_getColorRGB},   // 别名
-    {"find_color",       l_screen_findColor},     // 别名
     {NULL, NULL},
 };
 
