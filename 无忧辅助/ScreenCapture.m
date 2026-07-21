@@ -187,7 +187,6 @@ static void _loadIOMobileFramebuffer(void) {
 }
 
 - (NSString *)diagnosticDescription {
-    // 补充安装方式检测
     NSMutableString *desc = [NSMutableString string];
     [desc appendFormat:@"屏幕捕获: %@\n", _diagMessage ?: _globalDiagInfo ?: @"(未初始化)"];
 
@@ -201,9 +200,64 @@ static void _loadIOMobileFramebuffer(void) {
     }
 
     [desc appendFormat:@"分辨率: %dx%d\n", _width, _height];
-    [desc appendFormat:@"取色可用: %@", _connected ? @"✅ 是" : @"❌ 否"];
+    [desc appendFormat:@"取色可用: %@\n", _connected ? @"✅ 是" : @"❌ 否"];
+
+    // 运行时自检关键 entitlements
+    [desc appendString:@"\n── 自身 entitlements 检查 ──\n"];
+    [desc appendString:[self _checkEntitlements]];
 
     return desc;
+}
+
+- (NSString *)_checkEntitlements {
+#if TARGET_OS_SIMULATOR
+    return @"(模拟器 — 不检查 entitlements)\n";
+#else
+    // 用 dlsym 动态加载 Security 私有 API
+    typedef void *(*SecTaskCreateFromSelfFunc)(void);
+    typedef CFTypeRef (*SecTaskCopyValueForEntitlementFunc)(void *, CFStringRef, CFErrorRef *);
+
+    SecTaskCreateFromSelfFunc createTask = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+    SecTaskCopyValueForEntitlementFunc copyValue = dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+
+    if (!createTask || !copyValue) {
+        return @"(SecTask API 不可用)\n";
+    }
+
+    void *task = createTask();
+    if (!task) return @"(无法创建 SecTask)\n";
+
+    NSMutableString *s = [NSMutableString string];
+    NSArray *keys = @[
+        @"com.apple.private.security.no-sandbox",
+        @"com.apple.private.security.no-container",
+        @"com.apple.private.iomobileframebuffer.access",
+        @"com.apple.private.IOMobileFramebuffer.client",
+        @"platform-application",
+    ];
+    NSArray *labels = @[
+        @"no-sandbox",
+        @"no-container",
+        @"iofb.access",
+        @"iofb.client",
+        @"platform-app",
+    ];
+
+    for (NSUInteger i = 0; i < keys.count; i++) {
+        CFTypeRef val = copyValue(task, (__bridge CFStringRef)keys[i], NULL);
+        if (val) {
+            if (CFGetTypeID(val) == CFBooleanGetTypeID() && CFBooleanGetValue(val)) {
+                [s appendFormat:@"  ✅ %@\n", labels[i]];
+            } else {
+                [s appendFormat:@"  ⚠️ %@ = %@\n", labels[i], val];
+            }
+            CFRelease(val);
+        } else {
+            [s appendFormat:@"  ❌ %@ 缺失\n", labels[i]];
+        }
+    }
+    return s;
+#endif
 }
 
 - (void)_disconnect {

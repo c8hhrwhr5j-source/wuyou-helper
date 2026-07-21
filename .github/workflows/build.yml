@@ -236,19 +236,34 @@ jobs:
             exit 1
           }
 
-          # 验证签名：必须包含 no-sandbox 和 platform-application 和 task_for_pid-allow
+          # 验证签名：必须包含全部关键私有 entitlements
           echo "=== 验证 entitlements 注入 ==="
           ENTITLEMENTS_OUTPUT=$(ldid -e "$APP_BIN" 2>/dev/null || true)
           echo "$ENTITLEMENTS_OUTPUT"
 
-          # TrollStore 检测 root 身份用的是 persona-mgmt，不是 task_for_pid-allow
-          for key in "no-sandbox" "platform-application" "com.apple.private.persona-mgmt"; do
-            if ! echo "$ENTITLEMENTS_OUTPUT" | grep -q "$key"; then
-              echo "❌ 验证失败：entitlements 中未找到 $key"
-              exit 1
+          FAIL=0
+          for key in \
+            "com.apple.private.security.no-sandbox" \
+            "com.apple.private.security.no-container" \
+            "platform-application" \
+            "com.apple.private.persona-mgmt" \
+            "com.apple.private.iomobileframebuffer.access" \
+            "com.apple.private.IOMobileFramebuffer.client" \
+            "com.apple.private.graphics.get-pixel-colors" \
+            "com.apple.private.coremedia.allow-screen-capture"; do
+            label=$(echo "$key" | sed 's/.*\.//')
+            if echo "$ENTITLEMENTS_OUTPUT" | grep -qF "$key"; then
+              echo "    ✅ $label"
+            else
+              echo "    ❌ $label 缺失!"
+              FAIL=1
             fi
           done
-          echo "✅ entitlements 验证通过"
+          if [ $FAIL -ne 0 ]; then
+            echo "❌ 验证失败：关键 entitlements 缺失"
+            exit 1
+          fi
+          echo "✅ entitlements 验证通过 (8/8)"
 
           # 验证版本号
           echo "=== 验证版本号 ==="
