@@ -49,21 +49,21 @@ struct SettingsView: View {
 
                 // ── 设备信息 ──
                 Section {
-                    InfoRow(title: "设备名称", value: deviceName)
-                    InfoRow(title: "设备型号", value: DeviceInfo.hwModel())
-                    InfoRow(title: "CPU 架构", value: "ARM64 (Apple Silicon)")
-                    InfoRow(title: "系统版本", value: "iOS \(systemVersion)")
-                    InfoRow(title: "屏幕分辨率", value: DeviceInfo.resolutionDescription())
-                    InfoRow(title: "设备标识", value: DeviceInfo.deviceUUID())
+                    SettingsInfoRow(label: "设备名称", value: deviceName)
+                    SettingsInfoRow(label: "设备型号", value: DeviceInfo.hwModel())
+                    SettingsInfoRow(label: "CPU 架构", value: "ARM64 (Apple Silicon)")
+                    SettingsInfoRow(label: "系统版本", value: "iOS \(systemVersion)")
+                    SettingsInfoRow(label: "屏幕分辨率", value: DeviceInfo.resolutionDescription())
+                    SettingsInfoRow(label: "设备标识", value: DeviceInfo.deviceUUID())
                 } header: {
                     Text("设备信息")
                 }
 
                 // ── 应用信息 ──
                 Section {
-                    InfoRow(title: "应用版本", value: "\(appVersion) (Build \(buildNumber))")
-                    InfoRow(title: "Bundle ID", value: bundleID)
-                    InfoRow(title: "运行用户", value: "uid=\(getuid()) euid=\(geteuid())")
+                    SettingsInfoRow(label: "应用版本", value: "\(appVersion) (Build \(buildNumber))")
+                    SettingsInfoRow(label: "Bundle ID", value: bundleID)
+                    SettingsInfoRow(label: "运行用户", value: "uid=\(getuid()) euid=\(geteuid())")
                 } header: {
                     Text("应用信息")
                 }
@@ -120,13 +120,13 @@ struct SettingsView: View {
 
 // MARK: - 信息行组件
 
-private struct InfoRow: View {
-    let title: String
+private struct SettingsInfoRow: View {
+    let label: String
     let value: String
 
     var body: some View {
         HStack(alignment: .top) {
-            Text(title)
+            Text(label)
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .frame(width: 80, alignment: .leading)

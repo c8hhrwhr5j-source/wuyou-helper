@@ -16,7 +16,7 @@ struct ScriptFileView: View {
     @State private var isRunning = false
     @State private var scriptPath: String = "/var/mobile/Media/script/lua"
 
-    private let engine = ScriptEngine.sharedEngine()
+    private let engine = ScriptEngine.shared()
 
     var body: some View {
         NavigationView {
@@ -100,7 +100,7 @@ struct ScriptFileView: View {
                             if isRunning {
                                 ProgressView()
                                     .scaleEffect(0.8)
-                                    .tint(.white)
+                                    .accentColor(.white)
                             } else {
                                 Image(systemName: "play.fill")
                             }
@@ -184,7 +184,7 @@ struct ScriptFileView: View {
 
     private func setupEngineCallbacks() {
         engine.logHandler = { msg in
-            if let msg = msg { Log.shared.add(msg) }
+            Log.shared.add(msg)
         }
         engine.stateChangeHandler = { newState in
             let running = newState == ScriptState.running || newState == ScriptState.paused
