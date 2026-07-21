@@ -13,8 +13,14 @@
 @implementation DeviceInfo
 
 + (NSString *)deviceUUID {
+    mach_port_t masterPort;
+    if (@available(iOS 15.0, *)) {
+        masterPort = kIOMainPortDefault;
+    } else {
+        IOMasterPort(MACH_PORT_NULL, &masterPort);
+    }
     io_service_t service = IOServiceGetMatchingService(
-        kIOMainPortDefault,
+        masterPort,
         IOServiceMatching("IOPlatformExpertDevice")
     );
     if (service == IO_OBJECT_NULL) return @"无权限";
