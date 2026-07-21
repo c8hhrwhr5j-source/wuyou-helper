@@ -8,8 +8,13 @@
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
 
-// IOSurfaceRef 前向声明（替代 #import <IOSurface/IOSurface.h>，避免 CI SDK 路径问题）
-typedef struct __IOSurface *IOSurfaceRef;
+// IOSurface 前向声明（替代 #import <IOSurface/IOSurface.h>，避免 CI SDK 路径问题）
+typedef CFTypeRef IOSurfaceRef;
+
+// IOSurface 函数前向声明
+extern size_t IOSurfaceGetWidth(IOSurfaceRef surface);
+extern size_t IOSurfaceGetHeight(IOSurfaceRef surface);
+extern void *IOSurfaceGetBaseAddress(IOSurfaceRef surface);
 
 // IOMobileFramebuffer 私有 API
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferConnection;
