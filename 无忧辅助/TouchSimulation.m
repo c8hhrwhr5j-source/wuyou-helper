@@ -1,169 +1,19 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 IOHIDUserDevice 进行触控模拟
+//  无忧辅助 - 通过 CGEvent 进行触控模拟（TrollStore 跨应用方案）
 //
 
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <ApplicationServices/ApplicationServices.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
-#import <mach/mach_time.h>
-#import <dlfcn.h>
 
-// ---- IOHIDUserDevice 动态加载 ----
-typedef void* IOHIDUserDeviceRef;
-
-typedef IOHIDUserDeviceRef (*IOHIDUserDeviceCreateFn)(
-    CFAllocatorRef allocator,
-    CFTypeRef properties);
-
-typedef void (*IOHIDUserDeviceScheduleWithRunLoopFn)(
-    IOHIDUserDeviceRef device,
-    CFRunLoopRef runLoop,
-    CFStringRef runLoopMode);
-
-typedef void (*IOHIDUserDeviceUnscheduleFromRunLoopFn)(
-    IOHIDUserDeviceRef device,
-    CFRunLoopRef runLoop,
-    CFStringRef runLoopMode);
-
-typedef BOOL (*IOHIDUserDeviceHandleReportFn)(
-    IOHIDUserDeviceRef device,
-    uint8_t *report,
-    CFIndex reportLength);
-
-typedef void (*IOHIDUserDeviceRegisterInputReportCallbackFn)(
-    IOHIDUserDeviceRef device,
-    void *callback,
-    void *context);
-
-static IOHIDUserDeviceCreateFn _createUserDevice = NULL;
-static IOHIDUserDeviceScheduleWithRunLoopFn _scheduleRunLoop = NULL;
-static IOHIDUserDeviceUnscheduleFromRunLoopFn _unscheduleRunLoop = NULL;
-static IOHIDUserDeviceHandleReportFn _handleReport = NULL;
-static IOHIDUserDeviceRegisterInputReportCallbackFn _registerCallback = NULL;
-
-static IOHIDUserDeviceRef _userDevice = NULL;
-static uint32_t _fingerSeq = 1000;
-static CGFloat _screenScale = 1.0;
 static CGSize _screenSize = {0, 0};
-
-// HID 报告描述符 - 触摸屏（兼容 iOS）
-static const uint8_t _hidReportDescriptor[] = {
-    0x05, 0x0D,                    // Usage Page (Digitizers)
-    0x09, 0x04,                    // Usage (Touch Screen)
-    0xA1, 0x01,                    // Collection (Application)
-    
-    0x85, 0x01,                    // Report ID (1)
-    
-    0x09, 0x54,                    // Usage (Contact count)
-    0x25, 0x0F,                    // Logical Maximum (15)
-    0x95, 0x01,                    // Report Count (1)
-    0x75, 0x04,                    // Report Size (4 bits)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x95, 0x01,                    // Report Count (1)
-    0x75, 0x04,                    // Report Size (4 bits)
-    0x81, 0x01,                    // Input (Const,Var,Abs)
-    
-    0x09, 0x22,                    // Usage (Finger)
-    0xA1, 0x02,                    // Collection (Logical)
-    
-    0x09, 0x42,                    // Usage (Tip Switch)
-    0x15, 0x00,                    // Logical Minimum (0)
-    0x25, 0x01,                    // Logical Maximum (1)
-    0x75, 0x01,                    // Report Size (1)
-    0x95, 0x01,                    // Report Count (1)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x09, 0x32,                    // Usage (In Range)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x95, 0x02,                    // Report Count (2)
-    0x81, 0x01,                    // Input (Const,Var,Abs)
-    
-    0x09, 0x51,                    // Usage (Contact Identifier)
-    0x25, 0x0F,                    // Logical Maximum (15)
-    0x75, 0x04,                    // Report Size (4)
-    0x95, 0x01,                    // Report Count (1)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x05, 0x01,                    // Usage Page (Generic Desktop)
-    0x09, 0x30,                    // Usage (X)
-    0x16, 0x00, 0x00,              // Logical Minimum (0)
-    0x26, 0xFF, 0x0F,              // Logical Maximum (4095)
-    0x75, 0x10,                    // Report Size (16)
-    0x95, 0x01,                    // Report Count (1)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x09, 0x31,                    // Usage (Y)
-    0x26, 0xFF, 0x0F,              // Logical Maximum (4095)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x0D, 0x47, 0x00, 0x04,        // Usage (Width) - 0x47
-    0x27, 0xFF, 0x0F, 0x00, 0x00,  // Logical Maximum (4095)
-    0x75, 0x10,                    // Report Size (16)
-    0x95, 0x01,                    // Report Count (1)
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0x0D, 0x48, 0x00, 0x04,        // Usage (Height) - 0x48
-    0x81, 0x02,                    // Input (Data,Var,Abs)
-    
-    0xC0,                          // End Collection
-    
-    0xC0                           // End Collection
-};
-
-// 报告格式:
-// [0] = Report ID (0x01)
-// [1] = Contact Count (低4位) + 保留(高4位)
-// [2] = Tip Switch (bit0) + In Range (bit1) + 保留(bit2-3) + Contact ID (bit4-7)
-// [3] = X坐标低字节
-// [4] = X坐标高字节
-// [5] = Y坐标低字节
-// [6] = Y坐标高字节
-// [7] = Width低字节
-// [8] = Width高字节
-// [9] = Height低字节
-// [10] = Height高字节
-
-#define REPORT_SIZE 11
-
-static void _sendTouchReport(uint32_t contactCount, uint32_t contactID, 
-                             BOOL isTouching, uint32_t x, uint32_t y) {
-    if (!_userDevice || !_handleReport) return;
-    
-    uint8_t report[REPORT_SIZE] = {0};
-    report[0] = 0x01; // Report ID
-    report[1] = contactCount & 0x0F; // Contact Count
-    
-    if (contactCount > 0) {
-        report[2] = ((contactID & 0x0F) << 4) | (isTouching ? 0x03 : 0x00);
-        report[3] = x & 0xFF;
-        report[4] = (x >> 8) & 0xFF;
-        report[5] = y & 0xFF;
-        report[6] = (y >> 8) & 0xFF;
-        report[7] = 0x14; // Width = 20
-        report[8] = 0x00;
-        report[9] = 0x14; // Height = 20
-        report[10] = 0x00;
-    }
-    
-    BOOL success = _handleReport(_userDevice, report, REPORT_SIZE);
-    
-    static BOOL logged = false;
-    if (!logged) {
-        NSLog(@"[TouchSimulation] IOHIDUserDevice report sent, success=%d", success);
-        logged = true;
-    }
-}
-
-static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY) {
-    *outX = (uint32_t)(x * 4095.0 / _screenSize.width);
-    *outY = (uint32_t)(y * 4095.0 / _screenSize.height);
-}
+static uint32_t _fingerSeq = 1000;
 
 // MARK: - TouchSlide 实现
 
@@ -250,7 +100,6 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
 
 - (instancetype)init {
     if (self = [super init]) {
-        [self _initHID];
         [self _initScreenInfo];
         _lastX = 0;
         _lastY = 0;
@@ -260,65 +109,8 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
 }
 
 - (void)_initScreenInfo {
-    _screenScale = [UIScreen mainScreen].scale;
-    _screenSize = [UIScreen mainScreen].nativeBounds.size;
-    NSLog(@"[TouchSimulation] Screen: %.0fx%.0f scale=%.1f", 
-          _screenSize.width, _screenSize.height, _screenScale);
-}
-
-- (void)_initHID {
-    void* handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-    if (!handle) {
-        handle = dlopen("/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit", RTLD_LAZY);
-    }
-    if (!handle) {
-        [self _log:@"[TouchSimulation] ❌ 无法加载 IOKit.framework"];
-        return;
-    }
-    
-    _createUserDevice = dlsym(handle, "IOHIDUserDeviceCreate");
-    _scheduleRunLoop = dlsym(handle, "IOHIDUserDeviceScheduleWithRunLoop");
-    _unscheduleRunLoop = dlsym(handle, "IOHIDUserDeviceUnscheduleFromRunLoop");
-    _handleReport = dlsym(handle, "IOHIDUserDeviceHandleReport");
-    _registerCallback = dlsym(handle, "IOHIDUserDeviceRegisterInputReportCallback");
-    
-    if (!_createUserDevice || !_scheduleRunLoop || !_handleReport) {
-        [self _log:@"[TouchSimulation] ❌ 缺少必要的 IOHIDUserDevice 函数"];
-        return;
-    }
-    
-    CFDataRef reportDescriptor = CFDataCreate(kCFAllocatorDefault, 
-                                              _hidReportDescriptor, 
-                                              sizeof(_hidReportDescriptor));
-    
-    NSDictionary *properties = @{
-        (__bridge NSString *)kIOHIDReportDescriptorKey: (__bridge id)reportDescriptor,
-        (__bridge NSString *)kIOHIDPhysicalDeviceUniqueIDKey: @"wuyou-touch-device",
-        (__bridge NSString *)kIOHIDTransportKey: @"USB",
-        (__bridge NSString *)kIOHIDVendorIDKey: @(0x1234),
-        (__bridge NSString *)kIOHIDProductIDKey: @(0xABCD),
-        (__bridge NSString *)kIOHIDVersionNumberKey: @(1),
-        (__bridge NSString *)kIOHIDManufacturerKey: @"WuYou",
-        (__bridge NSString *)kIOHIDProductKey: @"Touch Simulator"
-    };
-    
-    _userDevice = _createUserDevice(kCFAllocatorDefault, (__bridge CFTypeRef)properties);
-    
-    if (reportDescriptor) CFRelease(reportDescriptor);
-    
-    if (_userDevice) {
-        _scheduleRunLoop(_userDevice, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-        [self _log:@"[TouchSimulation] ✅ IOHIDUserDevice 初始化成功"];
-    } else {
-        [self _log:@"[TouchSimulation] ❌ IOHIDUserDevice 创建失败"];
-    }
-}
-
-- (void)dealloc {
-    if (_userDevice) {
-        _unscheduleRunLoop(_userDevice, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-        CFRelease(_userDevice);
-    }
+    _screenSize = [UIScreen mainScreen].bounds.size;
+    NSLog(@"[TouchSimulation] Screen: %.0fx%.0f", _screenSize.width, _screenSize.height);
 }
 
 - (void)_log:(NSString *)msg {
@@ -329,11 +121,41 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
 }
 
 - (void)logDiagnostic {
-    if (_userDevice && _handleReport) {
-        [self _log:@"[TouchSimulation] ✅ HID UserDevice 有效"];
+    BOOL isTrusted = AXIsProcessTrusted();
+    if (isTrusted) {
+        [self _log:@"[TouchSimulation] ✅ 辅助功能信任权限已获取 - CGEvent 可跨应用投递"];
     } else {
-        [self _log:@"[TouchSimulation] ❌ HID 初始化不完整——触摸注入完全无效！"];
+        [self _log:@"[TouchSimulation] ⚠️ 辅助功能信任权限未获取 - CGEvent 仅能投递到自身 App"];
     }
+    
+    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    if (source) {
+        [self _log:@"[TouchSimulation] ✅ CGEventSource 创建成功"];
+        CFRelease(source);
+    } else {
+        [self _log:@"[TouchSimulation] ❌ CGEventSource 创建失败"];
+    }
+}
+
+// MARK: - CGEvent 核心实现
+
+- (void)_postMouseEvent:(CGEventType)type atX:(CGFloat)x y:(CGFloat)y {
+    CGPoint point = CGPointMake(x, y);
+    
+    CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, kCGMouseButtonLeft);
+    if (!event) {
+        [self _log:@"[TouchSimulation] ❌ CGEventCreateMouseEvent 失败"];
+        return;
+    }
+    
+    CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
+    
+    const char *typeName = (type == kCGEventLeftMouseDown) ? "DOWN" : 
+                           (type == kCGEventLeftMouseUp) ? "UP" : 
+                           (type == kCGEventMouseMoved) ? "MOVE" : "UNKNOWN";
+    
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f", typeName, x, y]];
 }
 
 // MARK: - 内部核心方法
@@ -342,18 +164,12 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
     _lastX = x;
     _lastY = y;
     
-    const char *phaseName = isTouching ? "DOWN" : "UP";
-    
-    uint32_t identity = isTouching ? (_fingerSeq++) : _lastIdentity;
-    _lastIdentity = isTouching ? identity : _lastIdentity;
-    
-    uint32_t hidX, hidY;
-    _convertCoords(x, y, &hidX, &hidY);
-    
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f (HID: %u,%u) identity=%u",
-              phaseName, fingerID, x, y, hidX, hidY, identity]];
-    
-    _sendTouchReport(isTouching ? 1 : 0, identity & 0x0F, isTouching, hidX, hidY);
+    if (isTouching) {
+        _lastIdentity = _fingerSeq++;
+        [self _postMouseEvent:kCGEventLeftMouseDown atX:x y:y];
+    } else {
+        [self _postMouseEvent:kCGEventLeftMouseUp atX:x y:y];
+    }
     
     usleep(5000);
 }
@@ -362,19 +178,13 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
     _lastX = x;
     _lastY = y;
     
-    uint32_t hidX, hidY;
-    _convertCoords(x, y, &hidX, &hidY);
-    
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 MOVE finger=%d x=%.0f y=%.0f (HID: %u,%u)", 
-              fingerID, x, y, hidX, hidY]];
-    
-    _sendTouchReport(1, _lastIdentity & 0x0F, true, hidX, hidY);
+    [self _postMouseEvent:kCGEventMouseMoved atX:x y:y];
 }
 
 // MARK: - 底层原子操作
 
 - (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
-    [self _sendTouchAtX:x y:y isTouching:true fingerID:fingerID];
+    [self _sendTouchAtX:x y:y isTouching:YES fingerID:fingerID];
 }
 
 - (void)moveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
@@ -382,7 +192,7 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
 }
 
 - (void)upFinger:(uint32_t)fingerID {
-    [self _sendTouchAtX:_lastX y:_lastY isTouching:false fingerID:fingerID];
+    [self _sendTouchAtX:_lastX y:_lastY isTouching:NO fingerID:fingerID];
 }
 
 // MARK: - 高级封装
