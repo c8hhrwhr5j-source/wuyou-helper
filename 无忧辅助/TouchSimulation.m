@@ -53,6 +53,13 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
     
     int32_t result = _dispatchEvent(_hidClient, event);
     CFRelease(event);
+    
+    static bool logged = false;
+    if (!logged) {
+        NSLog(@"[TouchSimulation] dispatch result=%d", result);
+        logged = true;
+    }
+    
     return result == 0;
 }
 
@@ -209,7 +216,7 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
     
     bool success = dispatch_digitizer((double)x, (double)y, isTouching, 0, identity);
     
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] %s %s", phaseName, success ? @"✅ 已派发" : @"❌ 派发失败"]];
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] %s %@", phaseName, success ? @"✅ 已派发" : @"❌ 派发失败"]];
 }
 
 - (void)_sendMoveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
@@ -220,7 +227,7 @@ static bool dispatch_digitizer(double x, double y, bool touch, uint32_t fingerIn
     
     bool success = dispatch_digitizer((double)x, (double)y, true, 0, _lastIdentity);
     
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] MOVE %s", success ? @"✅ 已派发" : @"❌ 派发失败"]];
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] MOVE %@", success ? @"✅ 已派发" : @"❌ 派发失败"]];
 }
 
 // MARK: - 底层原子操作
