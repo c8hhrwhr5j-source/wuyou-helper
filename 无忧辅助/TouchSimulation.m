@@ -1,12 +1,11 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 通过 CGEvent 进行触控模拟（TrollStore 跨应用方案）
+//  无忧辅助 - 通过 IOHIDUserDevice 进行触控模拟（TrollStore 跨应用方案）
 //
 
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <CoreGraphics/CoreGraphics.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
@@ -14,7 +13,33 @@
 
 static CGSize _screenSize = {0, 0};
 static uint32_t _fingerSeq = 1000;
-static BOOL (*_AXIsProcessTrusted)(void) = NULL;
+
+typedef struct {
+    uint8_t reportId;
+    uint8_t fingers;
+    uint8_t fingerId;
+    uint16_t x;
+    uint16_t y;
+    uint8_t pressure;
+    uint8_t eventType;
+} TouchReport;
+
+typedef void* IOHIDUserDeviceRef;
+
+typedef IOHIDUserDeviceRef (*IOHIDUserDeviceCreateFn)(CFAllocatorRef allocator, CFDictionaryRef properties);
+typedef void (*IOHIDUserDeviceScheduleWithRunLoopFn)(IOHIDUserDeviceRef device, CFRunLoopRef runLoop, CFStringRef runLoopMode);
+typedef void (*IOHIDUserDeviceUnscheduleFromRunLoopFn)(IOHIDUserDeviceRef device, CFRunLoopRef runLoop, CFStringRef runLoopMode);
+typedef void (*IOHIDUserDeviceCloseFn)(IOHIDUserDeviceRef device);
+typedef CFTypeRef (*IOHIDUserDeviceCopyPropertyFn)(IOHIDUserDeviceRef device, CFStringRef key);
+typedef bool (*IOHIDUserDeviceSetReportFn)(IOHIDUserDeviceRef device, IOHIDReportType type, uint32_t reportID, const uint8_t *report, CFIndex reportLength);
+
+static IOHIDUserDeviceCreateFn _IOHIDUserDeviceCreate = NULL;
+static IOHIDUserDeviceScheduleWithRunLoopFn _IOHIDUserDeviceScheduleWithRunLoop = NULL;
+static IOHIDUserDeviceUnscheduleFromRunLoopFn _IOHIDUserDeviceUnscheduleFromRunLoop = NULL;
+static IOHIDUserDeviceCloseFn _IOHIDUserDeviceClose = NULL;
+static IOHIDUserDeviceSetReportFn _IOHIDUserDeviceSetReport = NULL;
+
+static IOHIDUserDeviceRef _hidDevice = NULL;
 
 // MARK: - TouchSlide 实现
 
@@ -102,7 +127,7 @@ static BOOL (*_AXIsProcessTrusted)(void) = NULL;
 - (instancetype)init {
     if (self = [super init]) {
         [self _initScreenInfo];
-        [self _initAXFunctions];
+        [self _initHIDDevice];
         _lastX = 0;
         _lastY = 0;
         _lastIdentity = 0;
@@ -110,16 +135,109 @@ static BOOL (*_AXIsProcessTrusted)(void) = NULL;
     return self;
 }
 
-- (void)_initAXFunctions {
-    void* handle = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY);
-    if (handle) {
-        _AXIsProcessTrusted = dlsym(handle, "AXIsProcessTrusted");
-    }
+- (void)dealloc {
+    [self _closeHIDDevice];
 }
 
 - (void)_initScreenInfo {
     _screenSize = [UIScreen mainScreen].bounds.size;
     NSLog(@"[TouchSimulation] Screen: %.0fx%.0f", _screenSize.width, _screenSize.height);
+}
+
+- (BOOL)_initHIDDevice {
+    void* handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+    if (!handle) {
+        [self _log:@"[TouchSimulation] ❌ 无法加载 IOKit 框架"];
+        return NO;
+    }
+
+    _IOHIDUserDeviceCreate = dlsym(handle, "IOHIDUserDeviceCreate");
+    _IOHIDUserDeviceScheduleWithRunLoop = dlsym(handle, "IOHIDUserDeviceScheduleWithRunLoop");
+    _IOHIDUserDeviceUnscheduleFromRunLoop = dlsym(handle, "IOHIDUserDeviceUnscheduleFromRunLoop");
+    _IOHIDUserDeviceClose = dlsym(handle, "IOHIDUserDeviceClose");
+    _IOHIDUserDeviceSetReport = dlsym(handle, "IOHIDUserDeviceSetReport");
+
+    if (!_IOHIDUserDeviceCreate || !_IOHIDUserDeviceScheduleWithRunLoop || !_IOHIDUserDeviceClose || !_IOHIDUserDeviceSetReport) {
+        [self _log:@"[TouchSimulation] ❌ 无法获取 IOHIDUserDevice 函数"];
+        return NO;
+    }
+
+    uint8_t reportDescriptor[] = {
+        0x05, 0x0D, // Usage Page (Digitizer)
+        0x09, 0x01, // Usage (Digitizer)
+        0xA1, 0x01, // Collection (Application)
+        0x85, 0x01, // Report ID (1)
+        
+        0x09, 0x42, // Usage (Tip Switch)
+        0x09, 0x32, // Usage (In Range)
+        0x15, 0x00, // Logical Minimum (0)
+        0x25, 0x01, // Logical Maximum (1)
+        0x75, 0x01, // Report Size (1)
+        0x95, 0x02, // Report Count (2)
+        0x81, 0x02, // Input (Data,Var,Abs)
+        
+        0x95, 0x06, // Report Count (6)
+        0x81, 0x01, // Input (Cnst,Ary,Abs)
+        
+        0x05, 0x01, // Usage Page (Generic Desktop)
+        0x09, 0x30, // Usage (X)
+        0x09, 0x31, // Usage (Y)
+        0x16, 0x00, 0x00, // Logical Minimum (0)
+        0x26, 0xFF, 0x7F, // Logical Maximum (32767)
+        0x75, 0x10, // Report Size (16)
+        0x95, 0x02, // Report Count (2)
+        0x81, 0x02, // Input (Data,Var,Abs)
+        
+        0x05, 0x0D, // Usage Page (Digitizer)
+        0x09, 0x47, // Usage (Contact Identifier)
+        0x15, 0x00, // Logical Minimum (0)
+        0x25, 0x7F, // Logical Maximum (127)
+        0x75, 0x08, // Report Size (8)
+        0x95, 0x01, // Report Count (1)
+        0x81, 0x02, // Input (Data,Var,Abs)
+        
+        0x09, 0x30, // Usage (Tip Pressure)
+        0x15, 0x00, // Logical Minimum (0)
+        0x25, 0xFF, // Logical Maximum (255)
+        0x75, 0x08, // Report Size (8)
+        0x95, 0x01, // Report Count (1)
+        0x81, 0x02, // Input (Data,Var,Abs)
+        
+        0xC0        // End Collection
+    };
+
+    CFDataRef reportDesc = CFDataCreate(NULL, reportDescriptor, sizeof(reportDescriptor));
+
+    NSDictionary *properties = @{
+        (__bridge NSString *)kIOHIDReportDescriptorKey: (__bridge id)reportDesc,
+        (__bridge NSString *)kIOHIDPhysicalDeviceUniqueIDKey: @"WuyouTouchDevice001",
+        (__bridge NSString *)kIOHIDManufacturerKey: @"Wuyou",
+        (__bridge NSString *)kIOHIDProductKey: @"Touch Helper",
+        (__bridge NSString *)kIOHIDProductIDKey: @(0x0001),
+        (__bridge NSString *)kIOHIDVendorIDKey: @(0x1234),
+    };
+
+    _hidDevice = _IOHIDUserDeviceCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)properties);
+
+    CFRelease(reportDesc);
+
+    if (!_hidDevice) {
+        [self _log:@"[TouchSimulation] ❌ IOHIDUserDeviceCreate 失败"];
+        return NO;
+    }
+
+    _IOHIDUserDeviceScheduleWithRunLoop(_hidDevice, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+
+    [self _log:@"[TouchSimulation] ✅ IOHIDUserDevice 创建成功"];
+    return YES;
+}
+
+- (void)_closeHIDDevice {
+    if (_hidDevice && _IOHIDUserDeviceUnscheduleFromRunLoop && _IOHIDUserDeviceClose) {
+        _IOHIDUserDeviceUnscheduleFromRunLoop(_hidDevice, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        _IOHIDUserDeviceClose(_hidDevice);
+        _hidDevice = NULL;
+    }
 }
 
 - (void)_log:(NSString *)msg {
@@ -130,45 +248,42 @@ static BOOL (*_AXIsProcessTrusted)(void) = NULL;
 }
 
 - (void)logDiagnostic {
-    if (_AXIsProcessTrusted) {
-        BOOL isTrusted = _AXIsProcessTrusted();
-        if (isTrusted) {
-            [self _log:@"[TouchSimulation] ✅ 辅助功能信任权限已获取 - CGEvent 可跨应用投递"];
-        } else {
-            [self _log:@"[TouchSimulation] ⚠️ 辅助功能信任权限未获取 - CGEvent 仅能投递到自身 App"];
-        }
+    if (_hidDevice) {
+        [self _log:@"[TouchSimulation] ✅ HID设备已初始化"];
     } else {
-        [self _log:@"[TouchSimulation] ⚠️ 无法检测辅助功能权限状态"];
-    }
-    
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    if (source) {
-        [self _log:@"[TouchSimulation] ✅ CGEventSource 创建成功"];
-        CFRelease(source);
-    } else {
-        [self _log:@"[TouchSimulation] ❌ CGEventSource 创建失败"];
+        [self _log:@"[TouchSimulation] ❌ HID设备未初始化"];
     }
 }
 
-// MARK: - CGEvent 核心实现
+// MARK: - HID 报告发送
 
-- (void)_postMouseEvent:(CGEventType)type atX:(CGFloat)x y:(CGFloat)y {
-    CGPoint point = CGPointMake(x, y);
-    
-    CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, kCGMouseButtonLeft);
-    if (!event) {
-        [self _log:@"[TouchSimulation] ❌ CGEventCreateMouseEvent 失败"];
+- (void)_sendTouchReport:(BOOL)down atX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
+    if (!_hidDevice || !_IOHIDUserDeviceSetReport) {
+        [self _log:@"[TouchSimulation] ❌ HID设备不可用"];
         return;
     }
-    
-    CGEventPost(kCGHIDEventTap, event);
-    CFRelease(event);
-    
-    const char *typeName = (type == kCGEventLeftMouseDown) ? "DOWN" : 
-                           (type == kCGEventLeftMouseUp) ? "UP" : 
-                           (type == kCGEventMouseMoved) ? "MOVE" : "UNKNOWN";
-    
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f", typeName, x, y]];
+
+    uint16_t scaledX = (uint16_t)(x * 32767.0 / _screenSize.width);
+    uint16_t scaledY = (uint16_t)(y * 32767.0 / _screenSize.height);
+
+    uint8_t report[10] = {0};
+    report[0] = 0x01;
+    report[1] = down ? 0x03 : 0x00;
+    report[2] = (scaledX >> 8) & 0xFF;
+    report[3] = scaledX & 0xFF;
+    report[4] = (scaledY >> 8) & 0xFF;
+    report[5] = scaledY & 0xFF;
+    report[6] = (uint8_t)(fingerID & 0x7F);
+    report[7] = down ? 0x80 : 0x00;
+
+    bool result = _IOHIDUserDeviceSetReport(_hidDevice, kIOHIDReportTypeInput, 1, report, sizeof(report));
+
+    const char *typeName = down ? "DOWN" : "UP";
+    if (result) {
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f finger=%u", typeName, x, y, fingerID]];
+    } else {
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ❌ %s 失败 x=%.0f y=%.0f", typeName, x, y]];
+    }
 }
 
 // MARK: - 内部核心方法
@@ -179,11 +294,9 @@ static BOOL (*_AXIsProcessTrusted)(void) = NULL;
     
     if (isTouching) {
         _lastIdentity = _fingerSeq++;
-        [self _postMouseEvent:kCGEventLeftMouseDown atX:x y:y];
-    } else {
-        [self _postMouseEvent:kCGEventLeftMouseUp atX:x y:y];
     }
     
+    [self _sendTouchReport:isTouching atX:x y:y fingerID:fingerID];
     usleep(5000);
 }
 
@@ -191,7 +304,7 @@ static BOOL (*_AXIsProcessTrusted)(void) = NULL;
     _lastX = x;
     _lastY = y;
     
-    [self _postMouseEvent:kCGEventMouseMoved atX:x y:y];
+    [self _sendTouchReport:YES atX:x y:y fingerID:fingerID];
 }
 
 // MARK: - 底层原子操作
