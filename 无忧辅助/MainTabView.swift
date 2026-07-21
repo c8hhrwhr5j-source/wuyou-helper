@@ -2,7 +2,7 @@
 //  MainTabView.swift
 //  无忧辅助
 //
-//  主界面 Tab 导航
+//  主界面 Tab 导航：左下角脚本控制，右下角设置
 //
 
 import SwiftUI
@@ -12,31 +12,21 @@ struct MainTabView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            // 手机控制区域
-            PhoneControlView()
+            ScriptFileView()
                 .tabItem {
-                    Image(systemName: "iphone")
-                    Text("手机控制")
+                    Image(systemName: "play.rectangle.fill")
+                    Text("脚本控制")
                 }
                 .tag(0)
 
-            // 预留：脚本区域（找色/点击/滑动等）
-            ScriptControlView()
+            SettingsView()
                 .tabItem {
-                    Image(systemName: "play.rectangle")
-                    Text("脚本控制")
+                    Image(systemName: "gearshape.fill")
+                    Text("设置")
                 }
                 .tag(1)
-
-            // 预留：日志区域
-            LogView()
-                .tabItem {
-                    Image(systemName: "doc.text")
-                    Text("运行日志")
-                }
-                .tag(2)
         }
-        .accentColor(.orange)  // 用 accentColor 而非 tint — 兼容 iOS 14
+        .accentColor(.orange)
     }
 }
 

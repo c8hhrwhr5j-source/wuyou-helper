@@ -4,3 +4,4 @@
 //
 
 #import "ScriptEngine.h"
+#import "DeviceInfo.h"
