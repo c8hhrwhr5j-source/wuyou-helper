@@ -7,7 +7,12 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
+
+// IOSurface API 前向声明（IOSurface.h 在此 SDK 中不可用）
+extern size_t IOSurfaceGetWidth(IOSurfaceRef surface);
+extern size_t IOSurfaceGetHeight(IOSurfaceRef surface);
+extern void *IOSurfaceGetBaseAddress(IOSurfaceRef surface);
 
 // IOMobileFramebuffer 私有 API
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferConnection;
