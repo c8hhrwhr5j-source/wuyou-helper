@@ -31,7 +31,7 @@ typedef void (*IOHIDUserDeviceScheduleWithRunLoopFn)(IOHIDUserDeviceRef device, 
 typedef void (*IOHIDUserDeviceUnscheduleFromRunLoopFn)(IOHIDUserDeviceRef device, CFRunLoopRef runLoop, CFStringRef runLoopMode);
 typedef void (*IOHIDUserDeviceCloseFn)(IOHIDUserDeviceRef device);
 typedef CFTypeRef (*IOHIDUserDeviceCopyPropertyFn)(IOHIDUserDeviceRef device, CFStringRef key);
-typedef bool (*IOHIDUserDeviceSetReportFn)(IOHIDUserDeviceRef device, IOHIDReportType type, uint32_t reportID, const uint8_t *report, CFIndex reportLength);
+typedef bool (*IOHIDUserDeviceSetReportFn)(IOHIDUserDeviceRef device, uint32_t type, uint32_t reportID, const uint8_t *report, CFIndex reportLength);
 
 static IOHIDUserDeviceCreateFn _IOHIDUserDeviceCreate = NULL;
 static IOHIDUserDeviceScheduleWithRunLoopFn _IOHIDUserDeviceScheduleWithRunLoop = NULL;
@@ -209,12 +209,12 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
     CFDataRef reportDesc = CFDataCreate(NULL, reportDescriptor, sizeof(reportDescriptor));
 
     NSDictionary *properties = @{
-        (__bridge NSString *)kIOHIDReportDescriptorKey: (__bridge id)reportDesc,
-        (__bridge NSString *)kIOHIDPhysicalDeviceUniqueIDKey: @"WuyouTouchDevice001",
-        (__bridge NSString *)kIOHIDManufacturerKey: @"Wuyou",
-        (__bridge NSString *)kIOHIDProductKey: @"Touch Helper",
-        (__bridge NSString *)kIOHIDProductIDKey: @(0x0001),
-        (__bridge NSString *)kIOHIDVendorIDKey: @(0x1234),
+        @"DeviceReportDescriptor": (__bridge id)reportDesc,
+        @"PhysicalDeviceUniqueID": @"WuyouTouchDevice001",
+        @"Manufacturer": @"Wuyou",
+        @"Product": @"Touch Helper",
+        @"ProductID": @(0x0001),
+        @"VendorID": @(0x1234),
     };
 
     _hidDevice = _IOHIDUserDeviceCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)properties);
@@ -276,7 +276,7 @@ static IOHIDUserDeviceRef _hidDevice = NULL;
     report[6] = (uint8_t)(fingerID & 0x7F);
     report[7] = down ? 0x80 : 0x00;
 
-    bool result = _IOHIDUserDeviceSetReport(_hidDevice, kIOHIDReportTypeInput, 1, report, sizeof(report));
+    bool result = _IOHIDUserDeviceSetReport(_hidDevice, 0, 1, report, sizeof(report));
 
     const char *typeName = down ? "DOWN" : "UP";
     if (result) {
