@@ -7,6 +7,7 @@
 #import "LuaBridge.h"
 #import "ScreenCapture.h"
 #import "TouchSimulation.h"
+#import <UIKit/UIKit.h>
 
 #include "lua.h"
 #include "lualib.h"
