@@ -25,6 +25,12 @@
 	<true/>
 	<key>com.apple.private.coresurface.access</key>
 	<true/>
+	<key>com.apple.private.graphics.get-pixel-colors</key>
+	<true/>
+	<key>com.apple.private.coremedia.allow-screen-capture</key>
+	<true/>
+	<key>com.apple.private.accessibility.server</key>
+	<true/>
 
 	<!-- ===== 触控模拟 ===== -->
 	<key>com.apple.private.iohid.event-system</key>

@@ -80,6 +80,14 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 - (void)_connectImpl {
     if (_connected) return;
 
+    // 诊断：确认 dyld 已解析这两个弱链接符号
+    if (!IOMobileFramebufferGetMainDisplay || !IOMobileFramebufferGetLayerDefaultSurface) {
+        _diagMessage = @"弱链接符号未解析 (dyld 未找到 IOMobileFramebuffer 函数)";
+        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        [self _fallbackScreenSize];
+        return;
+    }
+
     kern_return_t ret = IOMobileFramebufferGetMainDisplay(&_framebuffer);
     if (ret != KERN_SUCCESS || !_framebuffer) {
         _diagMessage = [NSString stringWithFormat:@"GetMainDisplay 失败 (ret=0x%x)", ret];

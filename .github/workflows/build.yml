@@ -249,6 +249,9 @@ jobs:
             "com.apple.private.iomobileframebuffer.access" \
             "com.apple.private.screencapture.capture-all-displays" \
             "com.apple.private.coresurface.access" \
+            "com.apple.private.graphics.get-pixel-colors" \
+            "com.apple.private.coremedia.allow-screen-capture" \
+            "com.apple.private.accessibility.server" \
             "com.apple.private.iohid.event-system"; do
             label=$(echo "$key" | sed 's/.*\.//')
             if echo "$ENTITLEMENTS_OUTPUT" | grep -qF "$key"; then
@@ -262,7 +265,7 @@ jobs:
             echo "❌ 验证失败：关键 entitlements 缺失"
             exit 1
           fi
-          echo "✅ entitlements 验证通过 (7/7)"
+          echo "✅ entitlements 验证通过 (10/10)"
 
           # 验证版本号
           echo "=== 验证版本号 ==="
