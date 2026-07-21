@@ -8,7 +8,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <unistd.h>
-#import <IOSurface/IOSurfaceRef.h>
+#import <IOSurface/IOSurface.h>
 #import <mach/mach.h>
 
 // ---- IOMobileFramebuffer 私有声明（与触控精灵完全一致）----

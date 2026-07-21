@@ -129,7 +129,8 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 
 @implementation TouchSimulation {
     IOHIDEventSystemClientRef _client;
-    uint64_t _baseTimestamp;
+    CGFloat _lastX;   // 记录最后已知坐标，用于 up 事件
+    CGFloat _lastY;
 }
 
 + (instancetype)sharedInstance {
@@ -144,7 +145,8 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 - (instancetype)init {
     if (self = [super init]) {
         _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-        _baseTimestamp = 0;
+        _lastX = 0;
+        _lastY = 0;
         if (!_client) {
             NSLog(@"[TouchSimulation] IOHIDEventSystemClientCreate failed");
         }
@@ -158,13 +160,9 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 
 // MARK: - 内部核心方法
 
-- (uint64_t)_nextTimestamp {
-    if (_baseTimestamp == 0) {
-        _baseTimestamp = (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
-    } else {
-        _baseTimestamp += 1000000;  // +1ms
-    }
-    return _baseTimestamp;
+- (uint64_t)_now {
+    // 每次取真实系统时间戳，与触控精灵保持一致
+    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
 }
 
 /// 发送单个触摸事件（与触控精灵完全一致）
@@ -174,7 +172,9 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 
     if (!_client) return;
 
-    uint64_t ts = [self _nextTimestamp];
+    _lastX = x;
+    _lastY = y;
+    uint64_t ts = [self _now];
 
     IOHIDEventRef event = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault,
@@ -212,8 +212,8 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 }
 
 - (void)upFinger:(uint32_t)fingerID {
-    // up 时坐标用 0,0 即可，phase ended 表示手指已离开
-    [self _sendTouchAtX:0 y:0 phase:kIOHIDDigitizerTransducerFingerPhaseEnded fingerID:fingerID];
+    // up 时传入最后已知坐标（与触控精灵一致）
+    [self _sendTouchAtX:_lastX y:_lastY phase:kIOHIDDigitizerTransducerFingerPhaseEnded fingerID:fingerID];
 }
 
 // MARK: - 高级封装
@@ -254,7 +254,8 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 
     TouchSlide *slide = [self slideWithFingerID:0];
     [slide step:5];
-    CGFloat travelDist = ((x2 - x1) + (y2 - y1)) / 5;
+    CGFloat dist = fmax(fabs(x2 - x1), fabs(y2 - y1));
+    CGFloat travelDist = dist / 5;
     [slide delay:(int)(ms / (travelDist > 5 ? travelDist : 5))];
 
     [slide on:x1 y:y1];

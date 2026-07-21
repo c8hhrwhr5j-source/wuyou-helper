@@ -109,7 +109,7 @@ static int l_find_color(lua_State *L) {
     int rbx   = (int)luaL_optinteger(L, 7, 0);
     int rby   = (int)luaL_optinteger(L, 8, 0);
 
-    int tolerance = (int)((100.0 - fuzzy) / 100.0 * 128);
+    int tolerance = (int)((100.0 - fuzzy) / 100.0 * 255);
     if (tolerance < 0) tolerance = 0;
 
     ScreenColor target = {r, g, b};
@@ -210,7 +210,7 @@ static int l_screen_findColor(lua_State *L) {
 
     int fuzzy = (int)luaL_optinteger(L, 2, 100);
     // 将 1-100 精度转换为容差：精度100→容差0，精度50→容差约32
-    int tolerance = (int)((100.0 - fuzzy) / 100.0 * 128);
+    int tolerance = (int)((100.0 - fuzzy) / 100.0 * 255);
     if (tolerance < 0) tolerance = 0;
 
     int ltx = (int)luaL_optinteger(L, 3, 0);

@@ -134,9 +134,8 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
 }
 
 - (CGSize)screenSize {
-    UIScreen *screen = [UIScreen mainScreen];
-    CGFloat scale = screen.scale;
-    return CGSizeMake(screen.bounds.size.width * scale, screen.bounds.size.height * scale);
+    // 使用 nativeBounds 获取实际像素尺寸（与触控精灵一致）
+    return [[UIScreen mainScreen] nativeBounds].size;
 }
 
 + (NSString *)defaultScript {
@@ -197,13 +196,19 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
         [weakSelf _log:msg];
     });
 
-    // 设置指令钩子（用于暂停/停止检测，每 100 条指令触发一次）
-    lua_sethook(_luaState, lua_hook_callback, LUA_MASKCOUNT, 100);
+    // 设置指令钩子（用于暂停/停止检测，每 10000 条指令触发一次，与触控精灵一致）
+    lua_sethook(_luaState, lua_hook_callback, LUA_MASKCOUNT, 10000);
 
     // 执行脚本
     int status = luaL_loadstring(_luaState, [code UTF8String]);
     if (status == LUA_OK) {
-        status = lua_pcall(_luaState, 0, 0, 0);
+        // 压入 debug.traceback 作为错误处理函数，与触控精灵一致
+        lua_getglobal(_luaState, "debug");
+        lua_getfield(_luaState, -1, "traceback");
+        lua_remove(_luaState, -2);  // 移除 debug 表
+        int errFuncIdx = lua_gettop(_luaState);
+        status = lua_pcall(_luaState, 0, 0, errFuncIdx);
+        lua_remove(_luaState, errFuncIdx);  // 移除 traceback
     }
 
     if (status != LUA_OK) {
