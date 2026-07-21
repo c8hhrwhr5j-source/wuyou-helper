@@ -315,7 +315,7 @@ static int l_touch_tap(lua_State *L) {
     CGFloat x = luaL_checknumber(L, 1);
     CGFloat y = luaL_checknumber(L, 2);
     int ms = (int)luaL_optinteger(L, 3, 50);
-    uint32_t fingerID = (uint32_t)luaL_optinteger(L, 4, arc4random_uniform(11));
+    uint32_t fingerID = (uint32_t)luaL_optinteger(L, 4, 0);
     [[TouchSimulation sharedInstance] tapAtX:x y:y delayMs:ms fingerID:fingerID];
     return 0;
 }
@@ -326,14 +326,14 @@ static int l_touch_tapRandom(lua_State *L) {
     CGFloat y = luaL_checknumber(L, 2);
     int range = (int)luaL_optinteger(L, 3, 5);
     int ms = (int)luaL_optinteger(L, 4, 50);
-    uint32_t fingerID = (uint32_t)luaL_optinteger(L, 5, arc4random_uniform(11));
+    uint32_t fingerID = (uint32_t)luaL_optinteger(L, 5, 0);
     [[TouchSimulation sharedInstance] tapRandomAtX:x y:y range:range delayMs:ms fingerID:fingerID];
     return 0;
 }
 
 // --- touch.slide(id?) → 返回 Slide 对象 ---
 static int l_touch_slide(lua_State *L) {
-    uint32_t fingerID = (uint32_t)luaL_optinteger(L, 1, arc4random_uniform(11));
+    uint32_t fingerID = (uint32_t)luaL_optinteger(L, 1, 0);
 
     // 用 void* + memcpy 存储 ObjC 指针，避免 ARC 所有权推断冲突
     void *ud = lua_newuserdata(L, sizeof(CFTypeRef));

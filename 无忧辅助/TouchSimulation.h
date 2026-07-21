@@ -30,6 +30,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface TouchSimulation : NSObject
 
+/// 日志回调（由 ScriptEngine 注入，确保诊断信息显示在应用日志中）
+@property (nonatomic, copy, nullable) void (^logHandler)(NSString *msg);
+
+/// 输出当前触控系统状态诊断
+- (void)logDiagnostic;
+
 + (instancetype)sharedInstance;
 
 // MARK: - 底层原子操作（多指）

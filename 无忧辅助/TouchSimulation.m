@@ -148,9 +148,9 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
         _lastX = 0;
         _lastY = 0;
         if (!_client) {
-            NSLog(@"[TouchSimulation] ❌ IOHIDEventSystemClientCreate 返回 NULL！触控注入将完全失效");
+            [self _log:@"[TouchSimulation] ❌ IOHIDEventSystemClientCreate 返回 NULL！触控注入将完全失效"];
         } else {
-            NSLog(@"[TouchSimulation] ✅ IOHIDEventSystemClient 创建成功: %p", _client);
+            [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ IOHIDEventSystemClient 创建成功: %p", _client]];
         }
     }
     return self;
@@ -158,6 +158,21 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 
 - (void)dealloc {
     if (_client) CFRelease(_client);
+}
+
+- (void)_log:(NSString *)msg {
+    if (self.logHandler) {
+        self.logHandler(msg);
+    }
+    NSLog(@"%@", msg);
+}
+
+- (void)logDiagnostic {
+    if (_client) {
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ HID Client: %p 有效", _client]];
+    } else {
+        [self _log:@"[TouchSimulation] ❌ HID Client 为 NULL——触摸注入完全无效！请检查 HID 相关 entitlements"];
+    }
 }
 
 // MARK: - 内部核心方法
@@ -173,7 +188,7 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
            fingerID:(uint32_t)fingerID {
 
     if (!_client) {
-        NSLog(@"[TouchSimulation] ❌ _client 为 NULL，无法发送触摸事件");
+        [self _log:@"[TouchSimulation] ❌ _client 为 NULL，无法发送触摸事件"];
         return;
     }
 
@@ -201,7 +216,7 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
     );
 
     if (!event) {
-        NSLog(@"[TouchSimulation] ❌ IOHIDEventCreateDigitizerFingerEventWithQuality 返回 NULL！phase=%d x=%.0f y=%.0f", phase, x, y);
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ❌ 创建 IOHIDEvent 返回 NULL！phase=%d x=%.0f y=%.0f", phase, x, y]];
         return;
     }
 
@@ -209,13 +224,13 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
                             (phase == kIOHIDDigitizerTransducerFingerPhaseMoved) ? "MOVE" :
                             (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? "UP" : "???";
 
-    NSLog(@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu event=%p",
-          phaseName, fingerID, x, y, ts, event);
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu",
+              phaseName, fingerID, x, y, ts]];
 
     IOHIDEventSystemClientDispatchEvent(_client, event);
     CFRelease(event);
 
-    NSLog(@"[TouchSimulation] ✅ %s 已派发", phaseName);
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ %s 已派发", phaseName]];
 }
 
 // MARK: - 底层原子操作

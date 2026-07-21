@@ -195,6 +195,12 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
         [self _log:msg];
     });
 
+    // 把日志回调也注入到 TouchSimulation，确保触控诊断日志可见
+    [TouchSimulation sharedInstance].logHandler = ^(NSString *msg) {
+        [self _log:msg];
+    };
+    [[TouchSimulation sharedInstance] logDiagnostic];
+
     // 设置指令钩子（用于暂停/停止检测，每 10000 条指令触发一次，与触控精灵一致）
     lua_sethook(_luaState, lua_hook_callback, LUA_MASKCOUNT, 10000);
 
