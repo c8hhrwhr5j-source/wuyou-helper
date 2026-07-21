@@ -29,7 +29,7 @@ typedef void (*IOHIDUserDeviceUnscheduleFromRunLoopFn)(
     CFRunLoopRef runLoop,
     CFStringRef runLoopMode);
 
-typedef bool (*IOHIDUserDeviceHandleReportFn)(
+typedef BOOL (*IOHIDUserDeviceHandleReportFn)(
     IOHIDUserDeviceRef device,
     uint8_t *report,
     CFIndex reportLength);
@@ -132,7 +132,7 @@ static const uint8_t _hidReportDescriptor[] = {
 #define REPORT_SIZE 11
 
 static void _sendTouchReport(uint32_t contactCount, uint32_t contactID, 
-                             bool isTouching, uint32_t x, uint32_t y) {
+                             BOOL isTouching, uint32_t x, uint32_t y) {
     if (!_userDevice || !_handleReport) return;
     
     uint8_t report[REPORT_SIZE] = {0};
@@ -151,9 +151,9 @@ static void _sendTouchReport(uint32_t contactCount, uint32_t contactID,
         report[10] = 0x00;
     }
     
-    bool success = _handleReport(_userDevice, report, REPORT_SIZE);
+    BOOL success = _handleReport(_userDevice, report, REPORT_SIZE);
     
-    static bool logged = false;
+    static BOOL logged = false;
     if (!logged) {
         NSLog(@"[TouchSimulation] IOHIDUserDevice report sent, success=%d", success);
         logged = true;
@@ -338,7 +338,7 @@ static void _convertCoords(CGFloat x, CGFloat y, uint32_t *outX, uint32_t *outY)
 
 // MARK: - 内部核心方法
 
-- (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y isTouching:(bool)isTouching fingerID:(uint32_t)fingerID {
+- (void)_sendTouchAtX:(CGFloat)x y:(CGFloat)y isTouching:(BOOL)isTouching fingerID:(uint32_t)fingerID {
     _lastX = x;
     _lastY = y;
     
