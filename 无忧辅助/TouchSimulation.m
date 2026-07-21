@@ -7,7 +7,7 @@
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
-#import <ApplicationServices/ApplicationServices.h>
+#import <AXUIElement.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
