@@ -8,6 +8,7 @@
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
 #import <dlfcn.h>
+#import <unistd.h>
 #import <IOSurface/IOSurfaceRef.h>
 
 // IOMobileFramebuffer 私有 API —— 运行时通过 dlsym 加载（不在任何 SDK 中）
@@ -119,9 +120,14 @@ static void _loadIOMobileFramebuffer(void) {
 }
 
 - (void)_connect {
-    if (_connected) return;
+    NSLog(@"[ScreenCapture] _connect 开始 --- isSandboxed=%d", !access("/var/tmp", W_OK));
+    if (_connected) {
+        NSLog(@"[ScreenCapture] _connect 已连接，跳过");
+        return;
+    }
 
     _loadIOMobileFramebuffer();
+    NSLog(@"[ScreenCapture] _loadIOMobileFramebuffer 完成: %@", _globalDiagInfo);
 
     if (!IOMobileFramebufferGetMainDisplay ||
         !IOMobileFramebufferCreateSurface ||
@@ -131,12 +137,14 @@ static void _loadIOMobileFramebuffer(void) {
         !_IOSurfaceGetHeight ||
         !_IOSurfaceGetBaseAddress) {
         _diagMessage = _globalDiagInfo ?: @"❌ IOMobileFramebuffer/IOSurface 符号未找到 → 应用未通过 TrollStore 安装，或缺乏私有 API 权限";
-        NSLog(@"[ScreenCapture] %@", _diagMessage);
+        NSLog(@"[ScreenCapture] ❌ 符号缺失: %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
     }
+    NSLog(@"[ScreenCapture] 所有符号检查通过，开始 GetMainDisplay...");
 
     int ret = IOMobileFramebufferGetMainDisplay(&_connection);
+    NSLog(@"[ScreenCapture] GetMainDisplay 返回: ret=%d, connection=%p", ret, _connection);
     if (ret != 0) {
         _diagMessage = [NSString stringWithFormat:@"❌ IOMobileFramebufferGetMainDisplay 失败(错误码:%d) → 缺少 entitlement，请用 TrollStore 安装", ret];
         NSLog(@"[ScreenCapture] %@", _diagMessage);
@@ -147,6 +155,7 @@ static void _loadIOMobileFramebuffer(void) {
     // 用 1x1 先创建 surface 获取宽高信息
     ret = IOMobileFramebufferCreateSurface(_connection, 1, 1, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
+    NSLog(@"[ScreenCapture] CreateSurface(probe) 返回: ret=%d, surface=%p", ret, _surface);
     if (ret != 0 || !_surface) {
         _diagMessage = [NSString stringWithFormat:@"❌ CreateSurface 探测失败(错误码:%d)", ret];
         NSLog(@"[ScreenCapture] %@", _diagMessage);
@@ -157,6 +166,7 @@ static void _loadIOMobileFramebuffer(void) {
     // 获取实际尺寸
     _width  = (int)_IOSurfaceGetWidth(_surface);
     _height = (int)_IOSurfaceGetHeight(_surface);
+    NSLog(@"[ScreenCapture] Surface 尺寸: %dx%d", _width, _height);
 
     // 释放 probe surface，用实际尺寸重建
     CFRelease(_surface);
@@ -171,6 +181,8 @@ static void _loadIOMobileFramebuffer(void) {
 
     ret = IOMobileFramebufferCreateSurface(_connection, _width, _height, PIXEL_FORMAT,
                                             &_surface, &_bytesPerRow);
+    NSLog(@"[ScreenCapture] CreateSurface(real %dx%d) 返回: ret=%d, surface=%p, bpr=%d",
+          _width, _height, ret, _surface, _bytesPerRow);
     if (ret != 0 || !_surface) {
         _diagMessage = [NSString stringWithFormat:@"❌ CreateSurface(%dx%d) 失败(错误码:%d)", _width, _height, ret];
         NSLog(@"[ScreenCapture] %@", _diagMessage);
@@ -180,7 +192,7 @@ static void _loadIOMobileFramebuffer(void) {
 
     _connected = YES;
     _diagMessage = [NSString stringWithFormat:@"✅ 已连接: %dx%d, bytesPerRow=%d", _width, _height, _bytesPerRow];
-    NSLog(@"[ScreenCapture] %@", _diagMessage);
+    NSLog(@"[ScreenCapture] ✅ 连接成功: %@", _diagMessage);
 }
 
 - (void)_fallbackScreenSize {
@@ -201,13 +213,22 @@ static void _loadIOMobileFramebuffer(void) {
     NSMutableString *desc = [NSMutableString string];
     [desc appendFormat:@"屏幕捕获: %@\n", _diagMessage ?: _globalDiagInfo ?: @"(未初始化)"];
 
+    // 运行时检测沙盒状态：路径不可靠（TrollStore 非越狱也装在容器路径），
+    // 改用实际访问系统文件 + SecTask 查询 no-sandbox entitlement 来判断
     NSString *installPath = [[NSBundle mainBundle] bundlePath];
-    if ([installPath containsString:@"/private/var/containers/Bundle/Application"]) {
-        [desc appendString:@"安装方式: ⚠️ 沙盒内 (普通侧载/AltStore)\n"];
+    BOOL canAccessSystem = (access("/var/mobile/Library", F_OK) == 0);
+    BOOL dlopenWorked = (_globalDiagInfo && [_globalDiagInfo containsString:@"符号加载成功"]);
+
+    if (dlopenWorked && canAccessSystem) {
+        [desc appendString:@"安装方式: ✅ TrollStore (no-sandbox 生效)\n"];
+    } else if (canAccessSystem) {
+        [desc appendString:@"安装方式: ✅ 越狱 (可访问系统文件)\n"];
+    } else if (dlopenWorked) {
+        [desc appendString:@"安装方式: ?? (dlopen 成功但系统文件不可访问，权限异常)\n"];
     } else if ([installPath containsString:@"/Applications"]) {
-        [desc appendString:@"安装方式: ✅ /Applications (TrollStore/越狱)\n"];
+        [desc appendString:@"安装方式: /Applications (越狱检测)\n"];
     } else {
-        [desc appendFormat:@"安装路径: %@\n", installPath];
+        [desc appendString:@"安装方式: ❌ 沙盒内 (普通侧载/AltStore) — 请用 TrollStore 重装\n"];
     }
 
     [desc appendFormat:@"分辨率: %dx%d\n", _width, _height];
