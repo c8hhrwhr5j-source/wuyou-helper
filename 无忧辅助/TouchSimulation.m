@@ -212,7 +212,7 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
                             (phase == kIOHIDDigitizerTransducerFingerPhaseMoved) ? "MOVE" :
                             (phase == kIOHIDDigitizerTransducerFingerPhaseEnded) ? "UP" : "???";
 
-    IOHIDEventRef fingerEvent = IOHIDEventCreateDigitizerFingerEventWithQuality(
+    IOHIDEventRef touchEvent = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault,
         ts,
         0,                          // index
@@ -231,43 +231,16 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
         1.0                         // accuracy
     );
 
-    if (!fingerEvent) {
+    if (!touchEvent) {
         [self _log:[NSString stringWithFormat:@"[TouchSimulation] ❌ 创建手指事件失败！phase=%d x=%.0f y=%.0f", phase, x, y]];
         return;
     }
 
-    IOHIDEventSetIntegerValue(fingerEvent, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventSetIntegerValue(fingerEvent, kIOHIDEventFieldDigitizerFingerPhase, phase);
-
-    IOHIDEventRef rangeEvent = IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault,
-        ts,
-        kIOHIDEventTypeDigitizer,   // type: 必须是 kIOHIDEventTypeDigitizer (11)
-        0,                          // index
-        0,                          // identity
-        kIOHIDDigitizerTransducerRange,
-        0,                          // buttonMask
-        x, y, 0,                    // x, y, z — 使用实际触摸坐标，不是 0,0
-        0, 0,                       // tipPressure, barrelPressure
-        80,                         // range
-        touchVal,                   // touch
-        0                           // options
-    );
-
-    if (!rangeEvent) {
-        [self _log:@"[TouchSimulation] ❌ 创建 Range 事件失败！"];
-        CFRelease(fingerEvent);
-        return;
-    }
-
-    IOHIDEventAppendEvent(rangeEvent, fingerEvent, 0);
-    CFRelease(fingerEvent);
-
     [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s finger=%d x=%.0f y=%.0f ts=%llu",
               phaseName, fingerID, x, y, ts]];
 
-    IOHIDEventSystemClientDispatchEvent(_client, rangeEvent);
-    CFRelease(rangeEvent);
+    IOHIDEventSystemClientDispatchEvent(_client, touchEvent);
+    CFRelease(touchEvent);
 
     [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ %s 已派发", phaseName]];
 }
