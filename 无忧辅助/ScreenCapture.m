@@ -143,17 +143,34 @@ static void _loadIOMobileFramebuffer(void) {
     }
 
     _loadIOMobileFramebuffer();
-    _diagMessage = [NSString stringWithFormat:@"Step1 dlopen/dlsym: %@", _globalDiagInfo];
+    _diagMessage = [NSString stringWithFormat:@"Step1 dlopen/dlsym: %@\n"
+                    "   GMD=%p CS=%p LS=%p US=%p RL=%p\n"
+                    "   IGW=%p IGH=%p IGBA=%p",
+                    _globalDiagInfo,
+                    IOMobileFramebufferGetMainDisplay,
+                    IOMobileFramebufferCreateSurface,
+                    IOMobileFramebufferLockSurface,
+                    IOMobileFramebufferUnlockSurface,
+                    IOMobileFramebufferRelease,
+                    _IOSurfaceGetWidth,
+                    _IOSurfaceGetHeight,
+                    _IOSurfaceGetBaseAddress];
 
-    if (!IOMobileFramebufferGetMainDisplay ||
-        !IOMobileFramebufferCreateSurface ||
-        !IOMobileFramebufferLockSurface ||
-        !IOMobileFramebufferUnlockSurface ||
-        !_IOSurfaceGetWidth ||
-        !_IOSurfaceGetHeight ||
-        !_IOSurfaceGetBaseAddress) {
-        _diagMessage = [NSString stringWithFormat:@"Step2 符号缺失: %@",
-                        _globalDiagInfo ?: @"未知原因"];
+    // 逐个检测并报告缺失的符号
+    NSMutableArray *missing = [NSMutableArray array];
+    if (!IOMobileFramebufferGetMainDisplay) [missing addObject:@"GetMainDisplay"];
+    if (!IOMobileFramebufferCreateSurface)  [missing addObject:@"CreateSurface"];
+    if (!IOMobileFramebufferLockSurface)    [missing addObject:@"LockSurface"];
+    if (!IOMobileFramebufferUnlockSurface)  [missing addObject:@"UnlockSurface"];
+    if (!IOMobileFramebufferRelease)        [missing addObject:@"Release"];
+    if (!_IOSurfaceGetWidth)                [missing addObject:@"IOSurfaceGetWidth"];
+    if (!_IOSurfaceGetHeight)               [missing addObject:@"IOSurfaceGetHeight"];
+    if (!_IOSurfaceGetBaseAddress)          [missing addObject:@"IOSurfaceGetBaseAddress"];
+
+    if (missing.count > 0) {
+        _diagMessage = [NSString stringWithFormat:@"Step2 缺失符号(%lu): %@",
+                        (unsigned long)missing.count,
+                        [missing componentsJoinedByString:@", "]];
         [self _fallbackScreenSize];
         return;
     }
