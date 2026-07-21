@@ -14,7 +14,7 @@
 
 + (NSString *)deviceUUID {
     io_service_t service = IOServiceGetMatchingService(
-        kIOMasterPortDefault,
+        kIOMainPortDefault,
         IOServiceMatching("IOPlatformExpertDevice")
     );
     if (service == IO_OBJECT_NULL) return @"无权限";
