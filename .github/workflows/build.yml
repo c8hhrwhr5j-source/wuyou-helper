@@ -104,27 +104,35 @@ jobs:
           # 如果失败，输出错误摘要
           if [ $BUILD_EXIT -ne 0 ]; then
             echo ""
-            echo "====== FULL ERRORS (build.log) ======"
-            grep -i -E "(error:|warning:|note:|undefined|redefinition|duplicate|conflicting|undeclared|^ld:)" build.log | head -50
-            echo "====== LAST 50 LINES OF BUILD LOG ======"
-            tail -50 build.log
+            echo "====== BUILD.ERR (仅错误行) ======"
+            grep -i -E "(^.*: error:|^.*: fatal error:|undefined symbol|ld: |linker command failed)" build.log | head -100
+            echo ""
+            echo "====== BUILD.LOG 尾部 80 行 ======"
+            tail -80 build.log
             echo "========================================"
 
             # 诊断性编译：单独编译故障文件以获取完整错误
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
             for PATTERN in "TouchSimulation" "ScriptEngine" "ScreenCapture" "LuaBridge"; do
-              if grep -q "${PATTERN}.o.*failed" build.log 2>/dev/null; then
+              if grep -q "${PATTERN}.o.*failed\|${PATTERN}.m" build.log 2>/dev/null; then
                 FAILED_FILE="无忧辅助/${PATTERN}.m"
+                if [ ! -f "$FAILED_FILE" ]; then
+                  FAILED_FILE="${PATTERN}.m"
+                fi
                 LUA_INC=""
                 case "$PATTERN" in
                   ScriptEngine|LuaBridge) LUA_INC="-I./lua-build/include" ;;
                 esac
                 echo ""
                 echo "====== DIAGNOSTIC: $FAILED_FILE ======"
+                # -ferror-limit=0 显示全部错误（默认限制 19 条）
                 clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                  -fobjc-arc -fmodules ${LUA_INC} \
+                  -fobjc-arc -fmodules ${LUA_INC} -ferror-limit=0 \
+                  -D LUA_USE_IOS=1 \
+                  -I./无忧辅助 \
                   -framework Foundation -framework UIKit -framework CoreGraphics \
                   -framework CoreFoundation -framework IOKit -framework IOSurface \
+                  -framework ImageIO -framework MobileCoreServices \
                   -c "$FAILED_FILE" -o /dev/null 2>&1 || true
                 echo "======================================"
               fi

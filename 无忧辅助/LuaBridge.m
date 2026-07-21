@@ -8,6 +8,7 @@
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
 #import <stdlib.h>
+#import <unistd.h>
 
 // 日志回调
 static void (^g_logCallback)(NSString *) = nil;
@@ -258,10 +259,9 @@ static int l_touch_tapRandom(lua_State *L) {
 static int l_touch_slide(lua_State *L) {
     uint32_t fingerID = (uint32_t)luaL_optinteger(L, 1, arc4random_uniform(11));
 
-    // 创建 userdata 保存 TouchSlide 对象
+    // 创建 userdata 保存 TouchSlide 对象（CFBridgingRetain 绕过 ARC 限制）
     TouchSlide **pslide = (TouchSlide **)lua_newuserdata(L, sizeof(TouchSlide *));
-    *pslide = [[TouchSimulation sharedInstance] slideWithFingerID:fingerID];
-    [*pslide retain];
+    *pslide = (__bridge TouchSlide *)CFBridgingRetain([[TouchSimulation sharedInstance] slideWithFingerID:fingerID]);
 
     // 设置 metatable
     luaL_newmetatable(L, "TouchSlide");
@@ -303,7 +303,7 @@ static int l_touch_slide(lua_State *L) {
 static int l_touch_slide_gc(lua_State *L) {
     TouchSlide **pslide = (TouchSlide **)luaL_checkudata(L, 1, "TouchSlide");
     if (pslide && *pslide) {
-        [*pslide release];
+        CFBridgingRelease((__bridge void *)*pslide);
         *pslide = nil;
     }
     return 0;

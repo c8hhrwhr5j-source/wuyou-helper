@@ -5,6 +5,9 @@
 
 #include "lua.h"
 
+/// 全局脚本停止标志（ScriptEngine 设置，LuaBridge 检查）
+extern volatile int _global_script_stop_flag;
+
 /// 向 Lua VM 注册所有桥接函数（点击、滑动、找色、截图等）
 void lua_register_bridge_functions(lua_State *L);
 
