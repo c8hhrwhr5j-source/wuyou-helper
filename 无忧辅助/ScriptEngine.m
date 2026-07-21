@@ -190,31 +190,30 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
     // 注册自定义函数
     lua_register_bridge_functions(_luaState);
 
-    // 设置日志回调
-    __weak typeof(self) weakSelf = self;
+    // 设置日志回调（ScriptEngine 是单例，用强引用避免 weakSelf 变 nil 丢日志）
     lua_set_log_callback(_luaState, ^(NSString *msg) {
-        [weakSelf _log:msg];
+        [self _log:msg];
     });
 
     // 设置指令钩子（用于暂停/停止检测，每 10000 条指令触发一次，与触控精灵一致）
     lua_sethook(_luaState, lua_hook_callback, LUA_MASKCOUNT, 10000);
 
-    // 执行脚本
+    // 执行脚本（与触控精灵一致：最简 lua_pcall，不带 debug.traceback 错误处理）
     int status = luaL_loadstring(_luaState, [code UTF8String]);
     if (status == LUA_OK) {
-        // 压入 debug.traceback 作为错误处理函数，与触控精灵一致
-        lua_getglobal(_luaState, "debug");
-        lua_getfield(_luaState, -1, "traceback");
-        lua_remove(_luaState, -2);  // 移除 debug 表
-        int errFuncIdx = lua_gettop(_luaState);
-        status = lua_pcall(_luaState, 0, 0, errFuncIdx);
-        lua_remove(_luaState, errFuncIdx);  // 移除 traceback
+        [self _log:@"[ScriptEngine] 开始执行 main()"];
+        status = lua_pcall(_luaState, 0, 0, 0);
+        [self _log:@"[ScriptEngine] main() 已返回"];
     }
 
     if (status != LUA_OK) {
         const char *err = lua_tostring(_luaState, -1);
         NSString *errMsg = err ? [NSString stringWithUTF8String:err] : @"未知错误";
-        [self _log:[NSString stringWithFormat:@"脚本错误: %@", errMsg]];
+        NSString *phase = (status == LUA_ERRSYNTAX) ? @"语法错误" :
+                          (status == LUA_ERRMEM) ? @"内存不足" :
+                          (status == LUA_ERRRUN) ? @"运行时错误" :
+                          (status == LUA_ERRERR) ? @"错误处理错误" : @"未知错误";
+        [self _log:[NSString stringWithFormat:@"脚本错误 [%@]: %@", phase, errMsg]];
         lua_pop(_luaState, 1);
     }
 
