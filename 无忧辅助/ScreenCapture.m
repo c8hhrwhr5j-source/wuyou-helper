@@ -7,6 +7,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
+#import <dlfcn.h>
 #import <IOSurface/IOSurfaceRef.h>
 
 // IOSurface API 前向声明（IOSurface.h 在此 SDK 中不可用）
@@ -14,17 +15,30 @@ extern size_t IOSurfaceGetWidth(IOSurfaceRef surface);
 extern size_t IOSurfaceGetHeight(IOSurfaceRef surface);
 extern void *IOSurfaceGetBaseAddress(IOSurfaceRef surface);
 
-// IOMobileFramebuffer 私有 API
+// IOMobileFramebuffer 私有 API —— 运行时通过 dlsym 加载（不在任何 SDK 中）
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferConnection;
-extern int IOMobileFramebufferGetMainDisplay(IOMobileFramebufferConnection *connection);
-extern int IOMobileFramebufferCreateSurface(IOMobileFramebufferConnection connection,
-                                             int width, int height, int pixelFormat,
-                                             IOSurfaceRef *surface, int *bytesPerRow);
-extern int IOMobileFramebufferLockSurface(IOMobileFramebufferConnection connection,
-                                           IOSurfaceRef surface, int param, int *lockToken);
-extern int IOMobileFramebufferUnlockSurface(IOMobileFramebufferConnection connection,
-                                             IOSurfaceRef surface, int lockToken);
-extern int IOMobileFramebufferRelease(IOMobileFramebufferConnection connection);
+
+static int (*IOMobileFramebufferGetMainDisplay)(IOMobileFramebufferConnection *connection);
+static int (*IOMobileFramebufferCreateSurface)(IOMobileFramebufferConnection connection,
+                                                int width, int height, int pixelFormat,
+                                                IOSurfaceRef *surface, int *bytesPerRow);
+static int (*IOMobileFramebufferLockSurface)(IOMobileFramebufferConnection connection,
+                                              IOSurfaceRef surface, int param, int *lockToken);
+static int (*IOMobileFramebufferUnlockSurface)(IOMobileFramebufferConnection connection,
+                                                IOSurfaceRef surface, int lockToken);
+static int (*IOMobileFramebufferRelease)(IOMobileFramebufferConnection connection);
+
+static void _loadIOMobileFramebuffer(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = RTLD_DEFAULT;
+        IOMobileFramebufferGetMainDisplay  = dlsym(h, "IOMobileFramebufferGetMainDisplay");
+        IOMobileFramebufferCreateSurface   = dlsym(h, "IOMobileFramebufferCreateSurface");
+        IOMobileFramebufferLockSurface     = dlsym(h, "IOMobileFramebufferLockSurface");
+        IOMobileFramebufferUnlockSurface   = dlsym(h, "IOMobileFramebufferUnlockSurface");
+        IOMobileFramebufferRelease         = dlsym(h, "IOMobileFramebufferRelease");
+    });
+}
 
 // kCVPixelFormatType_32BGRA = 'BGRA'
 #define PIXEL_FORMAT 0x42475241
@@ -70,6 +84,8 @@ extern int IOMobileFramebufferRelease(IOMobileFramebufferConnection connection);
 
 - (void)_connect {
     if (_connected) return;
+
+    _loadIOMobileFramebuffer();
 
     int ret = IOMobileFramebufferGetMainDisplay(&_connection);
     if (ret != 0) {
