@@ -116,3 +116,12 @@ targets:
           rm -f kfd.o offsets.o main.o roothelper
 
           echo "=== roothelper ready ==="
+
+      - name: "Copy main.lua"
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          DST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app"
+          echo "=== Copying main.lua to app bundle ==="
+          cp "${SRCROOT}/main.lua" "${DST}/main.lua"
+          echo "=== main.lua ready ==="
