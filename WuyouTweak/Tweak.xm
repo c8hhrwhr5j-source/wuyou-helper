@@ -7,6 +7,7 @@
 //  适用：iOS 14-16.6.1，TrollStore 静态 Dylib 注入
 //
 
+
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "TouchSimulation.h"
@@ -18,6 +19,7 @@
 static TouchSimulation *_touchSim = nil;
 static ScriptEngine *_scriptEngine = nil;
 static ScreenCapture *_screenCapture = nil;
+static BOOL _tweakInitialized = NO;
 
 // 点击拦截回调
 static void (*_onTouchEvent)(int type, CGFloat x, CGFloat y) = NULL;
@@ -27,7 +29,48 @@ void setTouchEventCallback(void (*callback)(int type, CGFloat x, CGFloat y)) {
     _onTouchEvent = callback;
 }
 
-// 全局触摸事件拦截
+static NSString *_getScriptFilePath() {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docsDir = paths.firstObject;
+    NSString *scriptPath = [docsDir stringByAppendingPathComponent:@"wuyou_script.lua"];
+    return scriptPath;
+}
+
+static void _initWuyouTweak() {
+    if (_tweakInitialized) return;
+    _tweakInitialized = YES;
+    
+    NSLog(@"[WuyouTweak] 🚀 开始初始化无忧辅助 Tweak...");
+    
+    DeviceInfo *deviceInfo = [DeviceInfo sharedInstance];
+    NSLog(@"[WuyouTweak] 📱 设备信息: %@", deviceInfo.description);
+    
+    _screenCapture = [ScreenCapture sharedInstance];
+    [_screenCapture startCapture];
+    NSLog(@"[WuyouTweak] 📷 屏幕捕获已启动");
+    
+    _touchSim = [TouchSimulation sharedInstance];
+    [_touchSim logDiagnostic];
+    
+    _scriptEngine = [ScriptEngine sharedInstance];
+    _scriptEngine.logHandler = ^(NSString *msg) {
+        NSLog(@"[WuyouTweak][ScriptEngine] %@", msg);
+    };
+    
+    NSString *scriptPath = _getScriptFilePath();
+    NSLog(@"[WuyouTweak] 📄 脚本路径: %@", scriptPath);
+    
+    if ([[NSFileManager defaultManager] fileExistsAtPath:scriptPath]) {
+        NSLog(@"[WuyouTweak] 🎬 加载 Lua 脚本: %@", scriptPath);
+        [_scriptEngine runScriptFile:scriptPath];
+    } else {
+        NSLog(@"[WuyouTweak] ⚠️ 脚本文件不存在，使用默认脚本");
+        [_scriptEngine runScript:[ScriptEngine defaultScript]];
+    }
+    
+    NSLog(@"[WuyouTweak] ✅ 无忧辅助 Tweak 初始化完成");
+}
+
 %hook UIWindow
 
 - (void)sendEvent:(UIEvent *)event {
@@ -59,7 +102,6 @@ void setTouchEventCallback(void (*callback)(int type, CGFloat x, CGFloat y)) {
 
 %end
 
-// UIButton 点击拦截
 %hook UIButton
 
 - (void)sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event {
@@ -77,48 +119,41 @@ void setTouchEventCallback(void (*callback)(int type, CGFloat x, CGFloat y)) {
 
 %end
 
-// 应用启动完成后初始化
 %hook UIApplication
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     %orig;
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self _initWuyouTweak];
+        _initWuyouTweak();
     });
 }
 
-- (void)_initWuyouTweak {
-    NSLog(@"[WuyouTweak] 🚀 开始初始化无忧辅助 Tweak...");
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    %orig;
     
-    // 初始化设备信息
-    DeviceInfo *deviceInfo = [DeviceInfo sharedInstance];
-    NSLog(@"[WuyouTweak] 📱 设备信息: %@", deviceInfo.description);
-    
-    // 初始化屏幕捕获
-    _screenCapture = [ScreenCapture sharedInstance];
-    [_screenCapture startCapture];
-    NSLog(@"[WuyouTweak] 📷 屏幕捕获已启动");
-    
-    // 初始化触摸模拟
-    _touchSim = [TouchSimulation sharedInstance];
-    [_touchSim logDiagnostic];
-    
-    // 初始化脚本引擎
-    _scriptEngine = [ScriptEngine sharedInstance];
-    _scriptEngine.logHandler = ^(NSString *msg) {
-        NSLog(@"[WuyouTweak][ScriptEngine] %@", msg);
-    };
-    
-    // 注册 Lua 接口
-    [LuaBridge registerFunctions];
-    
-    NSLog(@"[WuyouTweak] ✅ 无忧辅助 Tweak 初始化完成");
+    if (!_tweakInitialized) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            _initWuyouTweak();
+        });
+    }
 }
 
 %end
 
-// 导出给 Lua 调用的 C 接口
+%ctor {
+    NSLog(@"[WuyouTweak] 📦 Dylib 已加载，等待 UIApplication 启动...");
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIApplication *app = [UIApplication sharedApplication];
+        if (app && app.keyWindow) {
+            NSLog(@"[WuyouTweak] ⏰ UI 已就绪，触发初始化");
+            _initWuyouTweak();
+        } else {
+            NSLog(@"[WuyouTweak] ⏳ UI 尚未就绪，等待 applicationDidFinishLaunching");
+        }
+    });
+}
 
 extern "C" {
 
@@ -166,6 +201,24 @@ void native_log(const char *msg) {
 
 void native_set_touch_callback(void (*callback)(int type, CGFloat x, CGFloat y)) {
     _onTouchEvent = callback;
+}
+
+void native_reload_script() {
+    NSLog(@"[WuyouTweak] 重新加载脚本");
+    if (_scriptEngine) {
+        [_scriptEngine stop];
+    }
+    NSString *scriptPath = _getScriptFilePath();
+    if ([[NSFileManager defaultManager] fileExistsAtPath:scriptPath]) {
+        [_scriptEngine runScriptFile:scriptPath];
+    } else {
+        [_scriptEngine runScript:[ScriptEngine defaultScript]];
+    }
+}
+
+void native_init_tweak() {
+    NSLog(@"[WuyouTweak] 手动触发初始化");
+    _initWuyouTweak();
 }
 
 } // extern "C"

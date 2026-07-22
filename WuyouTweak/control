@@ -1,8 +1,11 @@
 Package: com.wuyou.tweak
 Name: WuyouTweak
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm
-Description: 无忧辅助触摸事件拦截与注入 Tweak
+Description: 无忧辅助触摸事件拦截与注入 Tweak (Dylib注入方案)
 Maintainer: Wuyou
 Author: Wuyou
 Section: Tweaks
+Depends: mobilesubstrate
+Conflicts: com.wuyou.tweak
+Provides: com.wuyou.tweak

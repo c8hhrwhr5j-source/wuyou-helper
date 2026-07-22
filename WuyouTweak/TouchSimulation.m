@@ -1,23 +1,41 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 进程内原生触摸事件注入（TrollStore 静态 Dylib 方案）
-//
-//  原理：在目标 App 进程内直接构造 UITouch/UIEvent，通过 UIApplication sendEvent 派发
-//  优势：完全绕开系统 HID 层权限限制，无需 CGEvent/IOHID，函数指针不会归零
-//  适用：iOS 14-16.6.1，TrollStore 静态 Dylib 注入
+//  无忧辅助 - BackBoardServices HID 事件注入（TrollStore 跨进程点击方案）
 //
 
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
-#import <CoreFoundation/CoreFoundation.h>
+#import <dlfcn.h>
+#import <mach/mach.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
 
 static CGSize _screenSize = {0, 0};
+static CGFloat _scale = 1.0;
 static uint32_t _fingerSeq = 1000;
 
-// MARK: - TouchSlide 实现
+typedef struct __IOHIDEvent *IOHIDEventRef;
+typedef struct __IOHIDEventQueue *IOHIDEventQueueRef;
+typedef struct __IOHIDEventServiceClient *IOHIDEventServiceClientRef;
+
+typedef void* (*BKSHIDEventRouterInstanceFunc)(void);
+typedef void (*BKSHIDEventRouterRouteEventFunc)(void*, IOHIDEventRef);
+
+static void *_backBoardServicesHandle = NULL;
+static BKSHIDEventRouterInstanceFunc _bkRouterInstance = NULL;
+static BKSHIDEventRouterRouteEventFunc _bkRouteEvent = NULL;
+
+static BOOL _backBoardInitialized = NO;
+
+@interface TouchSimulation ()
+- (BOOL)_initializeBackBoardServices;
+- (IOHIDEventRef)_createDigitizerEventWithPhase:(uint32_t)phase 
+                                              x:(CGFloat)x 
+                                              y:(CGFloat)y 
+                                         fingerID:(uint32_t)fingerID;
+- (void)_sendHIDEvent:(IOHIDEventRef)event;
+@end
 
 @implementation TouchSlide {
     TouchSimulation *_sim;
@@ -72,12 +90,9 @@ static uint32_t _fingerSeq = 1000;
 
 @end
 
-// MARK: - TouchSimulation 实现
-
 @implementation TouchSimulation {
     CGFloat _lastX;
     CGFloat _lastY;
-    uint32_t _lastIdentity;
     BOOL _initialized;
 }
 
@@ -93,10 +108,11 @@ static uint32_t _fingerSeq = 1000;
 - (instancetype)init {
     if (self = [super init]) {
         _screenSize = [UIScreen mainScreen].bounds.size;
+        _scale = [UIScreen mainScreen].scale;
         _lastX = 0;
         _lastY = 0;
-        _lastIdentity = 0;
         _initialized = YES;
+        [self _initializeBackBoardServices];
     }
     return self;
 }
@@ -108,169 +124,167 @@ static uint32_t _fingerSeq = 1000;
     NSLog(@"%@", msg);
 }
 
-- (uint64_t)_now {
-    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
-}
-
-// 核心：构造原生 UITouch 对象
-- (UITouch *)_createTouchAtX:(CGFloat)x y:(CGFloat)y 
-                        phase:(UITouchPhase)phase 
-                     fingerID:(uint32_t)fingerID {
-    UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
-    if (!keyWindow) return nil;
+- (BOOL)_initializeBackBoardServices {
+    if (_backBoardInitialized) return YES;
     
-    CGPoint location = CGPointMake(x, y);
-    
-    // 找到触摸目标视图
-    UIView *hitView = [keyWindow hitTest:location withEvent:nil];
-    if (!hitView) hitView = keyWindow.rootViewController.view;
-    
-    // 创建 UITouch 对象
-    UITouch *touch = [[UITouch alloc] init];
-    
-    // 设置触摸属性（通过 KVC 或直接内存操作）
-    [touch setValue:[NSNumber numberWithInteger:fingerID + 1] forKey:@"_identity"];
-    [touch setValue:[NSNumber numberWithInteger:0] forKey:@"_phase"];
-    
-    // 使用私有 API 设置位置和目标
-    SEL setLocationSEL = NSSelectorFromString(@"setLocation:inView:");
-    if ([touch respondsToSelector:setLocationSEL]) {
-        ((void (*)(id, SEL, CGPoint, UIView *))objc_msgSend)(
-            touch, setLocationSEL, location, hitView);
+    _backBoardServicesHandle = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
+    if (!_backBoardServicesHandle) {
+        [self _log:@"[TouchSimulation] ❌ 加载 BackBoardServices 失败"];
+        return NO;
     }
     
-    // 设置触摸阶段
-    SEL setPhaseSEL = NSSelectorFromString(@"_setPhase:");
-    if ([touch respondsToSelector:setPhaseSEL]) {
-        ((void (*)(id, SEL, UITouchPhase))objc_msgSend)(touch, setPhaseSEL, phase);
+    _bkRouterInstance = (BKSHIDEventRouterInstanceFunc)dlsym(_backBoardServicesHandle, "BKSHIDEventRouterInstance");
+    if (!_bkRouterInstance) {
+        [self _log:@"[TouchSimulation] ❌ 获取 BKSHIDEventRouterInstance 失败"];
+        dlclose(_backBoardServicesHandle);
+        _backBoardServicesHandle = NULL;
+        return NO;
     }
     
-    return touch;
-}
-
-// 核心：构造 UIEvent 对象
-- (UIEvent *)_createEventWithTouches:(NSArray *)touches phase:(UITouchPhase)phase {
-    UIEvent *event = [[UIEvent alloc] init];
-    
-    // 设置事件类型
-    [event setValue:[NSNumber numberWithInteger:UIEventTypeTouches] forKey:@"_eventType"];
-    
-    // 设置触摸集合
-    NSMutableSet *touchSet = [NSMutableSet setWithArray:touches];
-    SEL setTouchesForPhaseSEL = NSSelectorFromString(@"_setTouches:forPhase:");
-    if ([event respondsToSelector:setTouchesForPhaseSEL]) {
-        ((void (*)(id, SEL, NSSet *, UITouchPhase))objc_msgSend)(
-            event, setTouchesForPhaseSEL, touchSet, phase);
+    _bkRouteEvent = (BKSHIDEventRouterRouteEventFunc)dlsym(_backBoardServicesHandle, "BKSHIDEventRouterRouteEvent");
+    if (!_bkRouteEvent) {
+        [self _log:@"[TouchSimulation] ❌ 获取 BKSHIDEventRouterRouteEvent 失败"];
+        dlclose(_backBoardServicesHandle);
+        _backBoardServicesHandle = NULL;
+        return NO;
     }
     
-    // 设置时间戳
-    [event setValue:[NSNumber numberWithDouble:[[NSDate date] timeIntervalSinceReferenceDate]] 
-             forKey:@"_timestamp"];
+    void *router = _bkRouterInstance();
+    if (!router) {
+        [self _log:@"[TouchSimulation] ❌ BKSHIDEventRouterInstance() 返回 NULL"];
+        return NO;
+    }
     
-    return event;
+    _backBoardInitialized = YES;
+    [self _log:@"[TouchSimulation] ✅ BackBoardServices HID 路由初始化成功"];
+    return YES;
 }
 
-// 核心：向系统派发触摸事件
-- (void)_dispatchEventWithTouchAtX:(CGFloat)x y:(CGFloat)y 
-                             phase:(UITouchPhase)phase 
-                          fingerID:(uint32_t)fingerID {
-    UITouch *touch = [self _createTouchAtX:x y:y phase:phase fingerID:fingerID];
-    if (!touch) {
-        [self _log:@"[TouchSimulation] ❌ 创建 UITouch 失败"];
+- (IOHIDEventRef)_createDigitizerEventWithPhase:(uint32_t)phase 
+                                              x:(CGFloat)x 
+                                              y:(CGFloat)y 
+                                         fingerID:(uint32_t)fingerID {
+    typedef IOHIDEventRef (*IOHIDEventCreateDigitizerFingerEventFunc)(CFAllocatorRef, IOHIDEventRef, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+    typedef IOHIDEventRef (*IOHIDEventCreateDigitizerEventFunc)(CFAllocatorRef, uint32_t, uint64_t);
+    
+    static IOHIDEventCreateDigitizerEventFunc createDigitizerEvent = NULL;
+    static IOHIDEventCreateDigitizerFingerEventFunc createFingerEvent = NULL;
+    
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void *iohid = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+        if (iohid) {
+            createDigitizerEvent = (IOHIDEventCreateDigitizerEventFunc)dlsym(iohid, "IOHIDEventCreateDigitizerEvent");
+            createFingerEvent = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(iohid, "IOHIDEventCreateDigitizerFingerEvent");
+        }
+    });
+    
+    if (!createDigitizerEvent || !createFingerEvent) {
+        [self _log:@"[TouchSimulation] ❌ 获取 IOHIDEvent 创建函数失败"];
+        return NULL;
+    }
+    
+    uint64_t timestamp = (uint64_t)([[NSDate date] timeIntervalSinceReferenceDate] * 1000000000ULL);
+    
+    IOHIDEventRef digitizerEvent = createDigitizerEvent(NULL, 0, timestamp);
+    if (!digitizerEvent) {
+        [self _log:@"[TouchSimulation] ❌ 创建 DigitizerEvent 失败"];
+        return NULL;
+    }
+    
+    uint32_t touchPhase = phase;
+    uint64_t xInt = (uint64_t)(x * 1000);
+    uint64_t yInt = (uint64_t)(y * 1000);
+    uint64_t zInt = (uint64_t)(phase == 0 ? 50 : 0);
+    
+    IOHIDEventRef fingerEvent = createFingerEvent(NULL, digitizerEvent, fingerID, touchPhase, 0, 0,
+                                                  xInt, yInt, zInt, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    
+    CFRelease(digitizerEvent);
+    
+    return fingerEvent;
+}
+
+- (void)_sendHIDEvent:(IOHIDEventRef)event {
+    if (!event) return;
+    
+    void *router = _bkRouterInstance();
+    if (!router) {
+        [self _log:@"[TouchSimulation] ❌ 获取路由实例失败"];
+        CFRelease(event);
         return;
     }
     
-    NSArray *touches = @[touch];
-    UIEvent *event = [self _createEventWithTouches:touches phase:phase];
-    if (!event) {
-        [self _log:@"[TouchSimulation] ❌ 创建 UIEvent 失败"];
-        return;
-    }
-    
-    // 通过 UIApplication 派发事件
-    UIApplication *app = [UIApplication sharedApplication];
-    [app sendEvent:event];
-    
-    const char *phaseName = "";
-    switch (phase) {
-        case UITouchPhaseBegan: phaseName = "DOWN"; break;
-        case UITouchPhaseMoved: phaseName = "MOVE"; break;
-        case UITouchPhaseEnded: phaseName = "UP"; break;
-        case UITouchPhaseCancelled: phaseName = "CANCEL"; break;
-        default: phaseName = "UNKNOWN";
-    }
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f finger=%u", 
-        phaseName, x, y, fingerID]];
-}
-
-// 备用方案：直接向视图层派发 touches 消息
-- (void)_dispatchDirectToViewAtX:(CGFloat)x y:(CGFloat)y 
-                           phase:(UITouchPhase)phase 
-                        fingerID:(uint32_t)fingerID {
-    UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
-    if (!keyWindow) return;
-    
-    CGPoint location = CGPointMake(x, y);
-    UIView *hitView = [keyWindow hitTest:location withEvent:nil];
-    if (!hitView) hitView = keyWindow.rootViewController.view;
-    
-    UITouch *touch = [self _createTouchAtX:x y:y phase:phase fingerID:fingerID];
-    if (!touch) return;
-    
-    NSArray *touches = @[touch];
-    UIEvent *event = [self _createEventWithTouches:touches phase:phase];
-    
-    switch (phase) {
-        case UITouchPhaseBegan:
-            [hitView touchesBegan:touches withEvent:event];
-            break;
-        case UITouchPhaseMoved:
-            [hitView touchesMoved:touches withEvent:event];
-            break;
-        case UITouchPhaseEnded:
-            [hitView touchesEnded:touches withEvent:event];
-            break;
-        case UITouchPhaseCancelled:
-            [hitView touchesCancelled:touches withEvent:event];
-            break;
-        default:
-            break;
-    }
+    _bkRouteEvent(router, event);
+    CFRelease(event);
 }
 
 - (void)logDiagnostic {
     UIApplication *app = [UIApplication sharedApplication];
     if (app && app.keyWindow) {
-        [self _log:@"[TouchSimulation] ✅ 进程内触摸系统已就绪"];
-        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 屏幕尺寸: %.0fx%.0f", 
-            _screenSize.width, _screenSize.height]];
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 逻辑尺寸: %.0fx%.0f, 缩放: %.1f, 物理尺寸: %.0fx%.0f", 
+            _screenSize.width, _screenSize.height, _scale,
+            _screenSize.width * _scale, _screenSize.height * _scale]];
+        if (_backBoardInitialized) {
+            [self _log:@"[TouchSimulation] ✅ BackBoardServices HID 注入已就绪（跨进程模式）"];
+        } else {
+            [self _log:@"[TouchSimulation] ⚠️ BackBoardServices 未初始化，使用进程内模式"];
+        }
     } else {
         [self _log:@"[TouchSimulation] ⚠️ UIApplication 尚未完全初始化"];
     }
 }
 
-// MARK: - 底层原子操作
+- (void)_sendTouchEventAtX:(CGFloat)x y:(CGFloat)y phase:(uint32_t)phase fingerID:(uint32_t)fingerID {
+    if (_backBoardInitialized) {
+        IOHIDEventRef event = [self _createDigitizerEventWithPhase:phase x:x y:y fingerID:fingerID];
+        if (event) {
+            [self _sendHIDEvent:event];
+            
+            const char *phaseName = "UNKNOWN";
+            switch (phase) {
+                case 0: phaseName = "DOWN"; break;
+                case 1: phaseName = "MOVE"; break;
+                case 2: phaseName = "UP"; break;
+                case 3: phaseName = "CANCEL"; break;
+            }
+            [self _log:[NSString stringWithFormat:@"[TouchSimulation] 🎯 HID %s x=%.0f y=%.0f finger=%u", phaseName, x, y, fingerID]];
+            return;
+        }
+    }
+    
+    [self _log:@"[TouchSimulation] ⚠️ 回退到进程内模式"];
+    
+    CGPoint logicalPoint = CGPointMake(x / _scale, y / _scale);
+    UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
+    if (!keyWindow) return;
+    
+    UIView *hitView = [keyWindow hitTest:logicalPoint withEvent:nil];
+    if (!hitView) hitView = keyWindow.rootViewController.view;
+    
+    if ([hitView respondsToSelector:@selector(sendActionsForControlEvents:)]) {
+        [hitView sendActionsForControlEvents:phase == 2 ? UIControlEventTouchUpInside : UIControlEventTouchDown];
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ 触发控件: %@", NSStringFromClass([hitView class])]];
+    }
+}
 
 - (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
     _lastX = x;
     _lastY = y;
-    _lastIdentity = _fingerSeq++;
-    [self _dispatchEventWithTouchAtX:x y:y phase:UITouchPhaseBegan fingerID:fingerID];
+    [self _sendTouchEventAtX:x y:y phase:0 fingerID:fingerID];
     usleep(5000);
 }
 
 - (void)moveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
     _lastX = x;
     _lastY = y;
-    [self _dispatchEventWithTouchAtX:x y:y phase:UITouchPhaseMoved fingerID:fingerID];
+    [self _sendTouchEventAtX:x y:y phase:1 fingerID:fingerID];
 }
 
 - (void)upFinger:(uint32_t)fingerID {
-    [self _dispatchEventWithTouchAtX:_lastX y:_lastY phase:UITouchPhaseEnded fingerID:fingerID];
+    [self _sendTouchEventAtX:_lastX y:_lastY phase:2 fingerID:fingerID];
     usleep(5000);
 }
-
-// MARK: - 高级封装
 
 - (void)tapAtX:(CGFloat)x y:(CGFloat)y delayMs:(int)ms fingerID:(uint32_t)fingerID {
     [self downAtX:x y:y fingerID:fingerID];
@@ -288,8 +302,6 @@ static uint32_t _fingerSeq = 1000;
     return [[TouchSlide alloc] initWithSim:self fingerID:fingerID];
 }
 
-// MARK: - 兼容旧接口
-
 - (void)clickAtX:(CGFloat)x y:(CGFloat)y {
     [self tapAtX:x y:y delayMs:10 fingerID:0];
 }
@@ -300,9 +312,7 @@ static uint32_t _fingerSeq = 1000;
     [self upFinger:0];
 }
 
-- (void)swipeFromX:(CGFloat)x1 y:(CGFloat)y1
-               toX:(CGFloat)x2 y:(CGFloat)y2
-          duration:(NSInteger)ms {
+- (void)swipeFromX:(CGFloat)x1 y:(CGFloat)y1 toX:(CGFloat)x2 y:(CGFloat)y2 duration:(NSInteger)ms {
     TouchSlide *slide = [self slideWithFingerID:0];
     [slide step:5];
     CGFloat dist = fmax(fabs(x2 - x1), fabs(y2 - y1));

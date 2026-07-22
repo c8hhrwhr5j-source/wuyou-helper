@@ -1,6 +1,5 @@
 ARCHS = arm64 arm64e
 TARGET = iphone:clang:16.6:14.0
-INSTALL_TARGET_PROCESSES = SpringBoard
 
 include $(THEOS)/makefiles/common.mk
 
@@ -14,9 +13,9 @@ WuyouTweak_FILES = Tweak.xm \
                     DeviceInfo.m
 
 WuyouTweak_FRAMEWORKS = UIKit CoreGraphics CoreFoundation IOKit
-WuyouTweak_PRIVATE_FRAMEWORKS = IOKit
+WuyouTweak_PRIVATE_FRAMEWORKS = BackBoardServices IOKit
 
-WuyouTweak_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function -Wno-deprecated-declarations
+WuyouTweak_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function -Wno-deprecated-declarations -DDEBUG=1
 WuyouTweak_LDFLAGS = -lz
 
 include $(THEOS_MAKE_PATH)/tweak.mk
