@@ -29,8 +29,27 @@ static void _fbload(void){static dispatch_once_t o;dispatch_once(&o,^{
 // 通过 IORegistry 查找 IOMFB 的显示 IOSurface，用 IOSurfaceLookup 直接映射
 // 这个 surface 是全局显示缓冲，不限进程，始终反映物理屏幕内容
 static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *outBpr, NSString **diag) {
-    // 策略 1：扫描 IOMFB 的 IORegistry 属性，查找 display_surface_id
-    const char *svcNames[] = {"IOMobileFramebuffer","AppleCLCD","AppleMipiDSI","AppleDCP",NULL};
+    *outSf = NULL; *outW = *outH = *outBpr = 0; *diag = nil;
+
+    // 候选服务类名（按优先级）
+    const char *svcNames[] = {
+        "IOMobileFramebuffer",
+        "AppleDCP", "AppleDCPExpert",
+        "AppleCLCD", "AppleMipiDSI",
+        "AppleH10CLCD", "AppleH11CLCD", "AppleH12CLCD", "AppleH13CLCD",
+        "AppleM2ScalerCSC",
+        NULL
+    };
+
+    // 候选属性名：可能是 surface ID(CFNumber) 或直接是 IOSurface 对象
+    const char *surfKeys[] = {
+        "DisplaySurface", "CurrentSurface", "FramebufferSurface", "MainSurface",
+        "IOSurface", "Surface", "surface",
+        "IOSurfaceID", "SurfaceID", "surface-id", "display-surface-id",
+        "DisplaySurfaceID", "FBSystemSurfaceID", "ioSurfaceID", "CoreSurfaceID",
+        NULL
+    };
+
     for (int i = 0; svcNames[i]; i++) {
         io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault,
             IOServiceMatching(svcNames[i]));
@@ -41,37 +60,57 @@ static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *o
             IOObjectRelease(svc); continue;
         }
 
-        // 尝试多种可能的 surface ID 属性名
-        const char *sidKeys[] = {
-            "IOSurfaceID", "display-surface-id", "DisplaySurfaceID",
-            "IOSurfaceCoreSurfaceID", "FBSystemSurfaceID", "ioSurfaceID", NULL
-        };
+        // 调试：打印所有属性键（帮助定位真实设备上的 key）
+        NSArray *allKeys = [(__bridge NSDictionary *)props allKeys];
+        NSLog(@"[GS] %s 属性数: %lu 键: %@", svcNames[i], (unsigned long)allKeys.count,
+              [allKeys componentsJoinedByString:@","]);
+
         IOSurfaceRef found = NULL;
-        for (int k = 0; sidKeys[k]; k++) {
-            CFNumberRef sidNum = CFDictionaryGetValue(props, (__bridge CFStringRef)[NSString stringWithUTF8String:sidKeys[k]]);
-            if (!sidNum) continue;
-            uint32_t sid = 0;
-            if (CFNumberGetValue(sidNum, kCFNumberSInt32Type, &sid) && sid > 0) {
-                found = IOSurfaceLookup(sid);
-                if (found) {
-                    NSLog(@"[GS] ✅ IOMFB surface via %s: ID=%u w=%d h=%d",
-                          sidKeys[k], sid,
-                          (int)IOSurfaceGetWidth(found), (int)IOSurfaceGetHeight(found));
-                    break;
+        NSString *foundVia = nil;
+
+        for (int k = 0; surfKeys[k]; k++) {
+            CFStringRef key = (__bridge CFStringRef)[NSString stringWithUTF8String:surfKeys[k]];
+            CFTypeRef val = CFDictionaryGetValue(props, key);
+            if (!val) continue;
+
+            CFTypeID tid = CFGetTypeID(val);
+
+            // 情况 A：值本身就是 IOSurface
+            if (tid == IOSurfaceGetTypeID()) {
+                found = (IOSurfaceRef)CFRetain(val);
+                foundVia = [NSString stringWithFormat:@"%s -> %s (IOSurface对象)",
+                            svcNames[i], surfKeys[k]];
+                break;
+            }
+
+            // 情况 B：值是 CFNumber，当作 surface ID
+            if (tid == CFNumberGetTypeID()) {
+                uint32_t sid = 0;
+                if (CFNumberGetValue((CFNumberRef)val, kCFNumberSInt32Type, &sid) && sid > 0) {
+                    IOSurfaceRef s = IOSurfaceLookup(sid);
+                    if (s) {
+                        found = s;
+                        foundVia = [NSString stringWithFormat:@"%s -> %s ID=%u",
+                                    svcNames[i], surfKeys[k], sid];
+                        break;
+                    }
                 }
             }
+
+            // 情况 C：值是 Data / Array / Dict，可能嵌套了 surface — 暂不处理
+            NSLog(@"[GS] %s/%s 类型=%lu 非直接 surface", svcNames[i], surfKeys[k], tid);
         }
 
-        // 验证 surface 内容非全黑
-        BOOL hasContent = NO;
         if (found) {
             int fw = (int)IOSurfaceGetWidth(found), fh = (int)IOSurfaceGetHeight(found);
             int fbpr = (int)IOSurfaceGetBytesPerRow(found);
+            NSLog(@"[GS] ✅ 找到 surface: %@ w=%d h=%d bpr=%d", foundVia, fw, fh, fbpr);
+
+            BOOL hasContent = NO;
             if (fw > 0 && fh > 0 && fbpr > 0) {
                 if (IOSurfaceLock(found, 1/*readonly*/, NULL) == KERN_SUCCESS) {
                     void *base = IOSurfaceGetBaseAddress(found);
                     if (base) {
-                        // 采样 5 个点检查是否全黑
                         int nz = 0, samples = 5;
                         for (int s = 0; s < samples; s++) {
                             int sx = fw * (s+1) / (samples+1);
@@ -80,25 +119,21 @@ static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *o
                             if (p[0] || p[1] || p[2]) nz++;
                         }
                         hasContent = (nz > 0);
-                        NSLog(@"[GS] 内容检测: %d/%d 采样点非黑 %@",
-                              nz, samples, hasContent?@"✅":@"⚠️ 全黑");
+                        NSLog(@"[GS] 内容检测: %d/%d 非黑 %@", nz, samples,
+                              hasContent?@"✅":@"⚠️ 全黑");
                     }
                     IOSurfaceUnlock(found, 1/*readonly*/, NULL);
                 }
-                if (fw > 0 && fh > 0) {
-                    *outSf = found; *outW = fw; *outH = fh; *outBpr = fbpr;
-                    *diag = hasContent ? @"OK (有内容)"
-                           : [NSString stringWithFormat:@"OK %dx%d (全黑-可能需前台)", fw, fh];
-                } else {
-                    CFRelease(found);
-                }
-            } else {
-                CFRelease(found);
+                *outSf = found; *outW = fw; *outH = fh; *outBpr = fbpr;
+                *diag = hasContent ? [NSString stringWithFormat:@"OK %@", foundVia]
+                       : [NSString stringWithFormat:@"%@ (全黑)", foundVia];
+                CFRelease(props); IOObjectRelease(svc);
+                return;
             }
+            CFRelease(found);
         }
 
         CFRelease(props); IOObjectRelease(svc);
-        if (*outSf) return; // 找到了就返回
     }
     *diag = @"未找到显示 surface";
 }
