@@ -8,6 +8,7 @@
 - [脚本管理](#脚本管理)
 - [屏幕模块 screen](#屏幕模块-screen)
 - [触控模块 touch](#触控模块-touch)
+- [应用模块 app](#应用模块-app)
 - [工具函数](#工具函数)
 - [进阶用法](#进阶用法)
 - [完整示例](#完整示例)
@@ -724,6 +725,254 @@ slide:move(x, y):up()
 
 ---
 
+## 应用模块 app
+
+### app.frontBid() — 前台应用包名
+
+**函数说明**：获取当前正在前台运行的 APP 包名（Bundle ID）。
+
+**语法**：
+
+```lua
+bid = app.frontBid()
+```
+
+**返回值**：
+
+| 返回值 | 类型   | 说明                   |
+|--------|--------|------------------------|
+| bid    | string | 当前前台 APP 的包名     |
+
+**示例**：
+
+```lua
+local bid = app.frontBid()
+log("当前前台应用: " .. bid)
+
+-- 判断是否在特定 App 中
+if bid == "com.touchelf.app" then
+    log("当前在触摸精灵中")
+end
+```
+
+---
+
+### app.run() — 启动应用
+
+**函数说明**：打开并运行指定包名的应用。
+
+**语法**：
+
+```lua
+ok = app.run(bid)
+```
+
+**参数**：
+
+| 参数 | 类型   | 说明           | 必填 |
+|------|--------|----------------|------|
+| bid  | string | 要启动的应用包名 | 必填 |
+
+**返回值**：
+
+| 返回值 | 类型    | 说明               |
+|--------|---------|--------------------|
+| ok     | boolean | true=成功，false=失败 |
+
+**示例**：
+
+```lua
+app.run("com.touchelf.app")  -- 打开触摸精灵
+sleep(2000)                  -- 等待应用启动
+
+-- 打开浏览器
+app.run("com.apple.mobilesafari")
+```
+
+**注意事项**：
+
+- 应用包名可在手机设置→通用→关于本机→应用列表中查看
+- 也可使用 `app.frontBid()` 获取当前应用的包名
+
+---
+
+### app.kill() — 关闭应用
+
+**函数说明**：关闭指定包名的应用。
+
+**语法**：
+
+```lua
+ok = app.kill(bid)
+```
+
+**参数**：
+
+| 参数 | 类型   | 说明             | 必填 |
+|------|--------|------------------|------|
+| bid  | string | 要关闭的应用包名   | 必填 |
+
+**返回值**：
+
+| 返回值 | 类型    | 说明               |
+|--------|---------|--------------------|
+| ok     | boolean | true=成功，false=失败 |
+
+**示例**：
+
+```lua
+app.kill("com.touchelf.app")  -- 关闭触摸精灵
+```
+
+**多次关闭示例**：某些应用一次可能关不掉，可以用循环确保关闭：
+
+```lua
+-- 确保关闭某个应用
+function force_kill(app_package)
+    while true do
+        if app.running(app_package) then
+            app.kill(app_package)
+            sleep(1000)
+        else
+            return true
+        end
+    end
+end
+
+force_kill("com.touchelf.app")
+```
+
+---
+
+### app.running() — 应用是否运行
+
+**函数说明**：判断指定应用是否正在运行。
+
+**语法**：
+
+```lua
+flag = app.running(bid)
+```
+
+**参数**：
+
+| 参数 | 类型   | 说明             | 必填 |
+|------|--------|------------------|------|
+| bid  | string | 要检测的应用包名   | 必填 |
+
+**返回值**：
+
+| 返回值 | 类型    | 说明                        |
+|--------|---------|-----------------------------|
+| flag   | boolean | true=正在运行，false=未运行   |
+
+**示例**：
+
+```lua
+if app.running("com.touchelf.app") then
+    log("触摸精灵正在运行")
+else
+    log("触摸精灵未运行")
+end
+
+-- 启动 App 并等待它开始运行
+app.run("com.example.app")
+local timeout = 5000
+local elapsed = 0
+while elapsed < timeout do
+    if app.running("com.example.app") then
+        log("应用已启动")
+        break
+    end
+    sleep(500)
+    elapsed = elapsed + 500
+end
+```
+
+---
+
+### app.bundlePath() — 应用包目录
+
+**函数说明**：获取指定应用的主程序目录路径。
+
+**语法**：
+
+```lua
+path = app.bundlePath(bid)
+```
+
+**参数**：
+
+| 参数 | 类型   | 说明           | 必填 |
+|------|--------|----------------|------|
+| bid  | string | 要查询的应用包名 | 必填 |
+
+**返回值**：
+
+| 返回值 | 类型   | 说明                     |
+|--------|--------|--------------------------|
+| path   | string | 应用 .app 包目录完整路径  |
+
+**示例**：
+
+```lua
+local path = app.bundlePath("com.touchelf.app")
+if path ~= "" then
+    log("触摸精灵路径: " .. path)
+else
+    log("应用未安装或路径未知")
+end
+```
+
+---
+
+🎯 **实用场景示例 — 循环检测状态并启动/关闭应用**
+
+```lua
+-- 场景：监控并控制应用状态
+function main()
+    log("===== 应用状态监控开始 =====")
+
+    -- 获取当前前台应用
+    local current = app.frontBid()
+    log("当前前台: " .. current)
+
+    -- 启动目标应用
+    local target = "com.example.game"
+    log("启动目标应用: " .. target)
+    app.run(target)
+    sleep(3000)
+
+    -- 确认是否启动成功
+    if not app.running(target) then
+        log("❌ 应用启动失败，重试...")
+        app.run(target)
+        sleep(3000)
+    end
+
+    if app.running(target) then
+        log("✅ 应用运行中，路径: " .. app.bundlePath(target))
+    else
+        log("❌ 应用仍未运行")
+    end
+
+    -- 执行完任务后关闭
+    log("任务完成，关闭应用")
+    app.kill(target)
+    sleep(1000)
+
+    if not app.running(target) then
+        log("✅ 应用已关闭")
+    end
+
+    log("===== 监控结束 =====")
+end
+
+main()
+```
+
+---
+
 ## 工具函数
 
 ### log(msg) — 输出日志
@@ -1120,6 +1369,16 @@ s2:up()
 | `touch.tap()` | `touch.tap(x, y, ms, id)` | 快捷点击 |
 | `touch.tapRandom()` | `touch.tapRandom(x, y, r, ms, id)` | 随机偏移点击 |
 | `touch.slide()` | `slide = touch.slide(id)` | 创建滑动对象 |
+
+### app 模块
+
+| 函数 | 语法 | 说明 |
+|------|------|------|
+| `app.frontBid()` | `bid = app.frontBid()` | 获取前台应用包名 |
+| `app.run()` | `ok = app.run(bid)` | 启动指定应用 |
+| `app.kill()` | `ok = app.kill(bid)` | 关闭指定应用 |
+| `app.running()` | `flag = app.running(bid)` | 检测应用是否运行 |
+| `app.bundlePath()` | `path = app.bundlePath(bid)` | 获取应用包目录路径 |
 
 ### 工具函数
 
