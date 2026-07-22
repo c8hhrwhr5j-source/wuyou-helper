@@ -29,6 +29,8 @@
     <true/>
 
     <!-- IOMFB 屏幕捕获（roothelper 作为独立进程必须自带） -->
+    <key>com.apple.private.screen-capture</key>
+    <true/>
     <key>com.apple.private.iomobileframebuffer.access</key>
     <true/>
     <key>com.apple.private.IOMobileFramebuffer.client</key>

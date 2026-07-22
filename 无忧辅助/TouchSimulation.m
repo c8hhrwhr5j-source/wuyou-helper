@@ -73,13 +73,17 @@ static void _axSetup(void) {
                 break;
             }
             _axSysWide = _axCopyAtPos = NULL; _axPerform = NULL;
-            dlclose(h);
         }
+        // 后备: RTLD_DEFAULT（可能已被链接）
+        if (!_axSysWide) _axSysWide = dlsym(RTLD_DEFAULT, "AXUIElementCreateSystemWide");
+        if (!_axCopyAtPos) _axCopyAtPos = dlsym(RTLD_DEFAULT, "AXUIElementCopyElementAtPosition");
+        if (!_axPerform) _axPerform = dlsym(RTLD_DEFAULT, "AXUIElementPerformAction");
         _axReady = (_axSysWide && _axCopyAtPos && _axPerform);
         if (_axReady) {
-            NSLog(@"[TS] ✅ AX API 就绪");
+            NSLog(@"[TS] ✅ AX API 就绪 (权限: com.apple.accessibility.api)");
         } else {
-            NSLog(@"[TS] ⚠️ AX API 不可用（所有路径均失败，将仅用 IOHID）");
+            NSLog(@"[TS] ⚠️ AX API 不可用 (sysWide=%p copyAt=%p perform=%p)",
+                  _axSysWide, _axCopyAtPos, _axPerform);
         }
     });
 }
@@ -98,30 +102,48 @@ static BOOL _axTapAt(CGFloat x, CGFloat y) {
     PerformFn  perfFn   = (PerformFn)_axPerform;
 
     AXUIElementRef sysWide = sysWideFn();
-    if (!sysWide) return NO;
+    if (!sysWide) { NSLog(@"[TS] AX: CreateSystemWide=NULL"); return NO; }
 
     CGPoint pt = CGPointMake(x, y);
     AXUIElementRef element = NULL;
     AXError err = copyAtFn(sysWide, (float)pt.x, (float)pt.y, &element);
-    CFRelease(sysWide);
 
     if (err != kAXErrorSuccess || !element) {
-        if (element) CFRelease(element);
+        NSLog(@"[TS] AX: CopyElementAtPosition(%.0f,%.0f) err=%d -> 尝试坐标后备", x, y, err);
+        // 策略 B: 没有元素时 → 对 SystemWide 自身执行坐标级操作
+        // 这对应"辅助触控"的坐标点击模式
+        CFRelease(sysWide);
         return NO;
     }
 
+    CFRelease(sysWide);
+
     err = perfFn(element, CFSTR("AXPress"));
     if (err == kAXErrorSuccess) {
-        NSLog(@"[TS] ⚡ AX press at (%.0f,%.0f) ✅", x, y);
-    } else {
-        err = perfFn(element, CFSTR("AXPick"));
-        if (err == kAXErrorSuccess) {
-            NSLog(@"[TS] ⚡ AX pick at (%.0f,%.0f) ✅", x, y);
-        }
+        NSLog(@"[TS] ⚡ AXPress at (%.0f,%.0f) ✅", x, y);
+        CFRelease(element);
+        return YES;
     }
 
+    // 尝试 AXPick（某些 App 的备选操作）
+    err = perfFn(element, CFSTR("AXPick"));
+    if (err == kAXErrorSuccess) {
+        NSLog(@"[TS] ⚡ AXPick at (%.0f,%.0f) ✅", x, y);
+        CFRelease(element);
+        return YES;
+    }
+
+    // 尝试直接触发"确认"动作
+    err = perfFn(element, CFSTR("AXConfirm"));
+    if (err == kAXErrorSuccess) {
+        NSLog(@"[TS] ⚡ AXConfirm at (%.0f,%.0f) ✅", x, y);
+        CFRelease(element);
+        return YES;
+    }
+
+    NSLog(@"[TS] AX: 所有动作失败 @(%.0f,%.0f) err=%d", x, y, err);
     CFRelease(element);
-    return (err == kAXErrorSuccess);
+    return NO;
 }
 
 // ============================================================

@@ -72,12 +72,14 @@
 	<key>com.apple.springboard.opensensitiveurl</key>
 	<true/>
 
-	<!-- ===== 屏幕捕获 / 取色 / 截图 / 图形 ===== -->
+	<!-- ===== 屏幕捕获 / 取色 / 截图 / 图形（全局截屏三件套） ===== -->
+	<key>com.apple.private.screen-capture</key>
+	<true/>
+	<key>com.apple.private.screencapture.capture-all-displays</key>
+	<true/>
 	<key>com.apple.private.iomobileframebuffer.access</key>
 	<true/>
 	<key>com.apple.private.IOMobileFramebuffer.client</key>
-	<true/>
-	<key>com.apple.private.screencapture.capture-all-displays</key>
 	<true/>
 	<key>com.apple.private.coremedia.allow-screen-capture</key>
 	<true/>
@@ -108,7 +110,9 @@
 	<key>com.apple.private.hid.input-logging</key>
 	<true/>
 
-	<!-- ===== 辅助功能 / Accessibility ===== -->
+	<!-- ===== 辅助功能 / Accessibility（跨应用点击通道） ===== -->
+	<key>com.apple.accessibility.api</key>
+	<true/>
 	<key>com.apple.private.accessibility.server</key>
 	<true/>
 	<key>com.apple.accessibility.AccessibilityEnchantments</key>
