@@ -83,9 +83,8 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 - (void)_connectImpl {
     if (_connected) return;
 
-    // 诊断：确认 dyld 已解析这两个弱链接符号
     if (!IOMobileFramebufferGetMainDisplay || !IOMobileFramebufferGetLayerDefaultSurface) {
-        _diagMessage = @"弱链接符号未解析 (dyld 未找到 IOMobileFramebuffer 函数)";
+        _diagMessage = @"弱链接符号未解析";
         NSLog(@"[ScreenCapture] %@", _diagMessage);
         [self _fallbackScreenSize];
         return;
@@ -99,27 +98,27 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
         return;
     }
 
-    ret = IOMobileFramebufferGetLayerDefaultSurface(_framebuffer, 0, &_surface);
-    if (ret != KERN_SUCCESS || !_surface) {
-        _diagMessage = [NSString stringWithFormat:@"GetLayerDefaultSurface 失败 (ret=0x%x)", ret];
-        NSLog(@"[ScreenCapture] %@", _diagMessage);
-        [self _fallbackScreenSize];
-        return;
+    // 尝试多个 layer：0=主屏, 1=外接/镜像, 2… 有些 iOS 版本前台切换后 layer 变化
+    for (int layer = 0; layer <= 2; layer++) {
+        ret = IOMobileFramebufferGetLayerDefaultSurface(_framebuffer, layer, &_surface);
+        if (ret == KERN_SUCCESS && _surface) {
+            _width  = (int)IOSurfaceGetWidth(_surface);
+            _height = (int)IOSurfaceGetHeight(_surface);
+            if (_width > 0 && _height > 0) {
+                _bytesPerRow = (int)IOSurfaceGetBytesPerRow(_surface);
+                _connected = YES;
+                _diagMessage = [NSString stringWithFormat:@"✅ 连接成功: %dx%d bpr=%d (layer %d)", _width, _height, _bytesPerRow, layer];
+                NSLog(@"[ScreenCapture] %@", _diagMessage);
+                return;
+            }
+            CFRelease(_surface);
+            _surface = NULL;
+        }
     }
 
-    _width  = (int)IOSurfaceGetWidth(_surface);
-    _height = (int)IOSurfaceGetHeight(_surface);
-    _bytesPerRow = (int)IOSurfaceGetBytesPerRow(_surface);
-
-    if (_width <= 0 || _height <= 0) {
-        _diagMessage = [NSString stringWithFormat:@"无效尺寸 %dx%d", _width, _height];
-        [self _fallbackScreenSize];
-        return;
-    }
-
-    _connected = YES;
-    _diagMessage = [NSString stringWithFormat:@"✅ 连接成功: %dx%d bpr=%d", _width, _height, _bytesPerRow];
+    _diagMessage = @"所有 layer 都无法获取有效 surface";
     NSLog(@"[ScreenCapture] %@", _diagMessage);
+    [self _fallbackScreenSize];
 }
 
 - (void)_fallbackScreenSize {
@@ -171,7 +170,10 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
         CFRelease(_surface);
         _surface = NULL;
     }
-    _framebuffer = NULL;
+    if (_framebuffer) {
+        CFRelease((CFTypeRef)_framebuffer);
+        _framebuffer = NULL;
+    }
     _connected = NO;
 }
 
@@ -182,39 +184,26 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
         return _cachedBuffer;
     }
 
-    if (!_connected || !_surface) {
-        // 尝试重连（切后台后 Framebuffer 可能失效）
+    // 每次取色都强制重连，确保拿到最新前台 App 的帧缓冲
+    static NSTimeInterval _lastReconnect = 0;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - _lastReconnect > 0.5 || !_connected) {  // 最多 500ms 重连一次
+        _lastReconnect = now;
         [self _reconnectIfNeeded];
-        if (!_connected || !_surface) return NULL;
     }
+    if (!_connected || !_surface) return NULL;
 
     kern_return_t ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
     if (ret != KERN_SUCCESS) {
-        NSLog(@"[ScreenCapture] IOSurfaceLock 失败: 0x%x，尝试重连", ret);
-        [self _reconnectIfNeeded];
-        if (!_connected || !_surface) return NULL;
-        ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
-        if (ret != KERN_SUCCESS) {
-            NSLog(@"[ScreenCapture] 重连后仍失败: 0x%x", ret);
-            return NULL;
-        }
+        NSLog(@"[ScreenCapture] IOSurfaceLock 失败: 0x%x", ret);
+        return NULL;
     }
 
     void *baseAddr = IOSurfaceGetBaseAddress(_surface);
     if (!baseAddr) {
         IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
-        // BaseAddress 为空说明 IOSurface 已失效（切后台导致），尝试重连
-        NSLog(@"[ScreenCapture] BaseAddress=NULL，Surface失效，尝试重连");
-        [self _reconnectIfNeeded];
-        if (!_connected || !_surface) return NULL;
-        ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
-        if (ret != KERN_SUCCESS) return NULL;
-        baseAddr = IOSurfaceGetBaseAddress(_surface);
-        if (!baseAddr) {
-            IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
-            NSLog(@"[ScreenCapture] 重连后 BaseAddress 仍为空");
-            return NULL;
-        }
+        NSLog(@"[ScreenCapture] BaseAddress=NULL");
+        return NULL;
     }
 
     size_t totalSize = (size_t)_height * _bytesPerRow;

@@ -54,22 +54,32 @@ static AXError (*_axPerform)(AXUIElementRef, CFStringRef) = NULL;
 static void _axSetup(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        // ApplicationServices 框架包含 HIServices（Accessibility API）
-        void *h = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_NOW);
-        if (!h) {
-            // iOS 上没有完整的 ApplicationServices，试试 Frameworks/HIServices
-            h = dlopen("/System/Library/Frameworks/HIServices.framework/HIServices", RTLD_NOW);
-        }
-        if (h) {
+        // iOS Accessibility API 在多个私有框架中，按顺序尝试
+        const char *paths[] = {
+            "/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities",
+            "/System/Library/PrivateFrameworks/Accessibility.framework/Accessibility",
+            "/System/Library/PrivateFrameworks/AXRuntime.framework/AXRuntime",
+            "/System/Library/PrivateFrameworks/AccessibilityUI.framework/AccessibilityUI",
+            NULL
+        };
+        for (int i = 0; paths[i]; i++) {
+            void *h = dlopen(paths[i], RTLD_NOW);
+            if (!h) continue;
             _axSysWide   = (AXUIElementRef (*)(void))dlsym(h, "AXUIElementCreateSystemWide");
             _axCopyAtPos = (AXError (*)(AXUIElementRef, float, float, AXUIElementRef*))dlsym(h, "AXUIElementCopyElementAtPosition");
             _axPerform   = (AXError (*)(AXUIElementRef, CFStringRef))dlsym(h, "AXUIElementPerformAction");
+            if (_axSysWide && _axCopyAtPos && _axPerform) {
+                NSLog(@"[TS] ✅ AX loaded from %s", paths[i]);
+                break;
+            }
+            _axSysWide = _axCopyAtPos = NULL; _axPerform = NULL;
+            dlclose(h);
         }
         _axReady = (_axSysWide && _axCopyAtPos && _axPerform);
         if (_axReady) {
-            NSLog(@"[TS] ✅ Accessibility API 就绪");
+            NSLog(@"[TS] ✅ AX API 就绪");
         } else {
-            NSLog(@"[TS] ⚠️ Accessibility API 不可用");
+            NSLog(@"[TS] ⚠️ AX API 不可用（所有路径均失败，将仅用 IOHID）");
         }
     });
 }
