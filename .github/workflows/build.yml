@@ -104,59 +104,66 @@ jobs:
           # 如果失败，输出错误摘要
           if [ $BUILD_EXIT -ne 0 ]; then
             echo ""
-            echo "====== LINKER ERRORS ======"
-            grep -i -E "(Undefined symbols|undefined symbol|duplicate symbol|linker command failed|clang: error: linker)" build.log | head -50
-            echo ""
-            echo "====== COMPILE ERRORS ======"
-            grep -i -E "(^.*: error:|^.*: fatal error:)" build.log | head -80
-            echo ""
-            echo "====== BUILD.LOG TAIL (150 lines) ======"
-            tail -150 build.log
+            echo "====== BUILD.LOG TAIL (300 lines) ======"
+            tail -300 build.log
             echo "========================================"
+            echo ""
+            echo "====== LINKER ERRORS ======"
+            grep -i -E "(Undefined symbols|undefined symbol|duplicate symbol|linker command failed|clang:.*error:.*linker)" build.log | head -50
+            echo ""
+            echo "====== COMPILE ERRORS (pattern 1: file:line:col: error) ======"
+            grep -E ":[0-9]+:[0-9]+:.*error:" build.log | head -80
+            echo ""
+            echo "====== COMPILE ERRORS (pattern 2: error: / fatal error:) ======"
+            grep -i -E "(error:|fatal error:)" build.log | grep -v -E "(LINKER|linker|BUILD|build command)" | head -80
+            echo ""
+            echo "====== FAILED FILES ======"
+            grep -oP '(?<=CompileC\s).*?/\K[^/]+\.(m|c|cpp|mm)(?=\s)' build.log 2>/dev/null | sort -u || true
+            # fallback: also try basic grep for filenames in failed commands
+            grep -E "CompileC.*\.(m|c|cpp|mm)\s" build.log | head -20
+            echo ""
 
-            # 诊断性编译：仅对有编译错误的 .m 文件运行
-            HAS_COMPILE_ERR=0
+            # 诊断性编译：对关键 .m 文件尝试单独编译
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-            for PATTERN in "TouchSimulation" "ScriptEngine" "ScreenCapture" "LuaBridge"; do
-              if grep -q "${PATTERN}.o.*failed" build.log 2>/dev/null; then
-                HAS_COMPILE_ERR=1
-                FAILED_FILE="无忧辅助/${PATTERN}.m"
-                if [ ! -f "$FAILED_FILE" ]; then
-                  FAILED_FILE="${PATTERN}.m"
-                fi
-                LUA_INC=""
-                case "$PATTERN" in
-                  ScriptEngine|LuaBridge) LUA_INC="-I./lua-build/include" ;;
-                esac
-                echo ""
-                echo "====== DIAGNOSTIC: $FAILED_FILE ======"
-                clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                  -fobjc-arc -fmodules ${LUA_INC} -ferror-limit=0 \
-                  -D LUA_USE_IOS=1 \
-                  -I./无忧辅助 \
-                  -framework Foundation -framework UIKit -framework CoreGraphics \
-                  -framework CoreFoundation -framework IOKit -framework IOSurface \
-                  -framework ImageIO -framework MobileCoreServices \
-                  -c "$FAILED_FILE" -o /dev/null 2>&1 || true
-                echo "======================================"
-              fi
+            for FAILED_FILE in "无忧辅助/TouchSimulation.m" "无忧辅助/ScriptEngine.m" "无忧辅助/ScreenCapture.m" "无忧辅助/LuaBridge.m"; do
+              if [ ! -f "$FAILED_FILE" ]; then continue; fi
+              _PATTERN=$(basename "$FAILED_FILE" .m)
+              LUA_INC=""
+              case "$_PATTERN" in
+                ScriptEngine|LuaBridge) LUA_INC="-I./lua-build/include" ;;
+              esac
+              echo ""
+              echo "====== DIAGNOSTIC: $FAILED_FILE ======"
+              clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
+                -fobjc-arc ${LUA_INC} -ferror-limit=0 -w \
+                -D LUA_USE_IOS=1 \
+                -I./无忧辅助 \
+                -framework Foundation -framework UIKit -framework CoreGraphics \
+                -framework CoreFoundation -framework IOKit -framework IOSurface \
+                -framework ImageIO -framework MobileCoreServices \
+                -c "$FAILED_FILE" -o /dev/null 2>&1
+              echo "EXIT_CODE=$?"
+              echo ""
+              # If -w succeeded, try without -w to see warnings
+              echo "------ Without -w (show warnings) ------"
+              clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
+                -fobjc-arc ${LUA_INC} -ferror-limit=0 \
+                -D LUA_USE_IOS=1 \
+                -I./无忧辅助 \
+                -framework Foundation -framework UIKit -framework CoreGraphics \
+                -framework CoreFoundation -framework IOKit -framework IOSurface \
+                -framework ImageIO -framework MobileCoreServices \
+                -c "$FAILED_FILE" -o /dev/null 2>&1
+              echo "EXIT_CODE=$?"
+              echo "======================================"
             done
 
-            # 如果是纯链接错误（无编译错误），检查关键链接资源
-            if [ $HAS_COMPILE_ERR -eq 0 ]; then
-              echo ""
-              echo "====== LINK DIAGNOSIS ======"
-              echo "lua lib: $(ls -la lua-build/lib/liblua.a 2>/dev/null || echo 'MISSING!')"
-              echo "kfd.o:   $(find ./DerivedData -name 'kfd.o' -type f 2>/dev/null | head -1 || echo 'MISSING!')"
-              echo "offsets.o: $(find ./DerivedData -name 'offsets.o' -type f 2>/dev/null | head -1 || echo 'MISSING!')"
-              echo ""
-              # 也检查 C 文件是否有编译错误（kfd.c 用的 ObjC extern 可能会导致问题）
-              echo "--- C file compile check ---"
-              clang -x c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                -I./roothelper -c roothelper/kfd.c -o /dev/null 2>&1 | head -20 || true
-              clang -x c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                -I./roothelper -c roothelper/offsets.c -o /dev/null 2>&1 | head -20 || true
-            fi
+            # 链接资源检查
+            echo ""
+            echo "====== LINK RESOURCES ======"
+            echo "lua lib: $(ls -la lua-build/lib/liblua.a 2>/dev/null || echo 'MISSING!')"
+            echo "roothelper objects:"
+            find ./DerivedData -name '*.o' -path '*roothelper*' -type f 2>/dev/null | head -10 || echo "(none)"
 
             exit 1
           fi
