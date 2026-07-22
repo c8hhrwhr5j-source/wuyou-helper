@@ -337,21 +337,25 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 }
 
 // 将旋转后的坐标转换为原图坐标
+// 原图 _width x _height，rotate后逻辑尺寸 = rotatedW x rotatedH
+// -90°(270): 逻辑 (rx,ry) → 原图 (ry, _height - rx)
+//  90°     : 逻辑 (rx,ry) → 原图 (_width - ry, rx)
+// 180°     : 逻辑 (rx,ry) → 原图 (_width - rx, _height - ry)
 - (void)_transformX:(int *)x y:(int *)y {
     if (_rotation == 0) return;
-    int ox = *x, oy = *y;
+    int rx = *x, ry = *y;
     switch (_rotation) {
         case 90:
-            *x = oy;
-            *y = _width - ox;
+            *x = _width - ry;
+            *y = rx;
             break;
         case 180:
-            *x = _width - ox;
-            *y = _height - oy;
+            *x = _width - rx;
+            *y = _height - ry;
             break;
         case 270:
-            *x = _height - oy;
-            *y = ox;
+            *x = ry;
+            *y = _height - rx;
             break;
     }
 }
