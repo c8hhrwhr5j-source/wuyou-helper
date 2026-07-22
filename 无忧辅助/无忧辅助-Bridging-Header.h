@@ -7,4 +7,5 @@
 #import "DeviceInfo.h"
 #import "ScreenCapture.h"
 #import "TouchSimulation.h"
+#import "AppManager.h"
 #import "AppDelegate.h"

@@ -6,6 +6,7 @@
 #import "LuaBridge.h"
 #import "ScreenCapture.h"
 #import "TouchSimulation.h"
+#import "AppManager.h"
 #import <UIKit/UIKit.h>
 #import <string.h>
 #import <stdlib.h>
@@ -436,7 +437,58 @@ static int l_touch_slide_up(lua_State *L) {
     return 1;
 }
 
+// MARK: - 应用模块 app.*
+
+// --- app.frontBid() → bundleId ---
+static int l_app_frontBid(lua_State *L) {
+    NSString *bid = [[AppManager sharedInstance] frontBid];
+    lua_pushstring(L, bid ? [bid UTF8String] : "");
+    return 1;
+}
+
+// --- app.run(bundleId) ---
+static int l_app_run(lua_State *L) {
+    const char *bid = luaL_checkstring(L, 1);
+    BOOL ok = [[AppManager sharedInstance] runApp:[NSString stringWithUTF8String:bid]];
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+// --- app.kill(bundleId) ---
+static int l_app_kill(lua_State *L) {
+    const char *bid = luaL_checkstring(L, 1);
+    BOOL ok = [[AppManager sharedInstance] killApp:[NSString stringWithUTF8String:bid]];
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+// --- app.running(bundleId) → bool ---
+static int l_app_running(lua_State *L) {
+    const char *bid = luaL_checkstring(L, 1);
+    BOOL running = [[AppManager sharedInstance] isAppRunning:[NSString stringWithUTF8String:bid]];
+    lua_pushboolean(L, running);
+    return 1;
+}
+
+// --- app.bundlePath(bundleId) → path ---
+static int l_app_bundlePath(lua_State *L) {
+    const char *bid = luaL_checkstring(L, 1);
+    NSString *path = [[AppManager sharedInstance] bundlePath:[NSString stringWithUTF8String:bid]];
+    lua_pushstring(L, path ? [path UTF8String] : "");
+    return 1;
+}
+
 // MARK: - 注册表
+
+// app 模块函数表
+static const luaL_Reg g_appLib[] = {
+    {"frontBid",    l_app_frontBid},
+    {"run",         l_app_run},
+    {"kill",        l_app_kill},
+    {"running",     l_app_running},
+    {"bundlePath",  l_app_bundlePath},
+    {NULL, NULL},
+};
 
 // screen 模块函数表
 static const luaL_Reg g_screenLib[] = {
@@ -495,6 +547,10 @@ void lua_register_bridge_functions(lua_State *L) {
     // 注册 touch 模块表
     luaL_newlib(L, g_touchLib);
     lua_setglobal(L, "touch");
+
+    // 注册 app 模块表
+    luaL_newlib(L, g_appLib);
+    lua_setglobal(L, "app");
 
     // 注册 stop_script 全局函数
     lua_register(L, "stop_script", l_stopScript_cfunc);
