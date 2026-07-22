@@ -209,18 +209,26 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
     if (status == LUA_OK) {
         [self _log:@"[ScriptEngine] 开始执行 main()"];
         status = lua_pcall(_luaState, 0, 0, 0);
-        [self _log:@"[ScriptEngine] main() 已返回"];
+        // 只有非手动停止时才打印"已返回"
+        if (!_global_script_stop_flag) {
+            [self _log:@"[ScriptEngine] main() 已返回"];
+        }
     }
 
     if (status != LUA_OK) {
-        const char *err = lua_tostring(_luaState, -1);
-        NSString *errMsg = err ? [NSString stringWithUTF8String:err] : @"未知错误";
-        NSString *phase = (status == LUA_ERRSYNTAX) ? @"语法错误" :
-                          (status == LUA_ERRMEM) ? @"内存不足" :
-                          (status == LUA_ERRRUN) ? @"运行时错误" :
-                          (status == LUA_ERRERR) ? @"错误处理错误" : @"未知错误";
-        [self _log:[NSString stringWithFormat:@"脚本错误 [%@]: %@", phase, errMsg]];
-        lua_pop(_luaState, 1);
+        // 手动停止导致的 luaL_error 不当作错误
+        if (_global_script_stop_flag) {
+            lua_pop(_luaState, 1);
+        } else {
+            const char *err = lua_tostring(_luaState, -1);
+            NSString *errMsg = err ? [NSString stringWithUTF8String:err] : @"未知错误";
+            NSString *phase = (status == LUA_ERRSYNTAX) ? @"语法错误" :
+                              (status == LUA_ERRMEM) ? @"内存不足" :
+                              (status == LUA_ERRRUN) ? @"运行时错误" :
+                              (status == LUA_ERRERR) ? @"错误处理错误" : @"未知错误";
+            [self _log:[NSString stringWithFormat:@"脚本错误 [%@]: %@", phase, errMsg]];
+            lua_pop(_luaState, 1);
+        }
     }
 
     // 清理

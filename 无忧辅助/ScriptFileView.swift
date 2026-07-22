@@ -199,7 +199,7 @@ struct ScriptFileView: View {
                 case .paused:
                     Log.shared.add("⏸ 脚本已暂停")
                 case .stopping:
-                    Log.shared.add("⏹ 脚本正在停止...")
+                    break // 手动停止是正常操作，不输出日志
                 case .error:
                     Log.shared.add("❌ 脚本执行出错")
                 @unknown default:
