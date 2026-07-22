@@ -62,6 +62,7 @@ static void (*_rf)(void*);
 // ============ TouchSimulation ============
 @implementation TouchSimulation {
     CGFloat _lx, _ly;
+    id _pendingTouch; // 缓存 DOWN 时的 UITouch，UP 时复用
 }
 
 + (instancetype)sharedInstance {
@@ -149,19 +150,22 @@ static UIControl *_findControl(UIView *start) {
 }
 
 // ---- 构造 UITouch 并触发视图链上的手势识别器 ----
-static void _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase) {
+// touch 传入 nil 时内部创建新对象；传入已有对象时只更新 phase/timestamp 后复用
+static id _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase, id existingTouch) {
     Class UITouchClass = NSClassFromString(@"UITouch");
     Class UIEventClass = NSClassFromString(@"UIEvent");
-    if (!UITouchClass || !UIEventClass) return;
+    if (!UITouchClass || !UIEventClass) return nil;
 
-    id touch = [[UITouchClass alloc] init];
-    if (!touch) return;
+    id touch = existingTouch;
+    if (!touch) {
+        touch = [[UITouchClass alloc] init];
+        if (!touch) return nil;
+    }
     id event = [[UIEventClass alloc] init];
-    if (!event) return;
+    if (!event) return nil;
 
     NSTimeInterval ts = [[NSProcessInfo processInfo] systemUptime];
 
-    // --- 设置 UITouch ---
     SEL selTS = NSSelectorFromString(@"setTimestamp:");
     SEL selPh = NSSelectorFromString(@"setPhase:");
     SEL selLoc = NSSelectorFromString(@"_setLocationInWindow:resetPrevious:");
@@ -178,27 +182,32 @@ static void _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase)
     };
 
     UIWindow *win = hit.window;
-    BOOL yes = YES;
+    BOOL yes = YES, no = NO;
     NSInteger p = (NSInteger)phase;
 
     invoke(touch, selTS, &ts, "d");
-    invoke(touch, selWin, &win, "@");
-    invoke(touch, selView, &hit, "@");
-    // _setLocationInWindow:resetPrevious: — two args: CGPoint, BOOL
-    {
-        NSMethodSignature *s2 = [touch methodSignatureForSelector:selLoc];
-        if (s2) {
-            NSInvocation *i2 = [NSInvocation invocationWithMethodSignature:s2];
-            [i2 setTarget:touch]; [i2 setSelector:selLoc];
-            [i2 setArgument:&pt atIndex:2];
-            [i2 setArgument:&yes atIndex:3];
-            [i2 invoke];
-        }
-    }
-    invoke(touch, selTap, &yes, "B");
     invoke(touch, selPh, &p, "q");
+    // 只在 beged 时设 window/view，end 时保持原值
+    if (phase == UITouchPhaseBegan) {
+        invoke(touch, selWin, &win, "@");
+        invoke(touch, selView, &hit, "@");
+        invoke(touch, selTap, &no, "B");
+        // _setLocationInWindow:resetPrevious:
+        {
+            NSMethodSignature *s2 = [touch methodSignatureForSelector:selLoc];
+            if (s2) {
+                NSInvocation *i2 = [NSInvocation invocationWithMethodSignature:s2];
+                [i2 setTarget:touch]; [i2 setSelector:selLoc];
+                [i2 setArgument:&pt atIndex:2];
+                [i2 setArgument:&yes atIndex:3];
+                [i2 invoke];
+            }
+        }
+    } else {
+        invoke(touch, selTap, &yes, "B");
+    }
 
-    // --- 设置 UIEvent ---
+    // --- 始终创建新的 UIEvent ---
     invoke(event, selTS, &ts, "d");
 
     // --- 沿视图链向上查找 GestureRecognizer 并触发 ---
@@ -216,11 +225,10 @@ static void _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase)
                 [gr touchesMoved:touches withEvent:event];
             fired = YES;
         }
-        if (fired) break; // 找最近的有 GR 的视图
+        if (fired) break;
         v = v.superview;
     }
 
-    // 如果整条链都没有 GR，退回到叶子视图的直接 touch
     if (!fired) {
         if (phase == UITouchPhaseBegan)
             [hit touchesBegan:touches withEvent:event];
@@ -229,6 +237,8 @@ static void _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase)
         else if (phase == UITouchPhaseMoved)
             [hit touchesMoved:touches withEvent:event];
     }
+
+    return touch; // 返回 touch 对象供 UP 阶段复用
 }
 
 // ---- 核心发送 ----
@@ -257,10 +267,11 @@ static void _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase)
         return;
     }
     // 非 UIControl：触发视图链上的手势识别器
-    if (ph == 0)
-        _fireGestureRecognizers(hit, p, UITouchPhaseBegan);
-    else if (ph == 2) {
-        _fireGestureRecognizers(hit, p, UITouchPhaseEnded);
+    if (ph == 0) {
+        _pendingTouch = _fireGestureRecognizers(hit, p, UITouchPhaseBegan, nil);
+    } else if (ph == 2) {
+        _fireGestureRecognizers(hit, p, UITouchPhaseEnded, _pendingTouch);
+        _pendingTouch = nil;
         [self _log:[NSString stringWithFormat:@"[TS] ✅ GR fired for %@ at %.0f,%.0f", hit, x, y]];
     }
 }
