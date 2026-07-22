@@ -104,66 +104,41 @@ jobs:
           # 如果失败，输出错误摘要
           if [ $BUILD_EXIT -ne 0 ]; then
             echo ""
-            echo "====== BUILD.LOG TAIL (300 lines) ======"
-            tail -300 build.log
-            echo "========================================"
+            # === 最优先：输出完整 build.log（GitHub 可能会截断，用 wc 辅助） ===
+            echo "====== FULL BUILD.LOG (lines=$(wc -l < build.log 2>/dev/null || echo 0)) ======"
+            cat build.log
             echo ""
-            echo "====== LINKER ERRORS ======"
-            grep -i -E "(Undefined symbols|undefined symbol|duplicate symbol|linker command failed|clang:.*error:.*linker)" build.log | head -50
+            echo "====== END BUILD.LOG ======"
             echo ""
-            echo "====== COMPILE ERRORS (pattern 1: file:line:col: error) ======"
-            grep -E ":[0-9]+:[0-9]+:.*error:" build.log | head -80
+            echo "====== ERROR LINES (grep error:) ======"
+            grep -i "error:" build.log | head -100
             echo ""
-            echo "====== COMPILE ERRORS (pattern 2: error: / fatal error:) ======"
-            grep -i -E "(error:|fatal error:)" build.log | grep -v -E "(LINKER|linker|BUILD|build command)" | head -80
-            echo ""
-            echo "====== FAILED FILES ======"
-            grep -oP '(?<=CompileC\s).*?/\K[^/]+\.(m|c|cpp|mm)(?=\s)' build.log 2>/dev/null | sort -u || true
-            # fallback: also try basic grep for filenames in failed commands
-            grep -E "CompileC.*\.(m|c|cpp|mm)\s" build.log | head -20
+            echo "====== ERROR LINES (grep fatal) ======"
+            grep -i "fatal" build.log | head -50
             echo ""
 
-            # 诊断性编译：对关键 .m 文件尝试单独编译
+            # 诊断性编译：对每个 .m 文件单独编译，带 -w 和不带
             SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-            for FAILED_FILE in "无忧辅助/TouchSimulation.m" "无忧辅助/ScriptEngine.m" "无忧辅助/ScreenCapture.m" "无忧辅助/LuaBridge.m"; do
-              if [ ! -f "$FAILED_FILE" ]; then continue; fi
-              _PATTERN=$(basename "$FAILED_FILE" .m)
-              LUA_INC=""
-              case "$_PATTERN" in
-                ScriptEngine|LuaBridge) LUA_INC="-I./lua-build/include" ;;
-              esac
+            for SRC in "无忧辅助/TouchSimulation.m"; do
+              if [ ! -f "$SRC" ]; then echo "SKIP $SRC (not found)"; continue; fi
               echo ""
-              echo "====== DIAGNOSTIC: $FAILED_FILE ======"
+              echo "====== DIAG: $SRC (with -w) ======"
               clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                -fobjc-arc ${LUA_INC} -ferror-limit=0 -w \
-                -D LUA_USE_IOS=1 \
+                -fobjc-arc -w -ferror-limit=0 \
                 -I./无忧辅助 \
                 -framework Foundation -framework UIKit -framework CoreGraphics \
                 -framework CoreFoundation -framework IOKit -framework IOSurface \
-                -framework ImageIO -framework MobileCoreServices \
-                -c "$FAILED_FILE" -o /dev/null 2>&1
-              echo "EXIT_CODE=$?"
-              echo ""
-              # If -w succeeded, try without -w to see warnings
-              echo "------ Without -w (show warnings) ------"
+                -c "$SRC" -o /dev/null 2>&1
+              echo "EXIT=$?"
+              echo "====== DIAG: $SRC (no -w) ======"
               clang -x objective-c -arch arm64 -isysroot "$SDK" -mios-version-min=14.0 \
-                -fobjc-arc ${LUA_INC} -ferror-limit=0 \
-                -D LUA_USE_IOS=1 \
+                -fobjc-arc -ferror-limit=0 \
                 -I./无忧辅助 \
                 -framework Foundation -framework UIKit -framework CoreGraphics \
                 -framework CoreFoundation -framework IOKit -framework IOSurface \
-                -framework ImageIO -framework MobileCoreServices \
-                -c "$FAILED_FILE" -o /dev/null 2>&1
-              echo "EXIT_CODE=$?"
-              echo "======================================"
+                -c "$SRC" -o /dev/null 2>&1
+              echo "EXIT=$?"
             done
-
-            # 链接资源检查
-            echo ""
-            echo "====== LINK RESOURCES ======"
-            echo "lua lib: $(ls -la lua-build/lib/liblua.a 2>/dev/null || echo 'MISSING!')"
-            echo "roothelper objects:"
-            find ./DerivedData -name '*.o' -path '*roothelper*' -type f 2>/dev/null | head -10 || echo "(none)"
 
             exit 1
           fi
