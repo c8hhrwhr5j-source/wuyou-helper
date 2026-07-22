@@ -148,91 +148,86 @@ static UIControl *_findControl(UIView *start) {
     return nil;
 }
 
-// ---- 通过 touchesBegan/Ended 模拟触摸（非 UIControl 回退） ----
-static void _simulateTouch(UIView *view, CGPoint locationInWindow, UITouchPhase phase) {
-    // 尝试用私有 API 创建 UITouch
+// ---- 构造 UITouch 并触发视图链上的手势识别器 ----
+static void _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase) {
     Class UITouchClass = NSClassFromString(@"UITouch");
-    if (!UITouchClass) return;
+    Class UIEventClass = NSClassFromString(@"UIEvent");
+    if (!UITouchClass || !UIEventClass) return;
+
     id touch = [[UITouchClass alloc] init];
     if (!touch) return;
-
-    // _setIsTap: / setPhase: / setTimestamp: / _setLocationInWindow:resetPrevious:
-    SEL setPhase = NSSelectorFromString(@"setPhase:");
-    SEL setTimestamp = NSSelectorFromString(@"setTimestamp:");
-    SEL setLocation = NSSelectorFromString(@"_setLocationInWindow:resetPrevious:");
-    SEL setWindow = NSSelectorFromString(@"setWindow:");
-    SEL setView = NSSelectorFromString(@"setView:");
-    SEL setIsTap = NSSelectorFromString(@"_setIsTap:");
+    id event = [[UIEventClass alloc] init];
+    if (!event) return;
 
     NSTimeInterval ts = [[NSProcessInfo processInfo] systemUptime];
-    if ([touch respondsToSelector:setTimestamp]) {
-        // Use NSInvocation for double arg
-        NSMethodSignature *sig = [touch methodSignatureForSelector:setTimestamp];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:touch];
-        [inv setSelector:setTimestamp];
-        [inv setArgument:&ts atIndex:2];
-        [inv invoke];
-    }
-    if ([touch respondsToSelector:setWindow]) {
-        id win = view.window;
-        NSMethodSignature *s = [touch methodSignatureForSelector:setWindow];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
-        [inv setTarget:touch]; [inv setSelector:setWindow];
-        [inv setArgument:&win atIndex:2]; [inv invoke];
-    }
-    if ([touch respondsToSelector:setView]) {
-        NSMethodSignature *s = [touch methodSignatureForSelector:setView];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
-        [inv setTarget:touch]; [inv setSelector:setView];
-        [inv setArgument:&view atIndex:2]; [inv invoke];
-    }
-    if ([touch respondsToSelector:setLocation]) {
-        BOOL reset = YES;
-        NSMethodSignature *s = [touch methodSignatureForSelector:setLocation];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
-        [inv setTarget:touch]; [inv setSelector:setLocation];
-        [inv setArgument:&locationInWindow atIndex:2];
-        [inv setArgument:&reset atIndex:3]; [inv invoke];
-    }
-    if ([touch respondsToSelector:setIsTap]) {
-        BOOL isTap = (phase == UITouchPhaseEnded);
-        NSMethodSignature *s = [touch methodSignatureForSelector:setIsTap];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
-        [inv setTarget:touch]; [inv setSelector:setIsTap];
-        [inv setArgument:&isTap atIndex:2]; [inv invoke];
-    }
-    if ([touch respondsToSelector:setPhase]) {
-        NSInteger p = (NSInteger)phase;
-        NSMethodSignature *sig = [touch methodSignatureForSelector:setPhase];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:touch];
-        [inv setSelector:setPhase];
-        [inv setArgument:&p atIndex:2];
-        [inv invoke];
-    }
 
-    // 创建 UIEvent (尽量空事件即可)
-    Class UIEventClass = NSClassFromString(@"UIEvent");
-    id event = UIEventClass ? [[UIEventClass alloc] init] : nil;
-    if ([event respondsToSelector:setTimestamp]) {
-        NSMethodSignature *sig = [event methodSignatureForSelector:setTimestamp];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:event];
-        [inv setSelector:setTimestamp];
-        [inv setArgument:&ts atIndex:2];
-        [inv invoke];
-    }
+    // --- 设置 UITouch ---
+    SEL selTS = NSSelectorFromString(@"setTimestamp:");
+    SEL selPh = NSSelectorFromString(@"setPhase:");
+    SEL selLoc = NSSelectorFromString(@"_setLocationInWindow:resetPrevious:");
+    SEL selWin = NSSelectorFromString(@"setWindow:");
+    SEL selView = NSSelectorFromString(@"setView:");
+    SEL selTap = NSSelectorFromString(@"_setIsTap:");
 
+    void (^invoke)(id, SEL, void*, const char*) = ^(id obj, SEL sel, void *arg, const char *type) {
+        NSMethodSignature *s = [obj methodSignatureForSelector:sel];
+        if (!s) return;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
+        [inv setTarget:obj]; [inv setSelector:sel];
+        [inv setArgument:arg atIndex:2]; [inv invoke];
+    };
+
+    UIWindow *win = hit.window;
+    BOOL yes = YES;
+    NSInteger p = (NSInteger)phase;
+
+    invoke(touch, selTS, &ts, "d");
+    invoke(touch, selWin, &win, "@");
+    invoke(touch, selView, &hit, "@");
+    // _setLocationInWindow:resetPrevious: — two args: CGPoint, BOOL
+    {
+        NSMethodSignature *s2 = [touch methodSignatureForSelector:selLoc];
+        if (s2) {
+            NSInvocation *i2 = [NSInvocation invocationWithMethodSignature:s2];
+            [i2 setTarget:touch]; [i2 setSelector:selLoc];
+            [i2 setArgument:&pt atIndex:2];
+            [i2 setArgument:&yes atIndex:3];
+            [i2 invoke];
+        }
+    }
+    invoke(touch, selTap, &yes, "B");
+    invoke(touch, selPh, &p, "q");
+
+    // --- 设置 UIEvent ---
+    invoke(event, selTS, &ts, "d");
+
+    // --- 沿视图链向上查找 GestureRecognizer 并触发 ---
     NSSet *touches = [NSSet setWithObject:touch];
-    if (phase == UITouchPhaseBegan) {
-        [view touchesBegan:touches withEvent:event];
-    } else if (phase == UITouchPhaseMoved) {
-        [view touchesMoved:touches withEvent:event];
-    } else if (phase == UITouchPhaseEnded) {
-        [view touchesEnded:touches withEvent:event];
-    } else if (phase == UITouchPhaseCancelled) {
-        [view touchesCancelled:touches withEvent:event];
+    UIView *v = hit;
+    BOOL fired = NO;
+    while (v && v != win) {
+        for (id gr in v.gestureRecognizers) {
+            if (![gr respondsToSelector:@selector(touchesBegan:withEvent:)]) continue;
+            if (phase == UITouchPhaseBegan)
+                [gr touchesBegan:touches withEvent:event];
+            else if (phase == UITouchPhaseEnded)
+                [gr touchesEnded:touches withEvent:event];
+            else if (phase == UITouchPhaseMoved)
+                [gr touchesMoved:touches withEvent:event];
+            fired = YES;
+        }
+        if (fired) break; // 找最近的有 GR 的视图
+        v = v.superview;
+    }
+
+    // 如果整条链都没有 GR，退回到叶子视图的直接 touch
+    if (!fired) {
+        if (phase == UITouchPhaseBegan)
+            [hit touchesBegan:touches withEvent:event];
+        else if (phase == UITouchPhaseEnded)
+            [hit touchesEnded:touches withEvent:event];
+        else if (phase == UITouchPhaseMoved)
+            [hit touchesMoved:touches withEvent:event];
     }
 }
 
@@ -261,12 +256,12 @@ static void _simulateTouch(UIView *view, CGPoint locationInWindow, UITouchPhase 
         }
         return;
     }
-    // 非 UIControl：使用 touchesBegan/Ended 模拟
+    // 非 UIControl：触发视图链上的手势识别器
     if (ph == 0)
-        _simulateTouch(hit, p, UITouchPhaseBegan);
+        _fireGestureRecognizers(hit, p, UITouchPhaseBegan);
     else if (ph == 2) {
-        _simulateTouch(hit, p, UITouchPhaseEnded);
-        [self _log:[NSString stringWithFormat:@"[TS] ✅ touched %@ at %.0f,%.0f", hit, x, y]];
+        _fireGestureRecognizers(hit, p, UITouchPhaseEnded);
+        [self _log:[NSString stringWithFormat:@"[TS] ✅ GR fired for %@ at %.0f,%.0f", hit, x, y]];
     }
 }
 
