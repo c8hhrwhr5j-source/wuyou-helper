@@ -8,6 +8,10 @@
 #import "ScreenCapture.h"
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
+#import <stdlib.h>
+#import <unistd.h>
+#import <spawn.h>
+#import <sys/wait.h>
 
 // ---- roothelper 通信 ----
 static BOOL _spawnRootHelper(NSString *cmd, NSString *arg, char *outBuf, size_t outSize) {
@@ -129,11 +133,9 @@ static unsigned char *_rootCaptureBuffer(size_t *outTotalSize) {
 // 公开接口
 // ============================================================
 @implementation ScreenCapture {
-    int _rw, _rh, _rbpr;   // root 模式下的分辨率
+    int _rw, _rh, _rbpr;
     int _rot;
-    BOOL _rootMode;          // 使用 roothelper 模式
-    unsigned char *_cbuf;
-    size_t _csz;
+    BOOL _rootMode;
     BOOL _keep;
 }
 
@@ -221,7 +223,7 @@ static unsigned char *_rootCaptureBuffer(size_t *outTotalSize) {
 - (void)_tx:(int*)x y:(int*)y{if(!_rot)return;int rx=*x,ry=*y,w1=_rw-1,h1=_rh-1;switch(_rot){case 90:*x=w1-ry;*y=rx;break;case 180:*x=w1-rx;*y=h1-ry;break;case 270:*x=ry;*y=h1-rx;break;}}
 - (void)_itx:(int*)x y:(int*)y{if(!_rot)return;int ox=*x,oy=*y,w1=_rw-1,h1=_rh-1;switch(_rot){case 90:*x=oy;*y=w1-ox;break;case 180:*x=w1-ox;*y=h1-oy;break;case 270:*x=h1-oy;*y=ox;break;}}
 - (void)keepScreen{if(!_keep){[self colorAtX:0 y:0];_keep=YES;}}
-- (void)releaseScreen{_keep=NO;free(_cbuf);_cbuf=NULL;_csz=0;}
+- (void)releaseScreen{_keep=NO;}
 - (BOOL)snapshotToPath:(NSString*)p{return NO;}
 - (BOOL)snapshotToPath:(NSString*)p x:(int)x y:(int)y w:(int)w h:(int)h{return NO;}
 @end
