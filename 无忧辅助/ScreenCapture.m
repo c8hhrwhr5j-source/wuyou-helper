@@ -23,7 +23,7 @@ static void _fbload(void){static dispatch_once_t o;dispatch_once(&o,^{
 });}
 
 // ---- roothelper 通信 ----
-static BOOL _rh(NSString *cmd, NSString *arg, char *out, size_t sz){
+static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     NSString *hp=[[NSBundle mainBundle]pathForResource:@"roothelper" ofType:nil];
     if(!hp)hp=[[[NSBundle mainBundle]bundlePath]stringByAppendingPathComponent:@"roothelper"];
     if(![[NSFileManager defaultManager]fileExistsAtPath:hp])return NO;
@@ -56,7 +56,7 @@ static BOOL _rh(NSString *cmd, NSString *arg, char *out, size_t sz){
         if(!_fbOK){_fb=NULL;}
     }
     // roothelper 尺寸
-    char b[128]={0};if(_rh(@"size",@"",b,sizeof(b))){
+    char b[128]={0};if(_rhCall(@"size",@"",b,sizeof(b))){
         sscanf(b,"SIZE %d %d %d",&_rw,&_rh,&_rbpr);
         if(_rw>0&&_rh>0)_rhOK=YES;
     }
@@ -91,7 +91,7 @@ static BOOL _rh(NSString *cmd, NSString *arg, char *out, size_t sz){
     // 2. roothelper
     if(_rhOK&&x>=0&&x<_rw&&y>=0&&y<_rh){
         char buf[128]={0};NSString*coord=[NSString stringWithFormat:@"%d,%d",x,y];
-        if(_rh(@"pixel",coord,buf,sizeof(buf))){int rr=0,gg=0,bb=0;
+        if(_rhCall(@"pixel",coord,buf,sizeof(buf))){int rr=0,gg=0,bb=0;
             if(sscanf(buf,"OK %d %d %d",&rr,&gg,&bb)==3){c.r=(unsigned char)rr;c.g=(unsigned char)gg;c.b=(unsigned char)bb;}
         }
         if(c.r||c.g||c.b)return c;
@@ -123,7 +123,7 @@ static BOOL _rh(NSString *cmd, NSString *arg, char *out, size_t sz){
         NSString *tf=[NSTemporaryDirectory() stringByAppendingPathComponent:@"sc_cap.dat"];
         [[NSFileManager defaultManager]removeItemAtPath:tf error:nil];
         char db[256]={0};
-        if(_rh(@"capture",tf,db,sizeof(db))){
+        if(_rhCall(@"capture",tf,db,sizeof(db))){
             NSData *d=[NSData dataWithContentsOfFile:tf];
             [[NSFileManager defaultManager]removeItemAtPath:tf error:nil];
             size_t total=(size_t)_rh*_rbpr;
