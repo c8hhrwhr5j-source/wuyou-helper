@@ -187,6 +187,9 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
     _global_script_stop_flag = 0;
     _globalPaused  = NO;
 
+    // 每次脚本启动时重置屏幕旋转状态，避免上次横屏干扰竖屏取色
+    [[ScreenCapture sharedInstance] resetRotation];
+
     // 创建 Lua VM
     _luaState = luaL_newstate();
     if (!_luaState) {
