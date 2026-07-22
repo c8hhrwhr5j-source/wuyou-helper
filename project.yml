@@ -107,9 +107,7 @@ targets:
           
           echo "=== Linking roothelper (standalone executable) ==="
           clang ${CFLAGS} kfd.o offsets.o main.o -o roothelper \
-            -framework IOKit -framework CoreFoundation -framework IOSurface \
-            -Wl,-U,_IOMobileFramebufferGetMainDisplay \
-            -Wl,-U,_IOMobileFramebufferGetLayerDefaultSurface
+            -framework IOKit -framework CoreFoundation -framework IOSurface
 
           echo "=== Signing roothelper with entitlements ==="
           ENT="${SRCROOT}/helper.entitlements"

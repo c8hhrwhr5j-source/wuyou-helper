@@ -23,32 +23,10 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
-#include <dlfcn.h>
-#include <IOSurface/IOSurfaceRef.h>
-
-// ---- IOMobileFramebuffer 私有 API (dlsym 动态加载) ----
-typedef struct __IOMobileFramebuffer *IOMFBRef;
-static kern_return_t (*_IMFBGetMain)(IOMFBRef*) = NULL;
-static kern_return_t (*_IMFBGetSurface)(IOMFBRef, int, IOSurfaceRef*) = NULL;
-
-static void _loadIOMFB(void) {
-    if (_IMFBGetMain && _IMFBGetSurface) return;
-    // 先尝试从已加载的库中查找（主 app 因为链接了 UIKit 会自动加载）
-    _IMFBGetMain = (kern_return_t(*)(IOMFBRef*))dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetMainDisplay");
-    _IMFBGetSurface = (kern_return_t(*)(IOMFBRef, int, IOSurfaceRef*))dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetLayerDefaultSurface");
-    // 独立二进制不会自动加载私有框架，手动 dlopen
-    if (!_IMFBGetMain || !_IMFBGetSurface) {
-        void *imf = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
-        if (!imf) imf = dlopen("/System/Library/Frameworks/IOKit.framework/Resources/IOMobileFramebuffer", RTLD_LAZY);
-        if (imf) {
-            if (!_IMFBGetMain) _IMFBGetMain = dlsym(imf, "IOMobileFramebufferGetMainDisplay");
-            if (!_IMFBGetSurface) _IMFBGetSurface = dlsym(imf, "IOMobileFramebufferGetLayerDefaultSurface");
-        }
-    }
-    if (!_IMFBGetMain) fprintf(stderr, "[rh] ❌ IOMobileFramebufferGetMainDisplay 符号未找到\n");
-    if (!_IMFBGetSurface) fprintf(stderr, "[rh] ❌ IOMobileFramebufferGetLayerDefaultSurface 符号未找到\n");
-}
 #include <spawn.h>
+#include <dlfcn.h>
+#include <IOKit/IOKitLib.h>
+#include <IOSurface/IOSurfaceRef.h>
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -179,129 +157,268 @@ static int g_resp_fd = STDOUT_FILENO;   // 在 main() 中初始化为原始 stdo
 #define RSP(...) dprintf(g_resp_fd, __VA_ARGS__)
 
 // ============================================================
-// 屏幕捕获（通过 root 进程 IOMFB → dlsym 动态加载）
+// 屏幕捕获（IOMFB 内核直连）
+//   通过 IOServiceOpen(IOMobileFramebuffer) + IOConnectMapMemory
+//   直接映射硬件显示缓冲区，读取物理屏幕内容（不限进程）
 // ============================================================
 
+static io_connect_t    g_iomfb_conn = MACH_PORT_NULL;
+static mach_vm_address_t g_fb_addr = 0;
+static mach_vm_size_t  g_fb_size = 0;
+static int             g_fb_w = 0, g_fb_h = 0, g_fb_bpr = 0;
+static int             g_fb_ready = 0;
+
+// 在 IORegistry 中查找 IOMobileFramebuffer 服务
+static io_service_t iomfb_find_service(void) {
+    // 常见 display controller 名称
+    const char *names[] = {
+        "IOMobileFramebuffer",
+        "AppleCLCD",       // 老款 LCD iPhone
+        "AppleMipiDSI",    // 部分 LCD
+        "AppleDCP",        // iPhone X+ OLED
+        "AppleM2Scaler",
+        NULL
+    };
+    for (int i = 0; names[i]; i++) {
+        io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault,
+            IOServiceMatching(names[i]));
+        if (svc != MACH_PORT_NULL) {
+            printf("[iomfb] 服务: %s\n", names[i]);
+            return svc;
+        }
+    }
+    // 后备: 遍历所有 IOMobileFramebuffer 匹配
+    io_iterator_t iter;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+            IOServiceMatching("IOMobileFramebuffer"), &iter) == KERN_SUCCESS) {
+        io_service_t svc = IOIteratorNext(iter);
+        IOObjectRelease(iter);
+        if (svc != MACH_PORT_NULL) { printf("[iomfb] 服务: IOMobileFramebuffer(iter)\n"); return svc; }
+    }
+    return MACH_PORT_NULL;
+}
+
+// 打开 IOMFB 内核连接并映射硬件 framebuffer
+static int iomfb_open(void) {
+    if (g_fb_ready) return 0;
+
+    // root 权限
+    if (geteuid() != 0) {
+        printf("[iomfb] 需要 root, 提权...\n");
+        kfd_escalate();
+        if (geteuid() != 0) { RSP("ERR 提权失败 (euid=%d)\n", geteuid()); return -1; }
+        printf("[iomfb] ✅ 已提权到 root\n");
+    }
+
+    io_service_t svc = iomfb_find_service();
+    if (svc == MACH_PORT_NULL) { RSP("ERR 未找到 IOMFB 服务\n"); return -1; }
+
+    // 读取 IORegistry 属性: 屏幕尺寸
+    CFMutableDictionaryRef props = NULL;
+    if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS && props) {
+        CFNumberRef wNum = CFDictionaryGetValue(props, CFSTR("width"));
+        CFNumberRef hNum = CFDictionaryGetValue(props, CFSTR("height"));
+        CFNumberRef bprNum = CFDictionaryGetValue(props, CFSTR("bytes-per-row"));
+        CFNumberRef bppNum = CFDictionaryGetValue(props, CFSTR("bits-per-pixel"));
+        if (wNum) CFNumberGetValue(wNum, kCFNumberIntType, &g_fb_w);
+        if (hNum) CFNumberGetValue(hNum, kCFNumberIntType, &g_fb_h);
+        if (bprNum) CFNumberGetValue(bprNum, kCFNumberIntType, &g_fb_bpr);
+        int bpp = 32;
+        if (bppNum) CFNumberGetValue(bppNum, kCFNumberIntType, &bpp);
+        if (g_fb_bpr == 0 && g_fb_w > 0) g_fb_bpr = g_fb_w * (bpp / 8);
+        printf("[iomfb] 属性: %dx%d bpr=%d bpp=%d\n", g_fb_w, g_fb_h, g_fb_bpr, bpp);
+        CFRelease(props);
+    }
+
+    // IOServiceOpen — 尝试多个 user client type
+    io_connect_t conn = MACH_PORT_NULL;
+    kern_return_t kr = KERN_FAILURE;
+    int best_type = -1;
+    for (int t = 0; t <= 10; t++) {
+        conn = MACH_PORT_NULL;
+        kr = IOServiceOpen(svc, mach_task_self(), t, &conn);
+        if (kr == KERN_SUCCESS) {
+            best_type = t;
+            g_iomfb_conn = conn;
+            printf("[iomfb] ✅ IOServiceOpen type=%d conn=0x%x\n", t, conn);
+            break;
+        }
+    }
+    IOObjectRelease(svc);
+
+    if (best_type < 0) {
+        RSP("ERR IOServiceOpen 所有 type 均失败 (last kr=0x%x)\n", kr);
+        return -1;
+    }
+
+    // IOConnectMapMemory — 映射硬件 framebuffer
+    // IOMFB 的 memory type 通常是 0 (主 framebuffer) 或 1
+    for (int memType = 0; memType <= 3; memType++) {
+        mach_vm_address_t addr = 0;
+        mach_vm_size_t sz = 0;
+        kr = IOConnectMapMemory(g_iomfb_conn, memType, mach_task_self(),
+                                &addr, &sz, kIOMapAnywhere);
+        if (kr == KERN_SUCCESS && sz > 0) {
+            g_fb_addr = addr;
+            g_fb_size = sz;
+            printf("[iomfb] ✅ IOConnectMapMemory type=%d addr=0x%llx size=0x%llx\n",
+                   memType, (unsigned long long)addr, (unsigned long long)sz);
+
+            // 如果属性没取到宽高，从内存推算
+            if (g_fb_w == 0 || g_fb_h == 0) {
+                // 尝试从 IOSurface 属性补充
+                io_service_t svc2 = iomfb_find_service();
+                if (svc2 != MACH_PORT_NULL) {
+                    CFMutableDictionaryRef p2 = NULL;
+                    if (IORegistryEntryCreateCFProperties(svc2, kCFAllocatorDefault, &p2,
+                                                           0) == KERN_SUCCESS && p2) {
+                        CFNumberRef wN = CFDictionaryGetValue(p2, CFSTR("width"));
+                        CFNumberRef hN = CFDictionaryGetValue(p2, CFSTR("height"));
+                        CFNumberRef bN = CFDictionaryGetValue(p2, CFSTR("bytes-per-row"));
+                        if (wN) CFNumberGetValue(wN, kCFNumberIntType, &g_fb_w);
+                        if (hN) CFNumberGetValue(hN, kCFNumberIntType, &g_fb_h);
+                        if (bN) CFNumberGetValue(bN, kCFNumberIntType, &g_fb_bpr);
+                        CFRelease(p2);
+                    }
+                    IOObjectRelease(svc2);
+                }
+                // 最终 fallback: iPhone 常见分辨率
+                if (g_fb_bpr == 0 && g_fb_w > 0) g_fb_bpr = g_fb_w * 4;
+                if (g_fb_w == 0 && g_fb_bpr > 0) g_fb_w = g_fb_bpr / 4;
+                if (g_fb_h == 0 && g_fb_bpr > 0) g_fb_h = (int)(sz / g_fb_bpr);
+            }
+
+            g_fb_ready = 1;
+            return 0;
+        }
+        if (kr != KERN_SUCCESS) {
+            printf("[iomfb] IOConnectMapMemory type=%d kr=0x%x\n", memType, kr);
+        }
+    }
+
+    // IOConnectMapMemory 全部失败
+    // 尝试方案 B: 通过 IOSurfaceRoot + create_surface 获取
+    printf("[iomfb] IOConnectMapMemory 全部失败, 尝试 IOSurfaceRoot...\n");
+
+    io_service_t svcRoot = IOServiceGetMatchingService(kIOMainPortDefault,
+        IOServiceMatching("IOSurfaceRoot"));
+    if (svcRoot != MACH_PORT_NULL) {
+        io_connect_t connRoot = MACH_PORT_NULL;
+        for (int t = 0; t <= 5; t++) {
+            kr = IOServiceOpen(svcRoot, mach_task_self(), t, &connRoot);
+            if (kr == KERN_SUCCESS) {
+                printf("[iomfb] IOSurfaceRoot type=%d conn=0x%x\n", t, connRoot);
+                g_iomfb_conn = connRoot;
+                g_fb_ready = 2;  // 标记为 IOSurfaceRoot 模式
+                IOObjectRelease(svcRoot);
+                return 0;
+            }
+        }
+        IOObjectRelease(svcRoot);
+    }
+
+    IOServiceClose(g_iomfb_conn);
+    g_iomfb_conn = MACH_PORT_NULL;
+    RSP("ERR IOConnectMapMemory 和 IOSurfaceRoot 均失败\n");
+    return -1;
+}
+
+// 关闭 IOMFB 连接
+static void iomfb_close(void) {
+    if (g_iomfb_conn != MACH_PORT_NULL) {
+        IOServiceClose(g_iomfb_conn);
+        g_iomfb_conn = MACH_PORT_NULL;
+    }
+    g_fb_addr = 0;
+    g_fb_size = 0;
+    g_fb_ready = 0;
+    g_fb_w = g_fb_h = g_fb_bpr = 0;
+}
+
+// ---- cmd_pixel: 从硬件 framebuffer 直接读像素 ----
 static int cmd_pixel(int x, int y) {
-    _loadIOMFB();
-    if (!_IMFBGetMain || !_IMFBGetSurface) { RSP("ERR IOMFB 符号未加载\n"); return 1; }
-    for (int attempt = 0; attempt < 2; attempt++) {
-        IOMFBRef fb = NULL;
-        kern_return_t ret = _IMFBGetMain(&fb);
-        if (ret != KERN_SUCCESS || !fb) {
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR IOMFB 连接失败\n"); return 1;
+    if (iomfb_open() != 0) return 1;
+
+    if (g_fb_ready == 1 && g_fb_addr && g_fb_size) {
+        // 直接内存映射模式
+        if (g_fb_w <= 0 || g_fb_h <= 0 || g_fb_bpr <= 0) {
+            RSP("ERR framebuffer 尺寸未知\n"); return 1;
         }
-        IOSurfaceRef sf = NULL;
-        for (int l = 0; l <= 2; l++) {
-            ret = _IMFBGetSurface(fb, l, &sf);
-            if (ret == KERN_SUCCESS && sf) break;
+        if (x < 0 || y < 0 || x >= g_fb_w || y >= g_fb_h) {
+            RSP("ERR 坐标越界 %d,%d (%dx%d)\n", x, y, g_fb_w, g_fb_h); return 1;
         }
-        if (!sf) {
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR Surface 获取失败\n"); return 1;
-        }
-        int w = (int)IOSurfaceGetWidth(sf);
-        int h = (int)IOSurfaceGetHeight(sf);
-        int bpr = (int)IOSurfaceGetBytesPerRow(sf);
-        if (x < 0 || y < 0 || x >= w || y >= h) {
-            CFRelease(sf);
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR 坐标越界 %d,%d (%dx%d)\n", x, y, w, h); return 1;
-        }
-        ret = IOSurfaceLock(sf, 1, NULL);
-        if (ret != KERN_SUCCESS) {
-            CFRelease(sf);
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR Lock 失败 0x%x\n", ret); return 1;
-        }
-        void *base = IOSurfaceGetBaseAddress(sf);
-        if (!base) { IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR BaseAddress NULL\n"); return 1;
-        }
-        int offset = y * bpr + x * 4;
-        unsigned char *p = (unsigned char *)base + offset;
+        int offset = y * g_fb_bpr + x * 4;
+        if (offset + 4 > (int)g_fb_size) { RSP("ERR 偏移超限\n"); return 1; }
+        unsigned char *p = (unsigned char *)(uintptr_t)g_fb_addr + offset;
+        // BGRA 顺序: p[0]=B, p[1]=G, p[2]=R, p[3]=A
         int b = p[0], g = p[1], r = p[2];
-        IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-        if (r > 0 || g > 0 || b > 0 || attempt == 1) {
-            RSP("OK %d %d %d\n", r, g, b); return 0;
-        }
-        // 返回全黑，尝试 escalation
-        kfd_escalate();
+        RSP("OK %d %d %d\n", r, g, b);
+        return 0;
     }
+
+    // IOSurfaceRoot 后备: 用传统的 IOMFB API（此时已有 root）
+    if (g_fb_ready == 2) {
+        // fallback to per-process API - won't help but at least reports error
+        RSP("ERR IOSurfaceRoot 模式暂不支持像素读取\n");
+        return 1;
+    }
+
+    RSP("ERR 未知 framebuffer 模式\n");
     return 1;
 }
 
+// ---- cmd_size: 返回硬件屏幕尺寸 ----
 static int cmd_size(void) {
-    _loadIOMFB();
-    if (!_IMFBGetMain || !_IMFBGetSurface) { RSP("ERR IOMFB 符号未加载\n"); return 1; }
-    for (int attempt = 0; attempt < 2; attempt++) {
-        IOMFBRef fb = NULL;
-        if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR IOMFB 失败\n"); return 1;
-        }
-        IOSurfaceRef sf = NULL;
-        for (int l = 0; l <= 2; l++) {
-            if (_IMFBGetSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
-        }
-        if (!sf) {
-            if (attempt == 0) { kfd_escalate(); continue; }
-            RSP("ERR Surface 失败\n"); return 1;
-        }
-        int w = (int)IOSurfaceGetWidth(sf);
-        int h = (int)IOSurfaceGetHeight(sf);
-        int bpr = (int)IOSurfaceGetBytesPerRow(sf);
-        CFRelease(sf);
-        if (w > 0 && h > 0) {
-            RSP("SIZE %d %d %d\n", w, h, bpr); return 0;
-        }
-        kfd_escalate();
+    if (iomfb_open() != 0) return 1;
+
+    if (g_fb_ready == 1) {
+        RSP("SIZE %d %d %d\n", g_fb_w, g_fb_h, g_fb_bpr);
+        return 0;
     }
+
+    // fallback: 尝试从 IORegistry 读取
+    io_service_t svc = iomfb_find_service();
+    if (svc != MACH_PORT_NULL) {
+        CFMutableDictionaryRef props = NULL;
+        if (IORegistryEntryCreateCFProperties(svc, kCFAllocatorDefault, &props,
+                                               0) == KERN_SUCCESS && props) {
+            int w = 0, h = 0, bpr = 0;
+            CFNumberRef wN = CFDictionaryGetValue(props, CFSTR("width"));
+            CFNumberRef hN = CFDictionaryGetValue(props, CFSTR("height"));
+            CFNumberRef bN = CFDictionaryGetValue(props, CFSTR("bytes-per-row"));
+            if (wN) CFNumberGetValue(wN, kCFNumberIntType, &w);
+            if (hN) CFNumberGetValue(hN, kCFNumberIntType, &h);
+            if (bN) CFNumberGetValue(bN, kCFNumberIntType, &bpr);
+            if (bpr == 0 && w > 0) bpr = w * 4;
+            CFRelease(props);
+            if (w > 0 && h > 0) {
+                RSP("SIZE %d %d %d\n", w, h, bpr);
+                IOObjectRelease(svc);
+                return 0;
+            }
+        }
+        IOObjectRelease(svc);
+    }
+    RSP("ERR 无法获取屏幕尺寸\n");
     return 1;
 }
 
+// ---- cmd_capture: 全屏帧缓冲写入文件 ----
 static int cmd_capture(const char *path) {
-    _loadIOMFB();
-    if (!_IMFBGetMain || !_IMFBGetSurface) { RSP("ERR IOMFB 符号未加载\n"); return 1; }
-    for (int attempt = 0; attempt < 2; attempt++) {
-    IOMFBRef fb = NULL;
-    if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
-        if (attempt == 0) { kfd_escalate(); continue; }
-        RSP("ERR IOMFB 失败\n"); return 1;
+    if (iomfb_open() != 0) return 1;
+
+    if (g_fb_ready == 1 && g_fb_addr && g_fb_size > 0) {
+        size_t total = g_fb_h > 0 ? (size_t)g_fb_h * g_fb_bpr : (size_t)g_fb_size;
+        if (total > g_fb_size) total = g_fb_size;
+        FILE *fp = fopen(path, "wb");
+        if (!fp) { RSP("ERR 无法创建文件 %s\n", path); return 1; }
+        size_t written = fwrite((void *)(uintptr_t)g_fb_addr, 1, total, fp);
+        fclose(fp);
+        RSP("OK %zu bytes\n", written);
+        return 0;
     }
-    IOSurfaceRef sf = NULL;
-    for (int l = 0; l <= 2; l++) {
-        if (_IMFBGetSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
-    }
-    if (!sf) {
-        if (attempt == 0) { kfd_escalate(); continue; }
-        RSP("ERR Surface 失败\n"); return 1;
-    }
-    int w = (int)IOSurfaceGetWidth(sf);
-    int h = (int)IOSurfaceGetHeight(sf);
-    int bpr = (int)IOSurfaceGetBytesPerRow(sf);
-    if (IOSurfaceLock(sf, 1, NULL) != KERN_SUCCESS) {
-        CFRelease(sf);
-        if (attempt == 0) { kfd_escalate(); continue; }
-        RSP("ERR Lock 失败\n"); return 1;
-    }
-    void *base = IOSurfaceGetBaseAddress(sf);
-    if (!base) { IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-        if (attempt == 0) { kfd_escalate(); continue; }
-        RSP("ERR BaseAddress NULL\n"); return 1;
-    }
-    size_t total = (size_t)h * bpr;
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-        RSP("ERR 无法创建文件 %s\n", path); return 1;
-    }
-    fwrite(base, 1, total, fp); fclose(fp);
-    IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-    RSP("OK %d bytes\n", (int)total);
-    return 0;
-    }
+
+    RSP("ERR 无法执行 capture\n");
     return 1;
 }
 
