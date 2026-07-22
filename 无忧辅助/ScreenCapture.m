@@ -11,6 +11,9 @@
 // ============================================================
 // CGDisplay 模式 — 后台可用（no-sandbox + allow-screen-capture）
 // ============================================================
+// 私有 API 声明（不在公开头文件中）
+extern CGImageRef CGDisplayCreateImage(uint32_t displayID);
+extern uint32_t CGMainDisplayID(void);
 static CGImageRef _captureDisplayImage(void) {
     return CGDisplayCreateImage(CGMainDisplayID());
 }
