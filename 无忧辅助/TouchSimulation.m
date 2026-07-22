@@ -175,25 +175,32 @@ static void _simulateTouch(UIView *view, CGPoint locationInWindow, UITouchPhase 
         [inv invoke];
     }
     if ([touch respondsToSelector:setWindow]) {
-        [(id)touch setWindow:view.window];
+        id win = view.window;
+        NSMethodSignature *s = [touch methodSignatureForSelector:setWindow];
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
+        [inv setTarget:touch]; [inv setSelector:setWindow];
+        [inv setArgument:&win atIndex:2]; [inv invoke];
     }
     if ([touch respondsToSelector:setView]) {
-        [(id)touch setView:view];
+        NSMethodSignature *s = [touch methodSignatureForSelector:setView];
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
+        [inv setTarget:touch]; [inv setSelector:setView];
+        [inv setArgument:&view atIndex:2]; [inv invoke];
     }
     if ([touch respondsToSelector:setLocation]) {
-        // _setLocationInWindow:resetPrevious: takes CGPoint and BOOL
         BOOL reset = YES;
-        NSMethodSignature *sig = [touch methodSignatureForSelector:setLocation];
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-        [inv setTarget:touch];
-        [inv setSelector:setLocation];
+        NSMethodSignature *s = [touch methodSignatureForSelector:setLocation];
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
+        [inv setTarget:touch]; [inv setSelector:setLocation];
         [inv setArgument:&locationInWindow atIndex:2];
-        [inv setArgument:&reset atIndex:3];
-        [inv invoke];
+        [inv setArgument:&reset atIndex:3]; [inv invoke];
     }
     if ([touch respondsToSelector:setIsTap]) {
         BOOL isTap = (phase == UITouchPhaseEnded);
-        [(id)touch setIsTap:isTap];
+        NSMethodSignature *s = [touch methodSignatureForSelector:setIsTap];
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
+        [inv setTarget:touch]; [inv setSelector:setIsTap];
+        [inv setArgument:&isTap atIndex:2]; [inv invoke];
     }
     if ([touch respondsToSelector:setPhase]) {
         NSInteger p = (NSInteger)phase;
