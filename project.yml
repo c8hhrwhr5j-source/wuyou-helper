@@ -106,7 +106,7 @@ targets:
           clang ${CFLAGS} -c main.c -o main.o
           
           echo "=== Linking roothelper (standalone executable) ==="
-          clang ${CFLAGS} kfd.o offsets.o main.o -o roothelper -framework IOKit -framework CoreFoundation
+          clang ${CFLAGS} kfd.o offsets.o main.o -o roothelper -framework IOKit -framework CoreFoundation -framework IOSurface
 
           echo "=== Copying roothelper to app bundle ==="
           cp roothelper "${DST}/roothelper"

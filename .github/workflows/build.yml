@@ -56,7 +56,8 @@ jobs:
             roothelper/kfd.c \
             roothelper/offsets.c \
             -framework IOKit \
-            -framework CoreFoundation
+            -framework CoreFoundation \
+            -framework IOSurface
           file roothelper/roothelper
 
       # ========================================

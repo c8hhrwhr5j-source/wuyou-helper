@@ -5,11 +5,14 @@
 //  功能：
 //    - escalate: kfd 内核提权 → UID=0
 //    - respring: 注销桌面 (kill SpringBoard)
+//    - pixel x,y: 读取指定坐标像素 (root 进程 IOMFB)
+//    - size:      返回屏幕尺寸和 bpr
+//    - capture filepath: 全屏帧缓冲写入文件
 //
 //  编译命令:
 //    clang -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
 //          -mios-version-min=14.0 -O2 -o roothelper main.c kfd.c offsets.c \
-//          -framework IOKit -framework CoreFoundation
+//          -framework IOKit -framework CoreFoundation -framework IOSurface
 //
 //  签名:
 //    ldid -Shelper.entitlements roothelper
@@ -145,6 +148,140 @@ static int cmd_respring(void) {
 }
 
 // ============================================================
+// 屏幕捕获（通过 IOMobileFramebuffer，root 进程可见全局画面）
+// ============================================================
+#include <IOSurface/IOSurfaceRef.h>
+
+typedef struct __IOMobileFramebuffer *IOMFBRef;
+extern kern_return_t IOMobileFramebufferGetMainDisplay(IOMFBRef *);
+extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(IOMFBRef, int, IOSurfaceRef *);
+
+static int cmd_pixel(int x, int y) {
+    // 提权到 root
+    kfd_escalate();
+
+    IOMFBRef fb = NULL;
+    kern_return_t ret = IOMobileFramebufferGetMainDisplay(&fb);
+    if (ret != KERN_SUCCESS || !fb) {
+        printf("ERR IOMFB 连接失败\n");
+        return 1;
+    }
+
+    IOSurfaceRef sf = NULL;
+    for (int l = 0; l <= 2; l++) {
+        ret = IOMobileFramebufferGetLayerDefaultSurface(fb, l, &sf);
+        if (ret == KERN_SUCCESS && sf) break;
+    }
+    if (!sf) {
+        printf("ERR Surface 获取失败\n");
+        return 1;
+    }
+
+    int w = (int)IOSurfaceGetWidth(sf);
+    int h = (int)IOSurfaceGetHeight(sf);
+    int bpr = (int)IOSurfaceGetBytesPerRow(sf);
+
+    if (x < 0 || y < 0 || x >= w || y >= h) {
+        CFRelease(sf);
+        printf("ERR 坐标越界 %d,%d (%dx%d)\n", x, y, w, h);
+        return 1;
+    }
+
+    ret = IOSurfaceLock(sf, 1/*kIOSurfaceLockReadOnly*/, NULL);
+    if (ret != KERN_SUCCESS) {
+        CFRelease(sf);
+        printf("ERR Lock 失败 0x%x\n", ret);
+        return 1;
+    }
+
+    void *base = IOSurfaceGetBaseAddress(sf);
+    if (!base) {
+        IOSurfaceUnlock(sf, 1, NULL);
+        CFRelease(sf);
+        printf("ERR BaseAddress NULL\n");
+        return 1;
+    }
+
+    int offset = y * bpr + x * 4;
+    unsigned char *p = (unsigned char *)base + offset;
+    int b = p[0], g = p[1], r = p[2];
+
+    IOSurfaceUnlock(sf, 1, NULL);
+    CFRelease(sf);
+
+    printf("OK %d %d %d\n", r, g, b);
+    return 0;
+}
+
+static int cmd_size(void) {
+    kfd_escalate();
+
+    IOMFBRef fb = NULL;
+    if (IOMobileFramebufferGetMainDisplay(&fb) != KERN_SUCCESS || !fb) {
+        printf("ERR IOMFB 失败\n");
+        return 1;
+    }
+
+    IOSurfaceRef sf = NULL;
+    for (int l = 0; l <= 2; l++) {
+        if (IOMobileFramebufferGetLayerDefaultSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
+    }
+    if (!sf) { printf("ERR Surface 失败\n"); return 1; }
+
+    printf("SIZE %d %d %d\n",
+           (int)IOSurfaceGetWidth(sf),
+           (int)IOSurfaceGetHeight(sf),
+           (int)IOSurfaceGetBytesPerRow(sf));
+    CFRelease(sf);
+    return 0;
+}
+
+static int cmd_capture(const char *path) {
+    kfd_escalate();
+
+    IOMFBRef fb = NULL;
+    if (IOMobileFramebufferGetMainDisplay(&fb) != KERN_SUCCESS || !fb) {
+        printf("ERR IOMFB 失败\n"); return 1;
+    }
+
+    IOSurfaceRef sf = NULL;
+    for (int l = 0; l <= 2; l++) {
+        if (IOMobileFramebufferGetLayerDefaultSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
+    }
+    if (!sf) { printf("ERR Surface 失败\n"); return 1; }
+
+    int w = (int)IOSurfaceGetWidth(sf);
+    int h = (int)IOSurfaceGetHeight(sf);
+    int bpr = (int)IOSurfaceGetBytesPerRow(sf);
+
+    if (IOSurfaceLock(sf, 1, NULL) != KERN_SUCCESS) {
+        CFRelease(sf); printf("ERR Lock 失败\n"); return 1;
+    }
+
+    void *base = IOSurfaceGetBaseAddress(sf);
+    if (!base) {
+        IOSurfaceUnlock(sf, 1, NULL);
+        CFRelease(sf); printf("ERR BaseAddress NULL\n"); return 1;
+    }
+
+    size_t total = (size_t)h * bpr;
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        IOSurfaceUnlock(sf, 1, NULL);
+        CFRelease(sf); printf("ERR 无法创建文件 %s\n", path); return 1;
+    }
+
+    fwrite(base, 1, total, fp);
+    fclose(fp);
+
+    IOSurfaceUnlock(sf, 1, NULL);
+    CFRelease(sf);
+
+    printf("OK %d bytes\n", (int)total);
+    return 0;
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 
@@ -157,6 +294,9 @@ int main(int argc, char *argv[]) {
         printf("用法:\n");
         printf("  roothelper escalate   提权到 root\n");
         printf("  roothelper respring   注销桌面\n");
+        printf("  roothelper pixel x,y  取像素 RGB (root+IOMFB)\n");
+        printf("  roothelper size       屏幕尺寸\n");
+        printf("  roothelper capture [path]  全屏帧缓冲写入文件\n");
         return 0;
     }
 
@@ -164,6 +304,16 @@ int main(int argc, char *argv[]) {
         return cmd_escalate();
     } else if (strcmp(argv[1], "respring") == 0) {
         return cmd_respring();
+    } else if (strcmp(argv[1], "pixel") == 0) {
+        if (argc < 3) { printf("用法: pixel x,y\n"); return 1; }
+        int x=0, y=0;
+        sscanf(argv[2], "%d,%d", &x, &y);
+        return cmd_pixel(x, y);
+    } else if (strcmp(argv[1], "size") == 0) {
+        return cmd_size();
+    } else if (strcmp(argv[1], "capture") == 0) {
+        const char *path = (argc >= 3) ? argv[2] : "/tmp/sc_cap.raw";
+        return cmd_capture(path);
     } else {
         printf("未知指令: %s\n", argv[1]);
         return 1;

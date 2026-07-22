@@ -108,7 +108,8 @@ clang -arch arm64 \
       "${HELPER_DIR}/kfd.c" \
       "${HELPER_DIR}/offsets.c" \
       -framework IOKit \
-      -framework CoreFoundation
+      -framework CoreFoundation \
+      -framework IOSurface
 
 chmod +x "${HELPER_DST}"
 echo "   ✅ roothelper 编译完成"
