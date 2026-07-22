@@ -19,6 +19,8 @@ settings:
     HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/lua-build/include
     LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/lua-build/lib
     OTHER_LDFLAGS: $(inherited) -framework IOKit -framework CoreFoundation -framework CoreGraphics -framework IOSurface -framework UIKit -llua -Wl,-U,_IOMobileFramebufferGetMainDisplay -Wl,-U,_IOMobileFramebufferGetLayerDefaultSurface
+  debug:
+    SWIFT_OPTIMIZATION_LEVEL: "-Onone"
 
 targets:
   无忧辅助:

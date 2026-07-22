@@ -16,27 +16,27 @@ static CGSize _screenSize = {0, 0};
 static CGFloat _scale = 1.0;
 static uint32_t _fingerSeq = 1000;
 
-typedef struct __IOHIDEvent *IOHIDEventRef;
-typedef struct __IOHIDEventQueue *IOHIDEventQueueRef;
-typedef struct __IOHIDEventServiceClient *IOHIDEventServiceClientRef;
-
 typedef void* (*BKSHIDEventRouterInstanceFunc)(void);
-typedef void (*BKSHIDEventRouterRouteEventFunc)(void*, IOHIDEventRef);
+typedef void (*BKSHIDEventRouterRouteEventFunc)(void*, void*);
+typedef void* (*IOHIDEventCreateDigitizerEventFunc)(void*, uint32_t, uint64_t);
+typedef void* (*IOHIDEventCreateDigitizerFingerEventFunc)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 static void *_backBoardServicesHandle = NULL;
 static void *_iokitHandle = NULL;
 static BKSHIDEventRouterInstanceFunc _bkRouterInstance = NULL;
 static BKSHIDEventRouterRouteEventFunc _bkRouteEvent = NULL;
+static IOHIDEventCreateDigitizerEventFunc _createDigitizerEvent = NULL;
+static IOHIDEventCreateDigitizerFingerEventFunc _createFingerEvent = NULL;
 
 static BOOL _backBoardInitialized = NO;
 
 @interface TouchSimulation ()
 - (BOOL)_initializeBackBoardServices;
-- (IOHIDEventRef)_createDigitizerEventWithPhase:(uint32_t)phase 
-                                              x:(CGFloat)x 
-                                              y:(CGFloat)y 
-                                         fingerID:(uint32_t)fingerID;
-- (void)_sendHIDEvent:(IOHIDEventRef)event;
+- (void*)_createDigitizerEventWithPhase:(uint32_t)phase 
+                                       x:(CGFloat)x 
+                                       y:(CGFloat)y 
+                                  fingerID:(uint32_t)fingerID;
+- (void)_sendHIDEvent:(void*)event;
 @end
 
 @implementation TouchSlide {
@@ -162,34 +162,28 @@ static BOOL _backBoardInitialized = NO;
     return YES;
 }
 
-- (IOHIDEventRef)_createDigitizerEventWithPhase:(uint32_t)phase 
-                                              x:(CGFloat)x 
-                                              y:(CGFloat)y 
-                                         fingerID:(uint32_t)fingerID {
-    typedef IOHIDEventRef (*IOHIDEventCreateDigitizerFingerEventFunc)(CFAllocatorRef, IOHIDEventRef, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-    typedef IOHIDEventRef (*IOHIDEventCreateDigitizerEventFunc)(CFAllocatorRef, uint32_t, uint64_t);
-    
-    static IOHIDEventCreateDigitizerEventFunc createDigitizerEvent = NULL;
-    static IOHIDEventCreateDigitizerFingerEventFunc createFingerEvent = NULL;
-    
-    if (!createDigitizerEvent || !createFingerEvent) {
+- (void*)_createDigitizerEventWithPhase:(uint32_t)phase 
+                                       x:(CGFloat)x 
+                                       y:(CGFloat)y 
+                                  fingerID:(uint32_t)fingerID {
+    if (!_createDigitizerEvent || !_createFingerEvent) {
         if (!_iokitHandle) {
             _iokitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         }
         if (_iokitHandle) {
-            createDigitizerEvent = (IOHIDEventCreateDigitizerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerEvent");
-            createFingerEvent = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerFingerEvent");
+            _createDigitizerEvent = (IOHIDEventCreateDigitizerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerEvent");
+            _createFingerEvent = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerFingerEvent");
         }
     }
     
-    if (!createDigitizerEvent || !createFingerEvent) {
+    if (!_createDigitizerEvent || !_createFingerEvent) {
         [self _log:@"[TouchSimulation] ❌ 获取 IOHIDEvent 创建函数失败"];
         return NULL;
     }
     
     uint64_t timestamp = (uint64_t)([[NSDate date] timeIntervalSinceReferenceDate] * 1000000000ULL);
     
-    IOHIDEventRef digitizerEvent = createDigitizerEvent(NULL, 0, timestamp);
+    void *digitizerEvent = _createDigitizerEvent(NULL, 0, timestamp);
     if (!digitizerEvent) {
         [self _log:@"[TouchSimulation] ❌ 创建 DigitizerEvent 失败"];
         return NULL;
@@ -200,15 +194,15 @@ static BOOL _backBoardInitialized = NO;
     uint64_t yInt = (uint64_t)(y * 1000);
     uint64_t zInt = (uint64_t)(phase == 0 ? 50 : 0);
     
-    IOHIDEventRef fingerEvent = createFingerEvent(NULL, digitizerEvent, fingerID, touchPhase, 0, 0,
-                                                  xInt, yInt, zInt, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    void *fingerEvent = _createFingerEvent(NULL, digitizerEvent, fingerID, touchPhase, 0, 0,
+                                           xInt, yInt, zInt, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     
     CFRelease(digitizerEvent);
     
     return fingerEvent;
 }
 
-- (void)_sendHIDEvent:(IOHIDEventRef)event {
+- (void)_sendHIDEvent:(void*)event {
     if (!event) return;
     
     void *router = _bkRouterInstance();
@@ -240,7 +234,7 @@ static BOOL _backBoardInitialized = NO;
 
 - (void)_sendTouchEventAtX:(CGFloat)x y:(CGFloat)y phase:(uint32_t)phase fingerID:(uint32_t)fingerID {
     if (_backBoardInitialized) {
-        IOHIDEventRef event = [self _createDigitizerEventWithPhase:phase x:x y:y fingerID:fingerID];
+        void *event = [self _createDigitizerEventWithPhase:phase x:x y:y fingerID:fingerID];
         if (event) {
             [self _sendHIDEvent:event];
             
