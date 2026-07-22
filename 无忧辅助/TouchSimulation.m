@@ -148,9 +148,9 @@ static void (*_rf)(void*);
     CGPoint p = CGPointMake(x/_scl, y/_scl);
     UIWindow *w = [[UIApplication sharedApplication] keyWindow];
     if (w) {
-        UIView *v = [w hitTest:p withEvent:nil] ?: w.rootViewController.view;
-        if ([v respondsToSelector:@selector(sendActionsForControlEvents:)])
-            [v sendActionsForControlEvents:ph == 2 ? UIControlEventTouchUpInside : UIControlEventTouchDown];
+        id v = [w hitTest:p withEvent:nil] ?: (id)w.rootViewController.view;
+    if ([v respondsToSelector:@selector(sendActionsForControlEvents:)])
+        [v sendActionsForControlEvents:(ph == 2 ? UIControlEventTouchUpInside : UIControlEventTouchDown)];
     }
 }
 
