@@ -48,7 +48,7 @@ static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *o
         };
         IOSurfaceRef found = NULL;
         for (int k = 0; sidKeys[k]; k++) {
-            CFNumberRef sidNum = CFDictionaryGetValue(props, CFSTR(sidKeys[k]));
+            CFNumberRef sidNum = CFDictionaryGetValue(props, (__bridge CFStringRef)@(sidKeys[k]));
             if (!sidNum) continue;
             uint32_t sid = 0;
             if (CFNumberGetValue(sidNum, kCFNumberSInt32Type, &sid) && sid > 0) {
@@ -211,7 +211,7 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
 // ---- 双模连接（全局截取优先） ----
 - (void)_con{
     // 策略 1：全局显示截取（com.apple.private.screen-capture）
-    _initGlobalCapture(&_gsf,&_gw,&_gh,&_gbpr,&_gsDiag);
+    {NSString *diag=nil;_initGlobalCapture(&_gsf,&_gw,&_gh,&_gbpr,&diag);_gsDiag=diag;}
     if(_gsf&&_gw>0&&_gh>0){_gsOK=YES;NSLog(@"[SCR] 全局截取: %dx%d bpr=%d",_gw,_gh,_gbpr);}
 
     // 策略 2：IOMFB 直连（per-process，权限提升后可能变全局）
@@ -416,7 +416,7 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
 - (void)_reconnectIOMFB{
     // 重连全局截取
     if(_gsf){CFRelease(_gsf);_gsf=NULL;}_gsOK=NO;
-    _initGlobalCapture(&_gsf,&_gw,&_gh,&_gbpr,&_gsDiag);
+    {NSString *diag=nil;_initGlobalCapture(&_gsf,&_gw,&_gh,&_gbpr,&diag);_gsDiag=diag;}
     if(_gsf&&_gw>0&&_gh>0){_gsOK=YES;NSLog(@"[SCR] 全局截取重连: %dx%d",_gw,_gh);}
     // 重连 IOMFB
     if(_sf){CFRelease(_sf);_sf=NULL;}
