@@ -11,11 +11,17 @@
 #import <math.h>
 #import <unistd.h>
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wstrict-prototypes"
+#pragma clang diagnostic ignored "-Wunused-variable"
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wincompatible-pointer-types"
+#pragma clang diagnostic ignored "-Wobjc-method-access"
+
 static CGSize _screenSize = {0, 0};
 static CGFloat _scale = 1.0;
-static uint32_t _fingerSeq = 1000;
 
-// 使用 CFTypeRef 替代 void*，兼容 CFRelease 类型检查
 typedef CFTypeRef (*BKSHIDEventRouterInstanceFunc)(void);
 typedef void (*BKSHIDEventRouterRouteEventFunc)(CFTypeRef, CFTypeRef);
 typedef CFTypeRef (*IOHIDEventCreateDigitizerEventFunc)(CFAllocatorRef, uint32_t, uint64_t);
@@ -339,5 +345,7 @@ static BOOL _backBoardInitialized = NO;
     [slide move:x2 y:y2];
     [slide up];
 }
+
+#pragma clang diagnostic pop
 
 @end
