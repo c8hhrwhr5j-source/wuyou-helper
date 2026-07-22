@@ -47,7 +47,7 @@ function main()
     log(string.format("分辨率: %d x %d", screen.resolution()))
     log("[诊断] " .. screen.diagnose())   -- roothelper / IOMFB 状态
     local w,h=screen.resolution();log("[取色对比]\n"..screen.testPixel(w/2,h/2)) -- 屏幕中心像素测试
-    local c=screen.getColorRGB(w/2,h/2);log(string.format("  最终取色: R=%d G=%d B=%d (getColorRGB组合结果)",c.r,c.g,c.b))
+    local rr,gg,bb=screen.getColorRGB(w/2,h/2);log(string.format("  最终取色: R=%d G=%d B=%d (getColorRGB组合结果)",rr,gg,bb))
 
     screen.keep(true)
 
