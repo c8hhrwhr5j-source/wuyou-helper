@@ -18,7 +18,7 @@ settings:
     SWIFT_OBJC_BRIDGING_HEADER: 无忧辅助/无忧辅助-Bridging-Header.h
     HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/lua-build/include
     LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/lua-build/lib
-    OTHER_LDFLAGS: $(inherited) -framework IOKit -framework CoreFoundation -framework CoreGraphics -framework IOSurface -llua -Wl,-U,_IOMobileFramebufferGetMainDisplay -Wl,-U,_IOMobileFramebufferGetLayerDefaultSurface
+    OTHER_LDFLAGS: $(inherited) -framework IOKit -framework CoreFoundation -framework CoreGraphics -framework IOSurface -framework UIKit -llua -Wl,-U,_IOMobileFramebufferGetMainDisplay -Wl,-U,_IOMobileFramebufferGetLayerDefaultSurface
 
 targets:
   无忧辅助:

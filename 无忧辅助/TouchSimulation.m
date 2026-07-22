@@ -5,6 +5,7 @@
 
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <stdlib.h>
@@ -23,6 +24,7 @@ typedef void* (*BKSHIDEventRouterInstanceFunc)(void);
 typedef void (*BKSHIDEventRouterRouteEventFunc)(void*, IOHIDEventRef);
 
 static void *_backBoardServicesHandle = NULL;
+static void *_iokitHandle = NULL;
 static BKSHIDEventRouterInstanceFunc _bkRouterInstance = NULL;
 static BKSHIDEventRouterRouteEventFunc _bkRouteEvent = NULL;
 
@@ -170,14 +172,15 @@ static BOOL _backBoardInitialized = NO;
     static IOHIDEventCreateDigitizerEventFunc createDigitizerEvent = NULL;
     static IOHIDEventCreateDigitizerFingerEventFunc createFingerEvent = NULL;
     
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        void *iohid = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-        if (iohid) {
-            createDigitizerEvent = (IOHIDEventCreateDigitizerEventFunc)dlsym(iohid, "IOHIDEventCreateDigitizerEvent");
-            createFingerEvent = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(iohid, "IOHIDEventCreateDigitizerFingerEvent");
+    if (!createDigitizerEvent || !createFingerEvent) {
+        if (!_iokitHandle) {
+            _iokitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         }
-    });
+        if (_iokitHandle) {
+            createDigitizerEvent = (IOHIDEventCreateDigitizerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerEvent");
+            createFingerEvent = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerFingerEvent");
+        }
+    }
     
     if (!createDigitizerEvent || !createFingerEvent) {
         [self _log:@"[TouchSimulation] ❌ 获取 IOHIDEvent 创建函数失败"];
