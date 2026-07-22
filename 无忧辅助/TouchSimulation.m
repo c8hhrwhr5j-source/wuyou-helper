@@ -7,7 +7,6 @@
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
-#import <mach/mach.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
@@ -16,10 +15,11 @@ static CGSize _screenSize = {0, 0};
 static CGFloat _scale = 1.0;
 static uint32_t _fingerSeq = 1000;
 
-typedef void* (*BKSHIDEventRouterInstanceFunc)(void);
-typedef void (*BKSHIDEventRouterRouteEventFunc)(void*, void*);
-typedef void* (*IOHIDEventCreateDigitizerEventFunc)(void*, uint32_t, uint64_t);
-typedef void* (*IOHIDEventCreateDigitizerFingerEventFunc)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+// 使用 CFTypeRef 替代 void*，兼容 CFRelease 类型检查
+typedef CFTypeRef (*BKSHIDEventRouterInstanceFunc)(void);
+typedef void (*BKSHIDEventRouterRouteEventFunc)(CFTypeRef, CFTypeRef);
+typedef CFTypeRef (*IOHIDEventCreateDigitizerEventFunc)(CFAllocatorRef, uint32_t, uint64_t);
+typedef CFTypeRef (*IOHIDEventCreateDigitizerFingerEventFunc)(CFAllocatorRef, CFTypeRef, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 static void *_backBoardServicesHandle = NULL;
 static void *_iokitHandle = NULL;
@@ -32,11 +32,11 @@ static BOOL _backBoardInitialized = NO;
 
 @interface TouchSimulation ()
 - (BOOL)_initializeBackBoardServices;
-- (void*)_createDigitizerEventWithPhase:(uint32_t)phase 
-                                       x:(CGFloat)x 
-                                       y:(CGFloat)y 
-                                  fingerID:(uint32_t)fingerID;
-- (void)_sendHIDEvent:(void*)event;
+- (CFTypeRef)_createDigitizerEventWithPhase:(uint32_t)phase
+                                           x:(CGFloat)x
+                                           y:(CGFloat)y
+                                      fingerID:(uint32_t)fingerID;
+- (void)_sendHIDEvent:(CFTypeRef)event;
 @end
 
 @implementation TouchSlide {
@@ -128,13 +128,13 @@ static BOOL _backBoardInitialized = NO;
 
 - (BOOL)_initializeBackBoardServices {
     if (_backBoardInitialized) return YES;
-    
+
     _backBoardServicesHandle = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
     if (!_backBoardServicesHandle) {
         [self _log:@"[TouchSimulation] ❌ 加载 BackBoardServices 失败"];
         return NO;
     }
-    
+
     _bkRouterInstance = (BKSHIDEventRouterInstanceFunc)dlsym(_backBoardServicesHandle, "BKSHIDEventRouterInstance");
     if (!_bkRouterInstance) {
         [self _log:@"[TouchSimulation] ❌ 获取 BKSHIDEventRouterInstance 失败"];
@@ -142,7 +142,7 @@ static BOOL _backBoardInitialized = NO;
         _backBoardServicesHandle = NULL;
         return NO;
     }
-    
+
     _bkRouteEvent = (BKSHIDEventRouterRouteEventFunc)dlsym(_backBoardServicesHandle, "BKSHIDEventRouterRouteEvent");
     if (!_bkRouteEvent) {
         [self _log:@"[TouchSimulation] ❌ 获取 BKSHIDEventRouterRouteEvent 失败"];
@@ -150,22 +150,22 @@ static BOOL _backBoardInitialized = NO;
         _backBoardServicesHandle = NULL;
         return NO;
     }
-    
-    void *router = _bkRouterInstance();
+
+    CFTypeRef router = _bkRouterInstance();
     if (!router) {
         [self _log:@"[TouchSimulation] ❌ BKSHIDEventRouterInstance() 返回 NULL"];
         return NO;
     }
-    
+
     _backBoardInitialized = YES;
     [self _log:@"[TouchSimulation] ✅ BackBoardServices HID 路由初始化成功"];
     return YES;
 }
 
-- (void*)_createDigitizerEventWithPhase:(uint32_t)phase 
-                                       x:(CGFloat)x 
-                                       y:(CGFloat)y 
-                                  fingerID:(uint32_t)fingerID {
+- (CFTypeRef)_createDigitizerEventWithPhase:(uint32_t)phase
+                                           x:(CGFloat)x
+                                           y:(CGFloat)y
+                                      fingerID:(uint32_t)fingerID {
     if (!_createDigitizerEvent || !_createFingerEvent) {
         if (!_iokitHandle) {
             _iokitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
@@ -175,43 +175,63 @@ static BOOL _backBoardInitialized = NO;
             _createFingerEvent = (IOHIDEventCreateDigitizerFingerEventFunc)dlsym(_iokitHandle, "IOHIDEventCreateDigitizerFingerEvent");
         }
     }
-    
+
     if (!_createDigitizerEvent || !_createFingerEvent) {
         [self _log:@"[TouchSimulation] ❌ 获取 IOHIDEvent 创建函数失败"];
         return NULL;
     }
-    
+
     uint64_t timestamp = (uint64_t)([[NSDate date] timeIntervalSinceReferenceDate] * 1000000000ULL);
-    
-    void *digitizerEvent = _createDigitizerEvent(NULL, 0, timestamp);
+
+    CFTypeRef digitizerEvent = _createDigitizerEvent(kCFAllocatorDefault, (uint32_t)0, timestamp);
     if (!digitizerEvent) {
         [self _log:@"[TouchSimulation] ❌ 创建 DigitizerEvent 失败"];
         return NULL;
     }
-    
-    uint32_t touchPhase = phase;
-    uint64_t xInt = (uint64_t)(x * 1000);
-    uint64_t yInt = (uint64_t)(y * 1000);
+
+    uint64_t xInt = (uint64_t)(x * 1000.0);
+    uint64_t yInt = (uint64_t)(y * 1000.0);
     uint64_t zInt = (uint64_t)(phase == 0 ? 50 : 0);
-    
-    void *fingerEvent = _createFingerEvent(NULL, digitizerEvent, fingerID, touchPhase, 0, 0,
-                                           xInt, yInt, zInt, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    
+
+    // phase: 0=touch down, 2=touch up
+    uint32_t touchMask = (phase == 0) ? 1 : 0;
+
+    CFTypeRef fingerEvent = _createFingerEvent(
+        kCFAllocatorDefault,
+        digitizerEvent,
+        fingerID,          // finger index
+        touchMask,         // touch mask (1=touching, 0=not touching)
+        (uint32_t)0,       // identifier
+        (uint32_t)0,       // quality
+        xInt,              // x position (fixed point 16.16)
+        yInt,              // y position (fixed point 16.16)
+        zInt,              // z pressure
+        (uint64_t)0,       // twist
+        (uint64_t)0,       // minorRadius
+        (uint64_t)0,       // majorRadius
+        (uint64_t)0,       // qualityRadiiAccuracy
+        (uint64_t)0,       // barrierStand
+        (uint64_t)0,       // inRange
+        (uint64_t)0,       // touchType
+        (uint64_t)0,       // touchQuality
+        (uint64_t)0        // estimationUpdate
+    );
+
     CFRelease(digitizerEvent);
-    
+
     return fingerEvent;
 }
 
-- (void)_sendHIDEvent:(void*)event {
+- (void)_sendHIDEvent:(CFTypeRef)event {
     if (!event) return;
-    
-    void *router = _bkRouterInstance();
+
+    CFTypeRef router = _bkRouterInstance();
     if (!router) {
         [self _log:@"[TouchSimulation] ❌ 获取路由实例失败"];
         CFRelease(event);
         return;
     }
-    
+
     _bkRouteEvent(router, event);
     CFRelease(event);
 }
@@ -219,7 +239,7 @@ static BOOL _backBoardInitialized = NO;
 - (void)logDiagnostic {
     UIApplication *app = [UIApplication sharedApplication];
     if (app && app.keyWindow) {
-        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 逻辑尺寸: %.0fx%.0f, 缩放: %.1f, 物理尺寸: %.0fx%.0f", 
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 逻辑尺寸: %.0fx%.0f, 缩放: %.1f, 物理尺寸: %.0fx%.0f",
             _screenSize.width, _screenSize.height, _scale,
             _screenSize.width * _scale, _screenSize.height * _scale]];
         if (_backBoardInitialized) {
@@ -234,10 +254,10 @@ static BOOL _backBoardInitialized = NO;
 
 - (void)_sendTouchEventAtX:(CGFloat)x y:(CGFloat)y phase:(uint32_t)phase fingerID:(uint32_t)fingerID {
     if (_backBoardInitialized) {
-        void *event = [self _createDigitizerEventWithPhase:phase x:x y:y fingerID:fingerID];
+        CFTypeRef event = [self _createDigitizerEventWithPhase:phase x:x y:y fingerID:fingerID];
         if (event) {
             [self _sendHIDEvent:event];
-            
+
             const char *phaseName = "UNKNOWN";
             switch (phase) {
                 case 0: phaseName = "DOWN"; break;
@@ -249,16 +269,16 @@ static BOOL _backBoardInitialized = NO;
             return;
         }
     }
-    
+
     [self _log:@"[TouchSimulation] ⚠️ 回退到进程内模式"];
-    
+
     CGPoint logicalPoint = CGPointMake(x / _scale, y / _scale);
     UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
     if (!keyWindow) return;
-    
+
     UIView *hitView = [keyWindow hitTest:logicalPoint withEvent:nil];
     if (!hitView) hitView = keyWindow.rootViewController.view;
-    
+
     if ([hitView respondsToSelector:@selector(sendActionsForControlEvents:)]) {
         [hitView sendActionsForControlEvents:phase == 2 ? UIControlEventTouchUpInside : UIControlEventTouchDown];
         [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ 触发控件: %@", NSStringFromClass([hitView class])]];
