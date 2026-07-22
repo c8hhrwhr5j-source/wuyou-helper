@@ -155,6 +155,17 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 
 // MARK: - 断开连接
 
+- (void)_reconnectIfNeeded {
+    // 释放旧连接后重新初始化
+    [self _disconnect];   // 会设 _connected = NO
+    [self _connectImpl];  // 从头连接
+    if (_connected) {
+        NSLog(@"[ScreenCapture] 重连成功: %dx%d", _width, _height);
+    } else {
+        NSLog(@"[ScreenCapture] 重连失败");
+    }
+}
+
 - (void)_disconnect {
     if (_surface) {
         CFRelease(_surface);
@@ -171,12 +182,22 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
         return _cachedBuffer;
     }
 
-    if (!_connected || !_surface) return NULL;
+    if (!_connected || !_surface) {
+        // 尝试重连（切后台后 Framebuffer 可能失效）
+        [self _reconnectIfNeeded];
+        if (!_connected || !_surface) return NULL;
+    }
 
     kern_return_t ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
     if (ret != KERN_SUCCESS) {
-        NSLog(@"[ScreenCapture] IOSurfaceLock 失败: 0x%x", ret);
-        return NULL;
+        NSLog(@"[ScreenCapture] IOSurfaceLock 失败: 0x%x，尝试重连", ret);
+        [self _reconnectIfNeeded];
+        if (!_connected || !_surface) return NULL;
+        ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
+        if (ret != KERN_SUCCESS) {
+            NSLog(@"[ScreenCapture] 重连后仍失败: 0x%x", ret);
+            return NULL;
+        }
     }
 
     void *baseAddr = IOSurfaceGetBaseAddress(_surface);
