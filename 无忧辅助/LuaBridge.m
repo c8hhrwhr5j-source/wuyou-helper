@@ -283,6 +283,19 @@ static int l_screen_isReady(lua_State *L) {
     return 1;
 }
 
+// --- screen.refresh() — 重连 IOMFB（后台恢复取色）---
+static int l_screen_refresh(lua_State *L) {
+    [[ScreenCapture sharedInstance] reconnectScreen];
+    return 0;
+}
+
+// --- screen.alive() → bool — 取色是否存活（读中点测试）---
+static int l_screen_alive(lua_State *L) {
+    BOOL alive = [[ScreenCapture sharedInstance] isScreenAlive];
+    lua_pushboolean(L, alive);
+    return 1;
+}
+
 // MARK: - 触控模块 touch.*
 
 // --- touch.down(id, x, y) ---
@@ -500,6 +513,8 @@ static const luaL_Reg g_screenLib[] = {
     {"findColor",    l_screen_findColor},
     {"snapshot",     l_screen_snapshot},
     {"isReady",      l_screen_isReady},
+    {"refresh",      l_screen_refresh},
+    {"alive",        l_screen_alive},
     {NULL, NULL},
 };
 

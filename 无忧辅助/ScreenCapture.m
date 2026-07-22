@@ -42,9 +42,10 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     IMFBRef _fb; IOSurfaceRef _sf; int _bpr,_w,_h; BOOL _fbOK;
     int _rw,_rh,_rbpr; BOOL _rhOK;
     int _rot; BOOL _keep; unsigned char *_buf; size_t _bsz;
+    int _blackStreak;
 }
 + (instancetype)sharedInstance{static ScreenCapture*i;static dispatch_once_t t;dispatch_once(&t,^{i=[[ScreenCapture alloc]init];});return i;}
-- (instancetype)init{if(self=[super init]){_fbOK=NO;_rhOK=NO;_rot=0;[self _con];}return self;}
+- (instancetype)init{if(self=[super init]){_fbOK=NO;_rhOK=NO;_rot=0;_blackStreak=0;[self _con];}return self;}
 - (void)dealloc{[self releaseScreen];}
 
 // ---- 双模连接 ----
@@ -85,7 +86,24 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
         else{if(IOSurfaceLock(_sf,1,NULL)==KERN_SUCCESS){void*ba=IOSurfaceGetBaseAddress(_sf);
             if(ba){int o=y*_bpr+x*4;unsigned char*p=(unsigned char*)ba+o;b=p[0];g=p[1];r=p[2];}
             IOSurfaceUnlock(_sf,1,NULL);}}
-        c.r=r;c.g=g;c.b=b;if(r||g||b)return c;
+        c.r=r;c.g=g;c.b=b;
+        if(r||g||b){_blackStreak=0;return c;}
+        // 后天全黑检测 → 自愈重连
+        _blackStreak++;
+        if(_blackStreak<=2){
+            if(IOSurfaceLock(_sf,1,NULL)==KERN_SUCCESS){void*ba=IOSurfaceGetBaseAddress(_sf);
+                if(ba){int o=y*_bpr+x*4;unsigned char*p2=(unsigned char*)ba+o;b=p2[0];g=p2[1];r=p2[2];}
+                IOSurfaceUnlock(_sf,1,NULL);}
+            c.r=r;c.g=g;c.b=b;if(r||g||b){_blackStreak=0;return c;}
+        }
+        if(_blackStreak>=2){[self _reconnectIOMFB];_blackStreak=0;
+            if(_fbOK&&_sf&&x>=0&&x<_w&&y>=0&&y<_h){r=0;g=0;b=0;
+                if(IOSurfaceLock(_sf,1,NULL)==KERN_SUCCESS){void*ba=IOSurfaceGetBaseAddress(_sf);
+                    if(ba){int o=y*_bpr+x*4;unsigned char*p3=(unsigned char*)ba+o;b=p3[0];g=p3[1];r=p3[2];}
+                    IOSurfaceUnlock(_sf,1,NULL);}
+                c.r=r;c.g=g;c.b=b;if(r||g||b)return c;
+            }
+        }
     }
 
     // 2. roothelper
@@ -148,5 +166,22 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
 - (void)_itx:(int*)x y:(int*)y{if(!_rot)return;int w=_rhOK?_rw:_w,h=_rhOK?_rh:_h,w1=w-1,h1=h-1;int ox=*x,oy=*y;switch(_rot){case 90:*x=oy;*y=w1-ox;break;case 180:*x=w1-ox;*y=h1-oy;break;case 270:*x=h1-oy;*y=ox;break;}}
 - (void)keepScreen{if(!_keep){[self colorAtX:0 y:0];_keep=YES;}}
 - (void)releaseScreen{_keep=NO;free(_buf);_buf=NULL;_bsz=0;}
+- (void)_reconnectIOMFB{
+    if(_sf){CFRelease(_sf);_sf=NULL;}
+    _fbOK=NO;
+    _fbload();
+    if(_fbMain&&_fbSurf&&_fbMain(&_fb)==KERN_SUCCESS&&_fb){
+        for(int l=0;l<=2;l++){if(_fbSurf(_fb,l,&_sf)==KERN_SUCCESS&&_sf){_w=(int)IOSurfaceGetWidth(_sf);_h=(int)IOSurfaceGetHeight(_sf);
+        if(_w>0&&_h>0){_bpr=(int)IOSurfaceGetBytesPerRow(_sf);_fbOK=YES;break;}CFRelease(_sf);_sf=NULL;}}
+        if(!_fbOK){_fb=NULL;}
+    }
+}
+- (void)reconnectScreen{[self _reconnectIOMFB];}
+- (BOOL)isScreenAlive{
+    if(!_fbOK&&!_rhOK)return NO;
+    int tx=_w/2,ty=_h/2;if(_rhOK){tx=_rw/2;ty=_rh/2;}
+    ScreenColor c=[self colorAtX:tx y:ty];
+    return (c.r>0||c.g>0||c.b>0);
+}
 - (BOOL)snapshotToPath:(NSString*)p{return NO;}-(BOOL)snapshotToPath:(NSString*)p x:(int)x y:(int)y w:(int)w h:(int)h{return NO;}
 @end

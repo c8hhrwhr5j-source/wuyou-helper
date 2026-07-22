@@ -58,6 +58,12 @@ typedef struct {
 /// 屏幕捕获是否可用（已连接 IOMobileFramebuffer）
 - (BOOL)isConnected;
 
+/// 重新连接 IOMobileFramebuffer（后天切换后恢复取色）
+- (void)reconnectScreen;
+
+/// 屏幕取色是否存活（读取测试像素验证）
+- (BOOL)isScreenAlive;
+
 /// 诊断信息（供 UI 展示）
 - (NSString *)diagnosticDescription;
 
