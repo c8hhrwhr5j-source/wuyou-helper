@@ -23,6 +23,18 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <dlfcn.h>
+#include <IOSurface/IOSurfaceRef.h>
+
+// ---- IOMobileFramebuffer 私有 API (dlsym 动态加载) ----
+typedef struct __IOMobileFramebuffer *IOMFBRef;
+static kern_return_t (*_IMFBGetMain)(IOMFBRef*) = NULL;
+static kern_return_t (*_IMFBGetSurface)(IOMFBRef, int, IOSurfaceRef*) = NULL;
+
+static void _loadIOMFB(void) {
+    _IMFBGetMain = (kern_return_t(*)(IOMFBRef*))dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetMainDisplay");
+    _IMFBGetSurface = (kern_return_t(*)(IOMFBRef, int, IOSurfaceRef*))dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetLayerDefaultSurface");
+}
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/types.h>
@@ -148,20 +160,15 @@ static int cmd_respring(void) {
 }
 
 // ============================================================
-// 屏幕捕获（通过 IOMobileFramebuffer，root 进程可见全局画面）
+// 屏幕捕获（通过 root 进程 IOMFB → dlsym 动态加载）
 // ============================================================
-#include <IOSurface/IOSurfaceRef.h>
-
-typedef struct __IOMobileFramebuffer *IOMFBRef;
-extern kern_return_t IOMobileFramebufferGetMainDisplay(IOMFBRef *);
-extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(IOMFBRef, int, IOSurfaceRef *);
 
 static int cmd_pixel(int x, int y) {
-    // 提权到 root
+    _loadIOMFB();
     kfd_escalate();
 
     IOMFBRef fb = NULL;
-    kern_return_t ret = IOMobileFramebufferGetMainDisplay(&fb);
+    kern_return_t ret = _IMFBGetMain(&fb);
     if (ret != KERN_SUCCESS || !fb) {
         printf("ERR IOMFB 连接失败\n");
         return 1;
@@ -169,7 +176,7 @@ static int cmd_pixel(int x, int y) {
 
     IOSurfaceRef sf = NULL;
     for (int l = 0; l <= 2; l++) {
-        ret = IOMobileFramebufferGetLayerDefaultSurface(fb, l, &sf);
+        ret = _IMFBGetSurface(fb, l, &sf);
         if (ret == KERN_SUCCESS && sf) break;
     }
     if (!sf) {
@@ -214,17 +221,18 @@ static int cmd_pixel(int x, int y) {
 }
 
 static int cmd_size(void) {
+    _loadIOMFB();
     kfd_escalate();
 
     IOMFBRef fb = NULL;
-    if (IOMobileFramebufferGetMainDisplay(&fb) != KERN_SUCCESS || !fb) {
+    if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
         printf("ERR IOMFB 失败\n");
         return 1;
     }
 
     IOSurfaceRef sf = NULL;
     for (int l = 0; l <= 2; l++) {
-        if (IOMobileFramebufferGetLayerDefaultSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
+        if (_IMFBGetSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
     }
     if (!sf) { printf("ERR Surface 失败\n"); return 1; }
 
@@ -237,16 +245,17 @@ static int cmd_size(void) {
 }
 
 static int cmd_capture(const char *path) {
+    _loadIOMFB();
     kfd_escalate();
 
     IOMFBRef fb = NULL;
-    if (IOMobileFramebufferGetMainDisplay(&fb) != KERN_SUCCESS || !fb) {
+    if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
         printf("ERR IOMFB 失败\n"); return 1;
     }
 
     IOSurfaceRef sf = NULL;
     for (int l = 0; l <= 2; l++) {
-        if (IOMobileFramebufferGetLayerDefaultSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
+        if (_IMFBGetSurface(fb, l, &sf) == KERN_SUCCESS && sf) break;
     }
     if (!sf) { printf("ERR Surface 失败\n"); return 1; }
 
