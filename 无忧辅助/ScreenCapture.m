@@ -11,7 +11,7 @@
 
 // ============================================================
 // CGDisplay 模式 — 后台可用（no-sandbox + allow-screen-capture）
-// CGDisplayCreateImage / CGMainDisplayID 在 IOKit 中是私有符号，dlsym 加载
+// CGDisplayCreateImage 在 QuartzCore/CoreGraphics 框架中，需 dlopen 加载
 // ============================================================
 static CGImageRef (*_CGDisplayCreateImage)(uint32_t) = NULL;
 static uint32_t   (*_CGMainDisplayID)(void) = NULL;
@@ -19,12 +19,31 @@ static uint32_t   (*_CGMainDisplayID)(void) = NULL;
 static void _cgDisplayLoad(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        // iOS 上 CGDisplayCreateImage 在以下框架中
+        const char *paths[] = {
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+            "/System/Library/Frameworks/QuartzCore.framework/QuartzCore",
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+            "/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness",
+        };
+        for (int i = 0; i < 4; i++) {
+            void *h = dlopen(paths[i], RTLD_NOW | RTLD_GLOBAL);
+            if (h) {
+                _CGDisplayCreateImage = (CGImageRef (*)(uint32_t))dlsym(h, "CGDisplayCreateImage");
+                _CGMainDisplayID      = (uint32_t (*)(void))dlsym(h, "CGMainDisplayID");
+                if (_CGDisplayCreateImage && _CGMainDisplayID) {
+                    NSLog(@"[SC] ✅ CGDisplay API 从 %s 加载", strrchr(paths[i], '/') + 1);
+                    return;
+                }
+            }
+        }
+        // 最后的尝试：直接搜索全局符号
         _CGDisplayCreateImage = (CGImageRef (*)(uint32_t))dlsym(RTLD_DEFAULT, "CGDisplayCreateImage");
         _CGMainDisplayID      = (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "CGMainDisplayID");
         if (_CGDisplayCreateImage && _CGMainDisplayID) {
-            NSLog(@"[SC] ✅ CGDisplay API 已加载");
+            NSLog(@"[SC] ✅ CGDisplay API 从全局符号加载");
         } else {
-            NSLog(@"[SC] ⚠️ CGDisplay API 未找到");
+            NSLog(@"[SC] ❌ CGDisplay API 加载失败");
         }
     });
 }
