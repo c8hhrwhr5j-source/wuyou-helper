@@ -2,10 +2,6 @@
 //  TouchSimulation.m
 //  无忧辅助 - 进程内原生触摸事件注入（TrollStore 静态 Dylib 方案）
 //
-//  原理：在目标 App 进程内直接构造 UITouch/UIEvent，通过 UIApplication sendEvent 派发
-//  优势：完全绕开系统 HID 层权限限制，无需 CGEvent/IOHID，函数指针不会归零
-//  适用：iOS 14-16.6.1，TrollStore 静态 Dylib 注入
-//
 
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
@@ -16,6 +12,7 @@
 #import <unistd.h>
 
 static CGSize _screenSize = {0, 0};
+static CGFloat _scale = 1.0;
 static uint32_t _fingerSeq = 1000;
 
 // MARK: - TouchSlide 实现
@@ -94,6 +91,7 @@ static uint32_t _fingerSeq = 1000;
 - (instancetype)init {
     if (self = [super init]) {
         _screenSize = [UIScreen mainScreen].bounds.size;
+        _scale = [UIScreen mainScreen].scale;
         _lastX = 0;
         _lastY = 0;
         _lastIdentity = 0;
@@ -109,8 +107,9 @@ static uint32_t _fingerSeq = 1000;
     NSLog(@"%@", msg);
 }
 
-- (uint64_t)_now {
-    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1e9);
+// 将物理像素坐标转换为逻辑坐标（适配屏幕缩放）
+- (CGPoint)_convertToLogicalPoint:(CGPoint)physicalPoint {
+    return CGPointMake(physicalPoint.x / _scale, physicalPoint.y / _scale);
 }
 
 // 核心：构造原生 UITouch 对象
@@ -120,7 +119,8 @@ static uint32_t _fingerSeq = 1000;
     UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
     if (!keyWindow) return nil;
     
-    CGPoint location = CGPointMake(x, y);
+    CGPoint logicalPoint = [self _convertToLogicalPoint:CGPointMake(x, y)];
+    CGPoint location = logicalPoint;
     
     UIView *hitView = [keyWindow hitTest:location withEvent:nil];
     if (!hitView) hitView = keyWindow.rootViewController.view;
@@ -220,8 +220,8 @@ static uint32_t _fingerSeq = 1000;
         case UITouchPhaseCancelled: phaseName = "CANCEL"; break;
         default: phaseName = "UNKNOWN";
     }
-    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f finger=%u", 
-        phaseName, x, y, fingerID]];
+    [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 %s x=%.0f y=%.0f (scaled) finger=%u", 
+        phaseName, x / _scale, y / _scale, fingerID]];
 }
 
 // 备用方案：直接向视图层派发 touches 消息
@@ -231,8 +231,8 @@ static uint32_t _fingerSeq = 1000;
     UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
     if (!keyWindow) return;
     
-    CGPoint location = CGPointMake(x, y);
-    UIView *hitView = [keyWindow hitTest:location withEvent:nil];
+    CGPoint logicalPoint = [self _convertToLogicalPoint:CGPointMake(x, y)];
+    UIView *hitView = [keyWindow hitTest:logicalPoint withEvent:nil];
     if (!hitView) hitView = keyWindow.rootViewController.view;
     
     UITouch *touch = [self _createTouchAtX:x y:y phase:phase fingerID:fingerID];
@@ -262,9 +262,10 @@ static uint32_t _fingerSeq = 1000;
 - (void)logDiagnostic {
     UIApplication *app = [UIApplication sharedApplication];
     if (app && app.keyWindow) {
-        [self _log:@"[TouchSimulation] ✅ 进程内触摸系统已就绪"];
-        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 屏幕尺寸: %.0fx%.0f", 
-            _screenSize.width, _screenSize.height]];
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] ✅ 进程内触摸系统已就绪"]];
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 📱 逻辑尺寸: %.0fx%.0f, 缩放: %.1f, 物理尺寸: %.0fx%.0f", 
+            _screenSize.width, _screenSize.height, _scale,
+            _screenSize.width * _scale, _screenSize.height * _scale]];
     } else {
         [self _log:@"[TouchSimulation] ⚠️ UIApplication 尚未完全初始化"];
     }
