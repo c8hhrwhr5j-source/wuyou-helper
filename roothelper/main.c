@@ -270,7 +270,7 @@ static int iomfb_open(void) {
                 io_service_t svc2 = iomfb_find_service();
                 if (svc2 != MACH_PORT_NULL) {
                     CFMutableDictionaryRef p2 = NULL;
-                    if (IORegistryEntryCreateCFProperties(svc2, kCFAllocatorDefault, &p2,
+                    if (IORegistryEntryCreateCFProperties(svc2, &p2, kCFAllocatorDefault,
                                                            0) == KERN_SUCCESS && p2) {
                         CFNumberRef wN = CFDictionaryGetValue(p2, CFSTR("width"));
                         CFNumberRef hN = CFDictionaryGetValue(p2, CFSTR("height"));
@@ -380,7 +380,7 @@ static int cmd_size(void) {
     io_service_t svc = iomfb_find_service();
     if (svc != MACH_PORT_NULL) {
         CFMutableDictionaryRef props = NULL;
-        if (IORegistryEntryCreateCFProperties(svc, kCFAllocatorDefault, &props,
+        if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault,
                                                0) == KERN_SUCCESS && props) {
             int w = 0, h = 0, bpr = 0;
             CFNumberRef wN = CFDictionaryGetValue(props, CFSTR("width"));

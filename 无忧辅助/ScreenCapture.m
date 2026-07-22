@@ -13,7 +13,7 @@
 #import <spawn.h>
 #import <sys/wait.h>
 #import <IOKit/IOKitLib.h>
-#import <IOSurface/IOSurfaceRef.h>
+#import <IOSurface/IOSurface.h>
 
 // ---- IOMFB 直连 ----
 typedef struct __IOMobileFramebuffer *IMFBRef;
@@ -37,7 +37,7 @@ static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *o
         if (svc == MACH_PORT_NULL) continue;
 
         CFMutableDictionaryRef props = NULL;
-        if (IORegistryEntryCreateCFProperties(svc, kCFAllocatorDefault, &props, 0) != KERN_SUCCESS || !props) {
+        if (IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0) != KERN_SUCCESS || !props) {
             IOObjectRelease(svc); continue;
         }
 
@@ -48,7 +48,7 @@ static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *o
         };
         IOSurfaceRef found = NULL;
         for (int k = 0; sidKeys[k]; k++) {
-            CFNumberRef sidNum = CFDictionaryGetValue(props, (__bridge CFStringRef)@(sidKeys[k]));
+            CFNumberRef sidNum = CFDictionaryGetValue(props, (__bridge CFStringRef)[NSString stringWithUTF8String:sidKeys[k]]);
             if (!sidNum) continue;
             uint32_t sid = 0;
             if (CFNumberGetValue(sidNum, kCFNumberSInt32Type, &sid) && sid > 0) {
