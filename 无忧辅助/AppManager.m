@@ -73,12 +73,127 @@ static BOOL _lsLoaded  = NO;
     _lsLoaded = YES;
 }
 
-// ---- 前台包名 ----
+// ---- 通过 RunningBoard 获取前台 App Bundle ID ----
 - (NSString *)frontBid {
+    // 方案 A：SpringBoardServices（有对应 entitlement 时可用，否则可能闪退）
+    // 安全调用：先检查函数指针是否可调用
     if (_SBFrontmostAppDisplayId) {
-        NSString *bid = _SBFrontmostAppDisplayId();
-        if (bid) return bid;
+        @try {
+            NSString *bid = _SBFrontmostAppDisplayId();
+            if (bid && [bid length] > 0) return bid;
+        } @catch (NSException *e) {
+            NSLog(@"[AppManager] SBFrontmostAppDisplayId threw: %@", e);
+        }
     }
+
+    // 方案 B：通过 RunningBoard 遍历进程找前台应用
+    return [self _frontBidViaRB];
+}
+
+- (NSString *)_frontBidViaRB {
+    // 动态加载 RunningBoardServices
+    static dispatch_once_t rbOnce;
+    static Class RBSProcessMonitorClass = nil;
+    dispatch_once(&rbOnce, ^{
+        void *rb = dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
+        if (rb) {
+            RBSProcessMonitorClass = NSClassFromString(@"RBSProcessMonitor");
+        }
+    });
+
+    if (!RBSProcessMonitorClass) return @"";
+
+    // RBSProcessMonitor +[sharedInstance]
+    id monitor = [RBSProcessMonitorClass performSelector:NSSelectorFromString(@"sharedInstance")];
+    if (!monitor) return @"";
+
+    // [monitor statesForPredicate:error:] 或 [monitor trackedAssertion] 不行的话
+    // 直接调用私有方法：_RBGetProcessInfo 或 RBSProcessHandle allProcesses
+    static Class RBSProcessHandleClass = nil;
+    static dispatch_once_t hOnce;
+    dispatch_once(&hOnce, ^{
+        RBSProcessHandleClass = NSClassFromString(@"RBSProcessHandle");
+    });
+
+    if (!RBSProcessHandleClass) return @"";
+
+    // 尝试 [RBSProcessHandle allProcesses]
+    NSArray *processes = nil;
+    SEL allProcSel = NSSelectorFromString(@"allProcesses");
+    if ([RBSProcessHandleClass respondsToSelector:allProcSel]) {
+        processes = [RBSProcessHandleClass performSelector:allProcSel];
+    }
+    // fallback: [RBSProcessHandle processes]
+    if (!processes) {
+        SEL processesSel = NSSelectorFromString(@"processes");
+        if ([monitor respondsToSelector:processesSel]) {
+            processes = [monitor performSelector:processesSel];
+        }
+    }
+
+    if (!processes || [processes count] == 0) return @"";
+
+    for (id process in processes) {
+        // 获取进程状态
+        id state = nil;
+        if ([process respondsToSelector:NSSelectorFromString(@"currentState")]) {
+            state = [process performSelector:NSSelectorFromString(@"currentState")];
+        }
+        if (!state) continue;
+
+        // 检查是否是 Application 且在前台
+        // taskState 或 applicationState 有 foreground 标记
+        NSNumber *isApp = nil;
+        NSNumber *fg = nil;
+
+        // 尝试 getter: isApplication, isForeground
+        if ([state respondsToSelector:NSSelectorFromString(@"isApplication")]) {
+            isApp = [state valueForKey:@"isApplication"];
+        }
+        if ([state respondsToSelector:NSSelectorFromString(@"isForeground")]) {
+            fg = [state valueForKey:@"isForeground"];
+        }
+
+        // fallback: 读 descriptor 或者 applicationState
+        if (!fg) {
+            id descriptor = nil;
+            if ([process respondsToSelector:NSSelectorFromString(@"descriptor")]) {
+                descriptor = [process performSelector:NSSelectorFromString(@"descriptor")];
+            }
+            if (descriptor) {
+                // RBSProcessStateDescriptor has foreground flag
+                if ([descriptor respondsToSelector:NSSelectorFromString(@"isForeground")]) {
+                    fg = [descriptor valueForKey:@"isForeground"];
+                }
+            }
+        }
+
+        // 不是应用或不在前台就跳过
+        if (isApp && ![isApp boolValue]) continue;
+        if (!fg || ![fg boolValue]) continue;
+
+        // 获取 bundle identifier
+        id identity = nil;
+        if ([process respondsToSelector:NSSelectorFromString(@"identity")]) {
+            identity = [process performSelector:NSSelectorFromString(@"identity")];
+        }
+        if (!identity && [process respondsToSelector:NSSelectorFromString(@"descriptor")]) {
+            identity = [process performSelector:NSSelectorFromString(@"descriptor")];
+        }
+
+        NSString *bid = nil;
+        // 尝试从 identity/descriptor 中提取 bundle identifier
+        if ([identity respondsToSelector:NSSelectorFromString(@"bundleIdentifier")]) {
+            bid = [identity valueForKey:@"bundleIdentifier"];
+        } else if ([identity respondsToSelector:NSSelectorFromString(@"bundleID")]) {
+            bid = [identity valueForKey:@"bundleID"];
+        } else if ([identity isKindOfClass:[NSString class]]) {
+            bid = (NSString *)identity;
+        }
+
+        if (bid && [bid length] > 0) return bid;
+    }
+
     return @"";
 }
 
