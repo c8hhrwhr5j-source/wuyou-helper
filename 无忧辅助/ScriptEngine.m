@@ -18,6 +18,7 @@
 // 这样 Lua 的 stop_script() 和 UI 停止按钮都能生效
 extern volatile int _global_script_stop_flag;
 static volatile BOOL   _globalPaused  = NO;
+static UIBackgroundTaskIdentifier _bgTask = UIBackgroundTaskInvalid;
 static NSCondition    *_globalPauseCondition = nil;
 
 // lua_sethook 回调（每条 Lua 指令后触发，纯 C）
@@ -79,6 +80,18 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
     if (!code || code.length == 0) {
         [self _log:@"脚本代码为空"];
         return NO;
+    }
+
+    // 开启后台任务，防止进入后台后线程被挂起
+    if (_bgTask == UIBackgroundTaskInvalid) {
+        _bgTask = [[UIApplication sharedApplication] beginBackgroundTaskWithName:@"LuaScript" expirationHandler:^{
+            // 系统即将结束时清理
+            if (_bgTask != UIBackgroundTaskInvalid) {
+                [[UIApplication sharedApplication] endBackgroundTask:_bgTask];
+                _bgTask = UIBackgroundTaskInvalid;
+            }
+        }];
+        NSLog(@"[ScriptEngine] Background task started: %lu", (unsigned long)_bgTask);
     }
 
     [self _setState:ScriptStateRunning];
@@ -234,6 +247,13 @@ static void lua_hook_callback(lua_State *L, lua_Debug *ar) {
     // 清理
     lua_close(_luaState);
     _luaState = NULL;
+
+    // 结束后台任务
+    if (_bgTask != UIBackgroundTaskInvalid) {
+        [[UIApplication sharedApplication] endBackgroundTask:_bgTask];
+        _bgTask = UIBackgroundTaskInvalid;
+        NSLog(@"[ScriptEngine] Background task ended");
+    }
 
     // 更新状态
     dispatch_async(dispatch_get_main_queue(), ^{
