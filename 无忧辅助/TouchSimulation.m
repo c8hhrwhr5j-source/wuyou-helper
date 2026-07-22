@@ -10,6 +10,7 @@
 #import "TouchSimulation.h"
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <objc/message.h>
 #import <stdlib.h>
 #import <math.h>
 #import <unistd.h>
@@ -121,28 +122,36 @@ static uint32_t _fingerSeq = 1000;
     
     CGPoint location = CGPointMake(x, y);
     
-    // 找到触摸目标视图
     UIView *hitView = [keyWindow hitTest:location withEvent:nil];
     if (!hitView) hitView = keyWindow.rootViewController.view;
     
-    // 创建 UITouch 对象
     UITouch *touch = [[UITouch alloc] init];
     
-    // 设置触摸属性（通过 KVC 或直接内存操作）
-    [touch setValue:[NSNumber numberWithInteger:fingerID + 1] forKey:@"_identity"];
-    [touch setValue:[NSNumber numberWithInteger:0] forKey:@"_phase"];
-    
-    // 使用私有 API 设置位置和目标
     SEL setLocationSEL = NSSelectorFromString(@"setLocation:inView:");
     if ([touch respondsToSelector:setLocationSEL]) {
-        ((void (*)(id, SEL, CGPoint, UIView *))objc_msgSend)(
-            touch, setLocationSEL, location, hitView);
+        IMP imp = [touch methodForSelector:setLocationSEL];
+        void (*setLocation)(id, SEL, CGPoint, UIView *) = (void (*)(id, SEL, CGPoint, UIView *))imp;
+        if (setLocation) {
+            setLocation(touch, setLocationSEL, location, hitView);
+        }
     }
     
-    // 设置触摸阶段
     SEL setPhaseSEL = NSSelectorFromString(@"_setPhase:");
     if ([touch respondsToSelector:setPhaseSEL]) {
-        ((void (*)(id, SEL, UITouchPhase))objc_msgSend)(touch, setPhaseSEL, phase);
+        IMP imp = [touch methodForSelector:setPhaseSEL];
+        void (*setPhase)(id, SEL, UITouchPhase) = (void (*)(id, SEL, UITouchPhase))imp;
+        if (setPhase) {
+            setPhase(touch, setPhaseSEL, phase);
+        }
+    }
+    
+    SEL setIdentitySEL = NSSelectorFromString(@"_setIdentity:");
+    if ([touch respondsToSelector:setIdentitySEL]) {
+        IMP imp = [touch methodForSelector:setIdentitySEL];
+        void (*setIdentity)(id, SEL, NSInteger) = (void (*)(id, SEL, NSInteger))imp;
+        if (setIdentity) {
+            setIdentity(touch, setIdentitySEL, (NSInteger)(fingerID + 1));
+        }
     }
     
     return touch;
@@ -152,20 +161,33 @@ static uint32_t _fingerSeq = 1000;
 - (UIEvent *)_createEventWithTouches:(NSArray *)touches phase:(UITouchPhase)phase {
     UIEvent *event = [[UIEvent alloc] init];
     
-    // 设置事件类型
-    [event setValue:[NSNumber numberWithInteger:UIEventTypeTouches] forKey:@"_eventType"];
-    
-    // 设置触摸集合
-    NSMutableSet *touchSet = [NSMutableSet setWithArray:touches];
-    SEL setTouchesForPhaseSEL = NSSelectorFromString(@"_setTouches:forPhase:");
-    if ([event respondsToSelector:setTouchesForPhaseSEL]) {
-        ((void (*)(id, SEL, NSSet *, UITouchPhase))objc_msgSend)(
-            event, setTouchesForPhaseSEL, touchSet, phase);
+    SEL setEventTypeSEL = NSSelectorFromString(@"_setEventType:");
+    if ([event respondsToSelector:setEventTypeSEL]) {
+        IMP imp = [event methodForSelector:setEventTypeSEL];
+        void (*setEventType)(id, SEL, NSInteger) = (void (*)(id, SEL, NSInteger))imp;
+        if (setEventType) {
+            setEventType(event, setEventTypeSEL, UIEventTypeTouches);
+        }
     }
     
-    // 设置时间戳
-    [event setValue:[NSNumber numberWithDouble:[[NSDate date] timeIntervalSinceReferenceDate]] 
-             forKey:@"_timestamp"];
+    NSMutableSet *touchSet = [NSMutableSet setWithArray:touches];
+    SEL setTouchesSEL = NSSelectorFromString(@"_setTouches:forPhase:");
+    if ([event respondsToSelector:setTouchesSEL]) {
+        IMP imp = [event methodForSelector:setTouchesSEL];
+        void (*setTouches)(id, SEL, NSSet *, UITouchPhase) = (void (*)(id, SEL, NSSet *, UITouchPhase))imp;
+        if (setTouches) {
+            setTouches(event, setTouchesSEL, touchSet, phase);
+        }
+    }
+    
+    SEL setTimestampSEL = NSSelectorFromString(@"_setTimestamp:");
+    if ([event respondsToSelector:setTimestampSEL]) {
+        IMP imp = [event methodForSelector:setTimestampSEL];
+        void (*setTimestamp)(id, SEL, NSTimeInterval) = (void (*)(id, SEL, NSTimeInterval))imp;
+        if (setTimestamp) {
+            setTimestamp(event, setTimestampSEL, [[NSDate date] timeIntervalSinceReferenceDate]);
+        }
+    }
     
     return event;
 }
@@ -187,7 +209,6 @@ static uint32_t _fingerSeq = 1000;
         return;
     }
     
-    // 通过 UIApplication 派发事件
     UIApplication *app = [UIApplication sharedApplication];
     [app sendEvent:event];
     
