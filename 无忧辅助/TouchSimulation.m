@@ -47,9 +47,9 @@ typedef const struct __AXUIElement *AXUIElementRef;
 typedef int32_t AXError;
 #define kAXErrorSuccess 0
 static BOOL _axReady = NO;
-static AXUIElementRef (*_axSysWide)(void) = NULL;
-static AXError (*_axCopyAtPos)(AXUIElementRef, float, float, AXUIElementRef*) = NULL;
-static AXError (*_axPerform)(AXUIElementRef, CFStringRef) = NULL;
+static void *_axSysWide = NULL;
+static void *_axCopyAtPos = NULL;
+static void *_axPerform = NULL;
 
 static void _axSetup(void) {
     static dispatch_once_t once;
@@ -89,12 +89,20 @@ static BOOL _axTapAt(CGFloat x, CGFloat y) {
     _axSetup();
     if (!_axReady) return NO;
 
-    AXUIElementRef sysWide = _axSysWide();
+    typedef AXUIElementRef (*SysWideFn)(void);
+    typedef AXError (*CopyAtFn)(AXUIElementRef, float, float, AXUIElementRef*);
+    typedef AXError (*PerformFn)(AXUIElementRef, CFStringRef);
+
+    SysWideFn sysWideFn = (SysWideFn)_axSysWide;
+    CopyAtFn   copyAtFn = (CopyAtFn)_axCopyAtPos;
+    PerformFn  perfFn   = (PerformFn)_axPerform;
+
+    AXUIElementRef sysWide = sysWideFn();
     if (!sysWide) return NO;
 
     CGPoint pt = CGPointMake(x, y);
     AXUIElementRef element = NULL;
-    AXError err = _axCopyAtPos(sysWide, (float)pt.x, (float)pt.y, &element);
+    AXError err = copyAtFn(sysWide, (float)pt.x, (float)pt.y, &element);
     CFRelease(sysWide);
 
     if (err != kAXErrorSuccess || !element) {
@@ -102,12 +110,11 @@ static BOOL _axTapAt(CGFloat x, CGFloat y) {
         return NO;
     }
 
-    // kAXPressAction = CFSTR("AXPress"), kAXPickAction = CFSTR("AXPick")
-    err = _axPerform(element, CFSTR("AXPress"));
+    err = perfFn(element, CFSTR("AXPress"));
     if (err == kAXErrorSuccess) {
         NSLog(@"[TS] ⚡ AX press at (%.0f,%.0f) ✅", x, y);
     } else {
-        err = _axPerform(element, CFSTR("AXPick"));
+        err = perfFn(element, CFSTR("AXPick"));
         if (err == kAXErrorSuccess) {
             NSLog(@"[TS] ⚡ AX pick at (%.0f,%.0f) ✅", x, y);
         }
