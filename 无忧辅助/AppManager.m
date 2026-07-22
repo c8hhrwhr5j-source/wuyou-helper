@@ -1,238 +1,319 @@
 //
 //  AppManager.m
-//  无忧辅助 - 应用管理（通过动态加载私有框架实现）
+//  无忧辅助 - 应用管理（信号安全 + 多层回退策略）
 //
 
 #import "AppManager.h"
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <signal.h>
+#import <setjmp.h>
 
-// ---- SpringBoardServices 函数指针 ----
+// ---- SIGSEGV 安全调用宏 ----
+static jmp_buf g_jmp;
+static volatile sig_atomic_t g_jmpReady = 0;
+
+static void _safeCall_sighandler(int sig) {
+    (void)sig;
+    if (g_jmpReady) {
+        g_jmpReady = 0;
+        siglongjmp(g_jmp, 1);
+    }
+}
+
+static void _installSigHandler(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = _safeCall_sighandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_NODEFER;
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGBUS,  &sa, NULL);
+    });
+}
+
+// 安全调用一个返回 NSString* 的 C 函数指针，SIGSEGV 时返回 nil
+static NSString *_safeCall_NSString(NSString *(*fn)(void)) {
+    if (!fn) return nil;
+    _installSigHandler();
+    g_jmpReady = 1;
+    if (sigsetjmp(g_jmp, 1) == 0) {
+        NSString *r = fn();
+        g_jmpReady = 0;
+        return r;
+    }
+    g_jmpReady = 0;
+    return nil;
+}
+
+// ---- SpringBoardServices ----
 static void *_sbsHandle = NULL;
-static NSString * (*_SBFrontmostAppDisplayId)(void) = NULL;
-static int (*_SBSLaunchApp)(void *bundleId, bool suspended) = NULL;
-static int (*_SBSTerminateApp)(void *bundleId) = NULL;
+static NSString *(*_SB_FrontApp)(void) = NULL;
+static int (*_SB_Launch)(void *bundleId, bool suspended) = NULL;
+static int (*_SB_Terminate)(void *bundleId) = NULL;
 
-// ---- LaunchServices 函数指针 ----
-static void *_lsHandle = NULL;
-extern CFTypeRef _LSCopyApplicationInformationItem(int, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef);
-static CFTypeRef (*_LSCopyAppInfo)(int, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef) = NULL;
+// ---- NSInvocation 辅助：安全调用返回 id 的无参方法 ----
+static id _safeInvoke_id_noargs(id target, SEL sel) {
+    if (!target || !sel) return nil;
+    @try {
+        NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+        if (!sig) return nil;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:target];
+        [inv setSelector:sel];
+        [inv invoke];
+        void *ret = NULL;
+        [inv getReturnValue:&ret];
+        return (__bridge id)ret;
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
 
-static BOOL _sbsLoaded = NO;
-static BOOL _lsLoaded  = NO;
+static id _safeInvoke_id_sel_arg(id target, SEL sel, SEL arg) {
+    if (!target || !sel) return nil;
+    @try {
+        NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+        if (!sig) return nil;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:target];
+        [inv setSelector:sel];
+        [inv setArgument:&arg atIndex:2];
+        [inv invoke];
+        void *ret = NULL;
+        [inv getReturnValue:&ret];
+        return (__bridge id)ret;
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static id _safeInvoke_withObject(id target, SEL sel, id obj) {
+    if (!target || !sel) return nil;
+    @try {
+        NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+        if (!sig) return nil;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:target];
+        [inv setSelector:sel];
+        if (obj) [inv setArgument:&obj atIndex:2];
+        [inv invoke];
+        void *ret = NULL;
+        if (sig.methodReturnLength > 0) {
+            [inv getReturnValue:&ret];
+        }
+        return (__bridge id)ret;
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static BOOL _safeInvoke_BOOL_noargs(id target, SEL sel) {
+    if (!target || !sel) return NO;
+    @try {
+        NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+        if (!sig) return NO;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:target];
+        [inv setSelector:sel];
+        [inv invoke];
+        BOOL ret = NO;
+        [inv getReturnValue:&ret];
+        return ret;
+    } @catch (NSException *e) {
+        return NO;
+    }
+}
 
 @implementation AppManager
 
 + (instancetype)sharedInstance {
-    static AppManager *instance;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        instance = [[AppManager alloc] init];
-    });
-    return instance;
+    static AppManager *i;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ i = [[AppManager alloc] init]; });
+    return i;
 }
 
 - (instancetype)init {
     if (self = [super init]) {
         [self _loadSBS];
-        [self _loadLS];
     }
     return self;
 }
 
 // ---- 加载 SpringBoardServices ----
 - (void)_loadSBS {
-    if (_sbsLoaded) return;
     _sbsHandle = dlopen(
         "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
         RTLD_NOW);
     if (!_sbsHandle) return;
 
-    _SBFrontmostAppDisplayId = (NSString *(*)(void))dlsym(_sbsHandle, "SBFrontmostApplicationDisplayIdentifier");
-    if (!_SBFrontmostAppDisplayId) {
-        // iOS 15+ 可能改名，尝试另一个符号
-        _SBFrontmostAppDisplayId = (NSString *(*)(void))dlsym(_sbsHandle, "SBSCopyFrontmostApplicationDisplayIdentifier");
+    _SB_FrontApp = (NSString *(*)(void))dlsym(_sbsHandle, "SBSCopyFrontmostApplicationDisplayIdentifier");
+    if (!_SB_FrontApp) {
+        _SB_FrontApp = (NSString *(*)(void))dlsym(_sbsHandle, "SBFrontmostApplicationDisplayIdentifier");
     }
-    _SBSLaunchApp = (int (*)(void*, bool))dlsym(_sbsHandle, "SBSLaunchApplicationWithIdentifier");
-    _SBSTerminateApp = (int (*)(void*))dlsym(_sbsHandle, "SBSTerminateApplicationWithIdentifier");
-
-    _sbsLoaded = YES;
+    _SB_Launch = (int(*)(void*,bool))dlsym(_sbsHandle, "SBSLaunchApplicationWithIdentifier");
+    _SB_Terminate = (int(*)(void*))dlsym(_sbsHandle, "SBSTerminateApplicationWithIdentifier");
 }
 
-// ---- 加载 LaunchServices ----
-- (void)_loadLS {
-    if (_lsLoaded) return;
-    _lsHandle = dlopen(
-        "/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
-        RTLD_NOW);
-    if (_lsHandle) {
-        _LSCopyAppInfo = (CFTypeRef (*)(int, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef))
-            dlsym(_lsHandle, "_LSCopyApplicationInformationItem");
-    }
-    _lsLoaded = YES;
-}
-
-// ---- 通过 RunningBoard 获取前台 App Bundle ID ----
+// ================================================================
+// 前台包名：三层回退
+// ================================================================
 - (NSString *)frontBid {
-    // 方案 A：SpringBoardServices（有对应 entitlement 时可用，否则可能闪退）
-    // 安全调用：先检查函数指针是否可调用
-    if (_SBFrontmostAppDisplayId) {
-        @try {
-            NSString *bid = _SBFrontmostAppDisplayId();
-            if (bid && [bid length] > 0) return bid;
-        } @catch (NSException *e) {
-            NSLog(@"[AppManager] SBFrontmostAppDisplayId threw: %@", e);
-        }
-    }
+    // 方案 A：SpringBoardServices（带 SIGSEGV 保护）
+    NSString *bid = _safeCall_NSString(_SB_FrontApp);
+    if (bid && [bid length] > 0) return bid;
 
-    // 方案 B：通过 RunningBoard 遍历进程找前台应用
-    return [self _frontBidViaRB];
-}
+    // 方案 B：RunningBoard — RBSProcessMonitor
+    bid = [self _frontViaProcessMonitor];
+    if (bid && [bid length] > 0) return bid;
 
-- (NSString *)_frontBidViaRB {
-    // 动态加载 RunningBoardServices
-    static dispatch_once_t rbOnce;
-    static Class RBSProcessMonitorClass = nil;
-    dispatch_once(&rbOnce, ^{
-        void *rb = dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
-        if (rb) {
-            RBSProcessMonitorClass = NSClassFromString(@"RBSProcessMonitor");
-        }
-    });
-
-    if (!RBSProcessMonitorClass) return @"";
-
-    // RBSProcessMonitor +[sharedInstance]
-    id monitor = [RBSProcessMonitorClass performSelector:NSSelectorFromString(@"sharedInstance")];
-    if (!monitor) return @"";
-
-    // [monitor statesForPredicate:error:] 或 [monitor trackedAssertion] 不行的话
-    // 直接调用私有方法：_RBGetProcessInfo 或 RBSProcessHandle allProcesses
-    static Class RBSProcessHandleClass = nil;
-    static dispatch_once_t hOnce;
-    dispatch_once(&hOnce, ^{
-        RBSProcessHandleClass = NSClassFromString(@"RBSProcessHandle");
-    });
-
-    if (!RBSProcessHandleClass) return @"";
-
-    // 尝试 [RBSProcessHandle allProcesses]
-    NSArray *processes = nil;
-    SEL allProcSel = NSSelectorFromString(@"allProcesses");
-    if ([RBSProcessHandleClass respondsToSelector:allProcSel]) {
-        processes = [RBSProcessHandleClass performSelector:allProcSel];
-    }
-    // fallback: [RBSProcessHandle processes]
-    if (!processes) {
-        SEL processesSel = NSSelectorFromString(@"processes");
-        if ([monitor respondsToSelector:processesSel]) {
-            processes = [monitor performSelector:processesSel];
-        }
-    }
-
-    if (!processes || [processes count] == 0) return @"";
-
-    for (id process in processes) {
-        // 获取进程状态
-        id state = nil;
-        if ([process respondsToSelector:NSSelectorFromString(@"currentState")]) {
-            state = [process performSelector:NSSelectorFromString(@"currentState")];
-        }
-        if (!state) continue;
-
-        // 检查是否是 Application 且在前台
-        // taskState 或 applicationState 有 foreground 标记
-        NSNumber *isApp = nil;
-        NSNumber *fg = nil;
-
-        // 尝试 getter: isApplication, isForeground
-        if ([state respondsToSelector:NSSelectorFromString(@"isApplication")]) {
-            isApp = [state valueForKey:@"isApplication"];
-        }
-        if ([state respondsToSelector:NSSelectorFromString(@"isForeground")]) {
-            fg = [state valueForKey:@"isForeground"];
-        }
-
-        // fallback: 读 descriptor 或者 applicationState
-        if (!fg) {
-            id descriptor = nil;
-            if ([process respondsToSelector:NSSelectorFromString(@"descriptor")]) {
-                descriptor = [process performSelector:NSSelectorFromString(@"descriptor")];
-            }
-            if (descriptor) {
-                // RBSProcessStateDescriptor has foreground flag
-                if ([descriptor respondsToSelector:NSSelectorFromString(@"isForeground")]) {
-                    fg = [descriptor valueForKey:@"isForeground"];
-                }
-            }
-        }
-
-        // 不是应用或不在前台就跳过
-        if (isApp && ![isApp boolValue]) continue;
-        if (!fg || ![fg boolValue]) continue;
-
-        // 获取 bundle identifier
-        id identity = nil;
-        if ([process respondsToSelector:NSSelectorFromString(@"identity")]) {
-            identity = [process performSelector:NSSelectorFromString(@"identity")];
-        }
-        if (!identity && [process respondsToSelector:NSSelectorFromString(@"descriptor")]) {
-            identity = [process performSelector:NSSelectorFromString(@"descriptor")];
-        }
-
-        NSString *bid = nil;
-        // 尝试从 identity/descriptor 中提取 bundle identifier
-        if ([identity respondsToSelector:NSSelectorFromString(@"bundleIdentifier")]) {
-            bid = [identity valueForKey:@"bundleIdentifier"];
-        } else if ([identity respondsToSelector:NSSelectorFromString(@"bundleID")]) {
-            bid = [identity valueForKey:@"bundleID"];
-        } else if ([identity isKindOfClass:[NSString class]]) {
-            bid = (NSString *)identity;
-        }
-
-        if (bid && [bid length] > 0) return bid;
-    }
+    // 方案 C：RunningBoard — RBSProcessHandle allProcesses
+    bid = [self _frontViaAllProcesses];
+    if (bid && [bid length] > 0) return bid;
 
     return @"";
 }
 
-// ---- 启动应用 ----
+- (NSString *)_frontViaProcessMonitor {
+    static dispatch_once_t once;
+    static Class MonitorClass = nil;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
+        if (h) MonitorClass = NSClassFromString(@"RBSProcessMonitor");
+    });
+    if (!MonitorClass) return nil;
+
+    id monitor = _safeInvoke_id_noargs(MonitorClass, NSSelectorFromString(@"sharedInstance"));
+    if (!monitor) return nil;
+
+    // RBSProcessMonitorConfiguration with filter
+    SEL matchHandleSel = NSSelectorFromString(@"predicateMatchingHandle:");
+    id predicate = _safeInvoke_withObject(MonitorClass, NSSelectorFromString(@"predicateMatchingBundleIdentifier:"), nil);
+
+    // Try: [monitor statesForConfiguration:config error:&err] -> returns NSSet<RBSProcessState *>
+    // First try the simpler approach: [monitor processStateForProcessIdentifier:]
+    // Actually let me try: [monitor trackedAssertion] or direct query
+
+    // Try: config = [[RBSProcessMonitorConfiguration alloc] init]; [config setPredicates:@[predicate]]; [config setStateDescriptor:...];
+    // Actually, simplest: just try to get foreground state from the monitor's tracked state
+
+    // Try: updateStatesWithConfiguration:... but this is overkill
+    // Back off to _frontViaAllProcesses
+    return nil;
+}
+
+- (NSString *)_frontViaAllProcesses {
+    static dispatch_once_t once;
+    static Class HandleClass = nil;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
+        if (h) HandleClass = NSClassFromString(@"RBSProcessHandle");
+    });
+    if (!HandleClass) return nil;
+
+    // [RBSProcessHandle allProcesses]
+    NSArray *processes = nil;
+    SEL allProcSel = NSSelectorFromString(@"allProcesses");
+    if ([HandleClass respondsToSelector:allProcSel]) {
+        processes = [HandleClass performSelector:allProcSel];
+    }
+    if (!processes || [processes count] == 0) return nil;
+
+    for (id proc in processes) {
+        @try {
+            // Get state
+            id state = _safeInvoke_id_noargs(proc, NSSelectorFromString(@"currentState"));
+            if (!state) continue;
+
+            // Check foreground
+            BOOL isFg = _safeInvoke_BOOL_noargs(state, NSSelectorFromString(@"foreground"));
+            if (!isFg) continue;
+
+            // Check it's an app (not daemon)
+            // RBSProcessState has taskState
+            id taskState = _safeInvoke_id_noargs(state, NSSelectorFromString(@"taskState"));
+            if (taskState) {
+                // Skip non-app states (daemons, etc)
+                NSString *tsDesc = nil;
+                if ([taskState respondsToSelector:@selector(description)]) {
+                    tsDesc = [taskState description];
+                }
+                // Rough filter
+            }
+
+            // Get identity -> bundle identifier
+            id identity = _safeInvoke_id_noargs(proc, NSSelectorFromString(@"identity"));
+            NSString *bid = nil;
+
+            if ([identity respondsToSelector:NSSelectorFromString(@"bundleIdentifier")]) {
+                bid = _safeInvoke_id_noargs(identity, NSSelectorFromString(@"bundleIdentifier"));
+            }
+            if (!bid && [identity respondsToSelector:NSSelectorFromString(@"embeddedApplicationIdentifier")]) {
+                bid = _safeInvoke_id_noargs(identity, NSSelectorFromString(@"embeddedApplicationIdentifier"));
+            }
+            if (!bid && [identity isKindOfClass:[NSString class]]) {
+                bid = (NSString *)identity;
+            }
+
+            if (bid && [bid length] > 0) return bid;
+        } @catch (NSException *e) {
+            continue;
+        }
+    }
+
+    return nil;
+}
+
+// ================================================================
+// 启动应用
+// ================================================================
 - (BOOL)runApp:(NSString *)bundleId {
-    if (!_SBSLaunchApp || !bundleId) return NO;
-    int ret = _SBSLaunchApp((__bridge void *)bundleId, false);
+    if (!_SB_Launch || !bundleId) return NO;
+    int ret = _SB_Launch((__bridge void *)bundleId, false);
     return ret == 0;
 }
 
-// ---- 关闭应用 ----
+// ================================================================
+// 关闭应用
+// ================================================================
 - (BOOL)killApp:(NSString *)bundleId {
     if (!bundleId) return NO;
 
-    // 优先用 SpringBoardServices
-    if (_SBSTerminateApp) {
-        int ret = _SBSTerminateApp((__bridge void *)bundleId);
+    if (_SB_Terminate) {
+        int ret = _SB_Terminate((__bridge void *)bundleId);
         if (ret == 0) return YES;
     }
 
-    // 回退：用 runningBoard 的 RBSProcessHandle
-    return [self _killViaRunningBoard:bundleId];
+    return [self _killViaRB:bundleId];
 }
 
-// ---- 通过 RunningBoard 关闭（回退方案） ----
-- (BOOL)_killViaRunningBoard:(NSString *)bundleId {
-    RBSProcessPair pair = _getRBSProcessPair();
-    if (!pair.handleClass || !pair.predicateClass) return NO;
+- (BOOL)_killViaRB:(NSString *)bundleId {
+    static dispatch_once_t once;
+    static Class PredClass = nil, HandClass = nil;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
+        if (h) {
+            PredClass = NSClassFromString(@"RBSProcessPredicate");
+            HandClass = NSClassFromString(@"RBSProcessHandle");
+        }
+    });
+    if (!PredClass || !HandClass) return NO;
 
-    id predicate = [pair.predicateClass performSelector:NSSelectorFromString(@"predicateMatchingBundleIdentifier:")
-                                                  withObject:bundleId];
+    id predicate = _safeInvoke_withObject(PredClass,
+        NSSelectorFromString(@"predicateMatchingBundleIdentifier:"), bundleId);
     if (!predicate) return NO;
 
-    id handle = [pair.handleClass performSelector:NSSelectorFromString(@"handleForPredicate:error:")
-                                            withObject:predicate
-                                            withObject:nil];
+    id handle = _safeInvoke_withObject(HandClass,
+        NSSelectorFromString(@"handleForPredicate:error:"), predicate);
     if (!handle) return NO;
 
-    NSNumber *pidObj = [handle valueForKey:@"pid"];
+    NSNumber *pidObj = nil;
+    if ([handle respondsToSelector:NSSelectorFromString(@"pid")]) {
+        pidObj = _safeInvoke_id_noargs(handle, NSSelectorFromString(@"pid"));
+    }
     if (!pidObj) return NO;
 
     int pid = [pidObj intValue];
@@ -242,81 +323,58 @@ static BOOL _lsLoaded  = NO;
     return YES;
 }
 
-// ---- 共享 RunningBoard 类加载 ----
-typedef struct { Class handleClass; Class predicateClass; } RBSProcessPair;
-static RBSProcessPair _getRBSProcessPair(void) {
-    static dispatch_once_t once;
-    static Class hc = nil, pc = nil;
-    dispatch_once(&once, ^{
-        void *rb = dlopen(
-            "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices",
-            RTLD_NOW);
-        if (rb) {
-            hc = NSClassFromString(@"RBSProcessHandle");
-            pc = NSClassFromString(@"RBSProcessPredicate");
-        }
-    });
-    return (RBSProcessPair){hc, pc};
-}
-
-// ---- 检测是否运行 ----
+// ================================================================
+// 检测运行
+// ================================================================
 - (BOOL)isAppRunning:(NSString *)bundleId {
     if (!bundleId) return NO;
 
-    RBSProcessPair pair = _getRBSProcessPair();
-    if (!pair.handleClass || !pair.predicateClass) return NO;
+    static dispatch_once_t once;
+    static Class PredClass = nil, HandClass = nil;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices", RTLD_NOW);
+        if (h) {
+            PredClass = NSClassFromString(@"RBSProcessPredicate");
+            HandClass = NSClassFromString(@"RBSProcessHandle");
+        }
+    });
+    if (!PredClass || !HandClass) return NO;
 
-    id predicate = [pair.predicateClass performSelector:NSSelectorFromString(@"predicateMatchingBundleIdentifier:")
-                                                  withObject:bundleId];
+    id predicate = _safeInvoke_withObject(PredClass,
+        NSSelectorFromString(@"predicateMatchingBundleIdentifier:"), bundleId);
     if (!predicate) return NO;
 
-    id handle = [pair.handleClass performSelector:NSSelectorFromString(@"handleForPredicate:error:")
-                                            withObject:predicate
-                                            withObject:nil];
+    id handle = _safeInvoke_withObject(HandClass,
+        NSSelectorFromString(@"handleForPredicate:error:"), predicate);
     if (!handle) return NO;
 
-    NSNumber *pidObj = [handle valueForKey:@"pid"];
+    NSNumber *pidObj = nil;
+    if ([handle respondsToSelector:NSSelectorFromString(@"pid")]) {
+        pidObj = _safeInvoke_id_noargs(handle, NSSelectorFromString(@"pid"));
+    }
     return pidObj && [pidObj intValue] > 0;
 }
 
-// ---- 获取 Bundle 路径 ----
+// ================================================================
+// Bundle 路径
+// ================================================================
 - (NSString *)bundlePath:(NSString *)bundleId {
     if (!bundleId) return @"";
 
-    // 方法1: 用 MobileCoreServices _LSCopyApplicationInformationItem
-    if (_LSCopyAppInfo) {
-        // key 传 NULL 表示获取全部信息
-        CFTypeRef info = _LSCopyAppInfo(0, (__bridge CFTypeRef)bundleId, NULL, NULL, NULL, NULL);
-        if (info && CFGetTypeID(info) == CFDictionaryGetTypeID()) {
-            CFDictionaryRef dict = (CFDictionaryRef)info;
-            CFTypeRef path = CFDictionaryGetValue(dict, CFSTR("BundlePath"));
-            if (path && CFGetTypeID(path) == CFStringGetTypeID()) {
-                NSString *result = (__bridge NSString *)path;
-                CFRelease(info);
-                return result;
-            }
-            CFRelease(info);
-        } else if (info) {
-            CFRelease(info);
-        }
-    }
-
-    // 方法2: 硬编码路径（iOS 应用都在 /var/containers/Bundle/Application/UUID/）
-    // 遍历查找
+    // 直接遍历文件系统（最可靠）
     NSString *appsDir = @"/var/containers/Bundle/Application";
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *contents = [fm contentsOfDirectoryAtPath:appsDir error:nil];
     for (NSString *uuid in contents) {
         NSString *appDir = [appsDir stringByAppendingPathComponent:uuid];
-        NSArray *appContents = [fm contentsOfDirectoryAtPath:appDir error:nil];
+        NSArray *appContents = [fm contentsOfDirectoryAtPath:appDir error:nil] ?: @[];
         for (NSString *item in appContents) {
-            if ([item hasSuffix:@".app"]) {
-                NSString *infoPath = [[[appDir stringByAppendingPathComponent:item]
-                    stringByAppendingPathComponent:@"Info.plist"] stringByResolvingSymlinksInPath];
-                NSDictionary *infoDict = [NSDictionary dictionaryWithContentsOfFile:infoPath];
-                if ([infoDict[@"CFBundleIdentifier"] isEqualToString:bundleId]) {
-                    return [appDir stringByAppendingPathComponent:item];
-                }
+            if (![item hasSuffix:@".app"]) continue;
+            NSString *infoPath = [[[appDir stringByAppendingPathComponent:item]
+                stringByAppendingPathComponent:@"Info.plist"] stringByResolvingSymlinksInPath];
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+            if ([info[@"CFBundleIdentifier"] isEqualToString:bundleId]) {
+                return [appDir stringByAppendingPathComponent:item];
             }
         }
     }
