@@ -118,6 +118,46 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
             mode,rhInfo,access("/var/mobile/Library",F_OK)==0?@"✅ TrollStore":@"❌ 沙盒内",
             _rhOK?_rw:_w,_rhOK?_rh:_h,(_fbOK||_rhOK||_w>0)?@"✅ 是":@"❌ 否"];
 }
+
+- (NSString*)testPixelAtX:(int)x y:(int)y{
+    NSMutableString *s=[NSMutableString stringWithFormat:@"取色测试 @(%d,%d):\n",x,y];
+    
+    // IOMFB 直读
+    if(_fbOK&&_sf&&x>=0&&x<_w&&y>=0&&y<_h){
+        unsigned char r=0,g=0,b=0;
+        if(IOSurfaceLock(_sf,1,NULL)==KERN_SUCCESS){
+            void*ba=IOSurfaceGetBaseAddress(_sf);
+            if(ba){int o=y*_bpr+x*4;unsigned char*p=(unsigned char*)ba+o;b=p[0];g=p[1];r=p[2];}
+            IOSurfaceUnlock(_sf,1,NULL);
+        }
+        [s appendFormat:@"  IOMFB直连: R=%d G=%d B=%d (0x%02X%02X%02X)%@\n",
+         r,g,b,r,g,b,(r||g||b)?@"":@" ← 全黑!"];
+    }else{
+        [s appendString:@"  IOMFB直连: 未就绪\n"];
+    }
+    
+    // roothelper
+    if(x>=0&&x<_rw&&y>=0&&y<_rh){
+        char buf[128]={0};
+        NSString*coord=[NSString stringWithFormat:@"%d,%d",x,y];
+        if(_rhCall(@"pixel",coord,buf,sizeof(buf))){
+            int rr=0,gg=0,bb=0;
+            if(sscanf(buf,"OK %d %d %d",&rr,&gg,&bb)==3){
+                [s appendFormat:@"  roothelper: R=%d G=%d B=%d (0x%02X%02X%02X)%@\n",
+                 rr,gg,bb,rr,gg,bb,(rr||gg||bb)?@"":@" ← 全黑!"];
+            }else{
+                [s appendFormat:@"  roothelper: 解析失败: %s\n",buf];
+            }
+        }else{
+            [s appendFormat:@"  roothelper: %@\n",_rhLastError?_rhLastError:@"调用失败"];
+        }
+    }else{
+        [s appendFormat:@"  roothelper: 坐标越界 (尺寸=%dx%d)\n",_rw,_rh];
+    }
+    
+    return s;
+}
+}
 - (CGSize)screenSize{int w=_rhOK?_rw:_w,h=_rhOK?_rh:_h;return(_rot==90||_rot==270)?CGSizeMake(h,w):CGSizeMake(w,h);}
 
 // ---- 取色：IOMFB → roothelper → 回退 ----

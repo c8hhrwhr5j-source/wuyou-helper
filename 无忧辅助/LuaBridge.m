@@ -303,6 +303,15 @@ static int l_screen_diagnose(lua_State *L) {
     return 1;
 }
 
+// --- screen.testPixel(x,y) → string — IOMFB vs roothelper 对比取色 ---
+static int l_screen_testPixel(lua_State *L) {
+    int x = (int)luaL_checkinteger(L, 1);
+    int y = (int)luaL_checkinteger(L, 2);
+    NSString *result = [[ScreenCapture sharedInstance] testPixelAtX:x y:y];
+    lua_pushstring(L, [result UTF8String]);
+    return 1;
+}
+
 // MARK: - 触控模块 touch.*
 
 // --- touch.down(id, x, y) ---
@@ -523,6 +532,7 @@ static const luaL_Reg g_screenLib[] = {
     {"refresh",      l_screen_refresh},
     {"alive",        l_screen_alive},
     {"diagnose",     l_screen_diagnose},
+    {"testPixel",    l_screen_testPixel},
     {NULL, NULL},
 };
 

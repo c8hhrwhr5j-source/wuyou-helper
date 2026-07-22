@@ -67,6 +67,9 @@ typedef struct {
 /// 诊断信息（供 UI 展示）
 - (NSString *)diagnosticDescription;
 
+/// 详细取色诊断：分别从 IOMFB 直连和 roothelper 读指定像素，返回对比结果
+- (NSString *)testPixelAtX:(int)x y:(int)y;
+
 @end
 
 NS_ASSUME_NONNULL_END

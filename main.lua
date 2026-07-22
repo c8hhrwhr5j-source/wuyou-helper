@@ -14,7 +14,12 @@ function ensureForeground()
     -- 后天切换后强制重连 IOMFB
     screen.refresh()
     sleep(500)
-    return app.frontBid() == APP
+    local ret = app.frontBid() == APP
+    if ret then
+        local w,h=screen.resolution()
+        log("[取色-切换后]\n"..screen.testPixel(w/2,h/2))
+    end
+    return ret
 end
 
 -- 健康检查：取色能力是否存活
@@ -23,7 +28,12 @@ function checkAlive()
         log("[健康] 取色失效，重连 IOMFB...")
         screen.refresh()
         sleep(500)
-        return screen.alive()
+        local ok = screen.alive()
+        if not ok then
+            local w,h=screen.resolution()
+            log("[取色-失效检测]\n"..screen.testPixel(w/2,h/2))
+        end
+        return ok
     end
     return true
 end
@@ -36,6 +46,8 @@ function main()
     log("=== 热血传奇自动化(后台取色版) ===")
     log(string.format("分辨率: %d x %d", screen.resolution()))
     log("[诊断] " .. screen.diagnose())   -- roothelper / IOMFB 状态
+    local w,h=screen.resolution();log("[取色对比]\n"..screen.testPixel(w/2,h/2)) -- 屏幕中心像素测试
+    local c=screen.getColorRGB(w/2,h/2);log(string.format("  最终取色: R=%d G=%d B=%d (getColorRGB组合结果)",c.r,c.g,c.b))
 
     screen.keep(true)
 
