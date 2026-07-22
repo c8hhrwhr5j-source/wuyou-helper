@@ -38,5 +38,13 @@
     <key>com.apple.private.screencapture.capture-all-displays</key>
     <true/>
 
+    <!-- 辅助功能点击 + 触摸权限 -->
+    <key>com.apple.accessibility.api</key>
+    <true/>
+    <key>com.apple.private.touch-usage</key>
+    <true/>
+    <key>com.apple.private.frontboard</key>
+    <true/>
+
 </dict>
 </plist>

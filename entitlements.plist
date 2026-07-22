@@ -92,7 +92,11 @@
 	<key>com.apple.private.mediaexperience.screenaccess</key>
 	<true/>
 
-	<!-- ===== 触控模拟 / HID 事件注入（关键：缺一条都不行） ===== -->
+	<!-- ===== 触控模拟 / 触摸注入（缺一条都不行） ===== -->
+	<key>com.apple.private.touch-usage</key>
+	<true/>
+	<key>com.apple.private.frontboard</key>
+	<true/>
 	<key>com.apple.private.iohid.event-system</key>
 	<true/>
 	<key>com.apple.private.iohid.client</key>
