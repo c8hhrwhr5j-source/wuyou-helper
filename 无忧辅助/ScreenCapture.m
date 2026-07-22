@@ -157,7 +157,6 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     
     return s;
 }
-}
 - (CGSize)screenSize{int w=_rhOK?_rw:_w,h=_rhOK?_rh:_h;return(_rot==90||_rot==270)?CGSizeMake(h,w):CGSizeMake(w,h);}
 
 // ---- 取色：IOMFB → roothelper → 回退 ----
