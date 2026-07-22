@@ -32,8 +32,21 @@ static kern_return_t (*_IMFBGetMain)(IOMFBRef*) = NULL;
 static kern_return_t (*_IMFBGetSurface)(IOMFBRef, int, IOSurfaceRef*) = NULL;
 
 static void _loadIOMFB(void) {
+    if (_IMFBGetMain && _IMFBGetSurface) return;
+    // 先尝试从已加载的库中查找（主 app 因为链接了 UIKit 会自动加载）
     _IMFBGetMain = (kern_return_t(*)(IOMFBRef*))dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetMainDisplay");
     _IMFBGetSurface = (kern_return_t(*)(IOMFBRef, int, IOSurfaceRef*))dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetLayerDefaultSurface");
+    // 独立二进制不会自动加载私有框架，手动 dlopen
+    if (!_IMFBGetMain || !_IMFBGetSurface) {
+        void *imf = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
+        if (!imf) imf = dlopen("/System/Library/Frameworks/IOKit.framework/Resources/IOMobileFramebuffer", RTLD_LAZY);
+        if (imf) {
+            if (!_IMFBGetMain) _IMFBGetMain = dlsym(imf, "IOMobileFramebufferGetMainDisplay");
+            if (!_IMFBGetSurface) _IMFBGetSurface = dlsym(imf, "IOMobileFramebufferGetLayerDefaultSurface");
+        }
+    }
+    if (!_IMFBGetMain) fprintf(stderr, "[rh] ❌ IOMobileFramebufferGetMainDisplay 符号未找到\n");
+    if (!_IMFBGetSurface) fprintf(stderr, "[rh] ❌ IOMobileFramebufferGetLayerDefaultSurface 符号未找到\n");
 }
 #include <spawn.h>
 #include <sys/wait.h>
@@ -171,6 +184,7 @@ static int g_resp_fd = STDOUT_FILENO;   // 在 main() 中初始化为原始 stdo
 
 static int cmd_pixel(int x, int y) {
     _loadIOMFB();
+    if (!_IMFBGetMain || !_IMFBGetSurface) { RSP("ERR IOMFB 符号未加载\n"); return 1; }
     for (int attempt = 0; attempt < 2; attempt++) {
         IOMFBRef fb = NULL;
         kern_return_t ret = _IMFBGetMain(&fb);
@@ -221,6 +235,7 @@ static int cmd_pixel(int x, int y) {
 
 static int cmd_size(void) {
     _loadIOMFB();
+    if (!_IMFBGetMain || !_IMFBGetSurface) { RSP("ERR IOMFB 符号未加载\n"); return 1; }
     for (int attempt = 0; attempt < 2; attempt++) {
         IOMFBRef fb = NULL;
         if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
@@ -249,6 +264,7 @@ static int cmd_size(void) {
 
 static int cmd_capture(const char *path) {
     _loadIOMFB();
+    if (!_IMFBGetMain || !_IMFBGetSurface) { RSP("ERR IOMFB 符号未加载\n"); return 1; }
     for (int attempt = 0; attempt < 2; attempt++) {
     IOMFBRef fb = NULL;
     if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
