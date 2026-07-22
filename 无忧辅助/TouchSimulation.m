@@ -77,6 +77,7 @@ static uint32_t _fingerSeq = 1000;
     CGFloat _lastY;
     uint32_t _lastIdentity;
     BOOL _initialized;
+    NSMutableDictionary *_touchCache;
 }
 
 + (instancetype)sharedInstance {
@@ -96,6 +97,7 @@ static uint32_t _fingerSeq = 1000;
         _lastY = 0;
         _lastIdentity = 0;
         _initialized = YES;
+        _touchCache = [[NSMutableDictionary alloc] init];
     }
     return self;
 }
@@ -107,57 +109,122 @@ static uint32_t _fingerSeq = 1000;
     NSLog(@"%@", msg);
 }
 
-// 将物理像素坐标转换为逻辑坐标（适配屏幕缩放）
 - (CGPoint)_convertToLogicalPoint:(CGPoint)physicalPoint {
     return CGPointMake(physicalPoint.x / _scale, physicalPoint.y / _scale);
 }
 
-// 核心：构造原生 UITouch 对象
-- (UITouch *)_createTouchAtX:(CGFloat)x y:(CGFloat)y 
-                        phase:(UITouchPhase)phase 
-                     fingerID:(uint32_t)fingerID {
+// 设置 UITouch 的关键私有属性
+- (void)_configureTouch:(UITouch *)touch 
+                  atX:(CGFloat)x 
+                  atY:(CGFloat)y 
+                phase:(UITouchPhase)phase 
+                fingerID:(uint32_t)fingerID {
     UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
-    if (!keyWindow) return nil;
+    if (!keyWindow) return;
     
     CGPoint logicalPoint = [self _convertToLogicalPoint:CGPointMake(x, y)];
-    CGPoint location = logicalPoint;
-    
-    UIView *hitView = [keyWindow hitTest:location withEvent:nil];
+    UIView *hitView = [keyWindow hitTest:logicalPoint withEvent:nil];
     if (!hitView) hitView = keyWindow.rootViewController.view;
     
-    UITouch *touch = [[UITouch alloc] init];
+    NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
     
     SEL setLocationSEL = NSSelectorFromString(@"setLocation:inView:");
     if ([touch respondsToSelector:setLocationSEL]) {
         IMP imp = [touch methodForSelector:setLocationSEL];
         void (*setLocation)(id, SEL, CGPoint, UIView *) = (void (*)(id, SEL, CGPoint, UIView *))imp;
-        if (setLocation) {
-            setLocation(touch, setLocationSEL, location, hitView);
-        }
+        if (setLocation) setLocation(touch, setLocationSEL, logicalPoint, hitView);
     }
     
     SEL setPhaseSEL = NSSelectorFromString(@"_setPhase:");
     if ([touch respondsToSelector:setPhaseSEL]) {
         IMP imp = [touch methodForSelector:setPhaseSEL];
         void (*setPhase)(id, SEL, UITouchPhase) = (void (*)(id, SEL, UITouchPhase))imp;
-        if (setPhase) {
-            setPhase(touch, setPhaseSEL, phase);
-        }
+        if (setPhase) setPhase(touch, setPhaseSEL, phase);
     }
     
     SEL setIdentitySEL = NSSelectorFromString(@"_setIdentity:");
     if ([touch respondsToSelector:setIdentitySEL]) {
         IMP imp = [touch methodForSelector:setIdentitySEL];
         void (*setIdentity)(id, SEL, NSInteger) = (void (*)(id, SEL, NSInteger))imp;
-        if (setIdentity) {
-            setIdentity(touch, setIdentitySEL, (NSInteger)(fingerID + 1));
-        }
+        if (setIdentity) setIdentity(touch, setIdentitySEL, (NSInteger)(fingerID + 1));
+    }
+    
+    SEL setTapCountSEL = NSSelectorFromString(@"_setTapCount:");
+    if ([touch respondsToSelector:setTapCountSEL]) {
+        IMP imp = [touch methodForSelector:setTapCountSEL];
+        void (*setTapCount)(id, SEL, NSInteger) = (void (*)(id, SEL, NSInteger))imp;
+        if (setTapCount) setTapCount(touch, setTapCountSEL, 1);
+    }
+    
+    SEL setViewSEL = NSSelectorFromString(@"_setView:");
+    if ([touch respondsToSelector:setViewSEL]) {
+        IMP imp = [touch methodForSelector:setViewSEL];
+        void (*setView)(id, SEL, UIView *) = (void (*)(id, SEL, UIView *))imp;
+        if (setView) setView(touch, setViewSEL, hitView);
+    }
+    
+    SEL setWindowSEL = NSSelectorFromString(@"_setWindow:");
+    if ([touch respondsToSelector:setWindowSEL]) {
+        IMP imp = [touch methodForSelector:setWindowSEL];
+        void (*setWindow)(id, SEL, UIWindow *) = (void (*)(id, SEL, UIWindow *))imp;
+        if (setWindow) setWindow(touch, setWindowSEL, keyWindow);
+    }
+    
+    SEL setGestureViewSEL = NSSelectorFromString(@"_setGestureView:");
+    if ([touch respondsToSelector:setGestureViewSEL]) {
+        IMP imp = [touch methodForSelector:setGestureViewSEL];
+        void (*setGestureView)(id, SEL, UIView *) = (void (*)(id, SEL, UIView *))imp;
+        if (setGestureView) setGestureView(touch, setGestureViewSEL, hitView);
+    }
+    
+    SEL setGestureWindowSEL = NSSelectorFromString(@"_setGestureWindow:");
+    if ([touch respondsToSelector:setGestureWindowSEL]) {
+        IMP imp = [touch methodForSelector:setGestureWindowSEL];
+        void (*setGestureWindow)(id, SEL, UIWindow *) = (void (*)(id, SEL, UIWindow *))imp;
+        if (setGestureWindow) setGestureWindow(touch, setGestureWindowSEL, keyWindow);
+    }
+    
+    SEL setTimestampSEL = NSSelectorFromString(@"_setTimestamp:");
+    if ([touch respondsToSelector:setTimestampSEL]) {
+        IMP imp = [touch methodForSelector:setTimestampSEL];
+        void (*setTimestamp)(id, SEL, NSTimeInterval) = (void (*)(id, SEL, NSTimeInterval))imp;
+        if (setTimestamp) setTimestamp(touch, setTimestampSEL, now);
+    }
+    
+    SEL setLastUpdateTimestampSEL = NSSelectorFromString(@"_setLastUpdateTimestamp:");
+    if ([touch respondsToSelector:setLastUpdateTimestampSEL]) {
+        IMP imp = [touch methodForSelector:setLastUpdateTimestampSEL];
+        void (*setLastUpdateTimestamp)(id, SEL, NSTimeInterval) = (void (*)(id, SEL, NSTimeInterval))imp;
+        if (setLastUpdateTimestamp) setLastUpdateTimestamp(touch, setLastUpdateTimestampSEL, now);
+    }
+    
+    SEL setLocationInWindowSEL = NSSelectorFromString(@"_setLocationInWindow:");
+    if ([touch respondsToSelector:setLocationInWindowSEL]) {
+        IMP imp = [touch methodForSelector:setLocationInWindowSEL];
+        void (*setLocationInWindow)(id, SEL, CGPoint) = (void (*)(id, SEL, CGPoint))imp;
+        if (setLocationInWindow) setLocationInWindow(touch, setLocationInWindowSEL, logicalPoint);
+    }
+}
+
+// 创建或复用 UITouch 对象
+- (UITouch *)_getOrCreateTouchForFingerID:(uint32_t)fingerID {
+    NSString *key = [NSString stringWithFormat:@"finger_%u", fingerID];
+    UITouch *touch = [_touchCache objectForKey:key];
+    
+    if (!touch) {
+        touch = [[UITouch alloc] init];
+        [_touchCache setObject:touch forKey:key];
     }
     
     return touch;
 }
 
-// 核心：构造 UIEvent 对象
+// 释放 UITouch 对象
+- (void)_releaseTouchForFingerID:(uint32_t)fingerID {
+    NSString *key = [NSString stringWithFormat:@"finger_%u", fingerID];
+    [_touchCache removeObjectForKey:key];
+}
+
 - (UIEvent *)_createEventWithTouches:(NSArray *)touches phase:(UITouchPhase)phase {
     UIEvent *event = [[UIEvent alloc] init];
     
@@ -165,9 +232,7 @@ static uint32_t _fingerSeq = 1000;
     if ([event respondsToSelector:setEventTypeSEL]) {
         IMP imp = [event methodForSelector:setEventTypeSEL];
         void (*setEventType)(id, SEL, NSInteger) = (void (*)(id, SEL, NSInteger))imp;
-        if (setEventType) {
-            setEventType(event, setEventTypeSEL, UIEventTypeTouches);
-        }
+        if (setEventType) setEventType(event, setEventTypeSEL, UIEventTypeTouches);
     }
     
     NSMutableSet *touchSet = [NSMutableSet setWithArray:touches];
@@ -175,32 +240,29 @@ static uint32_t _fingerSeq = 1000;
     if ([event respondsToSelector:setTouchesSEL]) {
         IMP imp = [event methodForSelector:setTouchesSEL];
         void (*setTouches)(id, SEL, NSSet *, UITouchPhase) = (void (*)(id, SEL, NSSet *, UITouchPhase))imp;
-        if (setTouches) {
-            setTouches(event, setTouchesSEL, touchSet, phase);
-        }
+        if (setTouches) setTouches(event, setTouchesSEL, touchSet, phase);
     }
     
     SEL setTimestampSEL = NSSelectorFromString(@"_setTimestamp:");
     if ([event respondsToSelector:setTimestampSEL]) {
         IMP imp = [event methodForSelector:setTimestampSEL];
         void (*setTimestamp)(id, SEL, NSTimeInterval) = (void (*)(id, SEL, NSTimeInterval))imp;
-        if (setTimestamp) {
-            setTimestamp(event, setTimestampSEL, [[NSDate date] timeIntervalSinceReferenceDate]);
-        }
+        if (setTimestamp) setTimestamp(event, setTimestampSEL, [[NSDate date] timeIntervalSinceReferenceDate]);
     }
     
     return event;
 }
 
-// 核心：向系统派发触摸事件
 - (void)_dispatchEventWithTouchAtX:(CGFloat)x y:(CGFloat)y 
                              phase:(UITouchPhase)phase 
                           fingerID:(uint32_t)fingerID {
-    UITouch *touch = [self _createTouchAtX:x y:y phase:phase fingerID:fingerID];
+    UITouch *touch = [self _getOrCreateTouchForFingerID:fingerID];
     if (!touch) {
-        [self _log:@"[TouchSimulation] ❌ 创建 UITouch 失败"];
+        [self _log:@"[TouchSimulation] ❌ 获取 UITouch 失败"];
         return;
     }
+    
+    [self _configureTouch:touch atX:x atY:y phase:phase fingerID:fingerID];
     
     NSArray *touches = @[touch];
     UIEvent *event = [self _createEventWithTouches:touches phase:phase];
@@ -224,38 +286,26 @@ static uint32_t _fingerSeq = 1000;
         phaseName, x / _scale, y / _scale, fingerID]];
 }
 
-// 备用方案：直接向视图层派发 touches 消息
-- (void)_dispatchDirectToViewAtX:(CGFloat)x y:(CGFloat)y 
-                           phase:(UITouchPhase)phase 
-                        fingerID:(uint32_t)fingerID {
+// 备用方案：直接调用 UIControl 的 sendActionsForControlEvents
+- (void)_dispatchDirectToControlAtX:(CGFloat)x y:(CGFloat)y {
     UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
     if (!keyWindow) return;
     
     CGPoint logicalPoint = [self _convertToLogicalPoint:CGPointMake(x, y)];
     UIView *hitView = [keyWindow hitTest:logicalPoint withEvent:nil];
-    if (!hitView) hitView = keyWindow.rootViewController.view;
     
-    UITouch *touch = [self _createTouchAtX:x y:y phase:phase fingerID:fingerID];
-    if (!touch) return;
-    
-    NSArray *touches = @[touch];
-    UIEvent *event = [self _createEventWithTouches:touches phase:phase];
-    
-    switch (phase) {
-        case UITouchPhaseBegan:
-            [hitView touchesBegan:touches withEvent:event];
-            break;
-        case UITouchPhaseMoved:
-            [hitView touchesMoved:touches withEvent:event];
-            break;
-        case UITouchPhaseEnded:
-            [hitView touchesEnded:touches withEvent:event];
-            break;
-        case UITouchPhaseCancelled:
-            [hitView touchesCancelled:touches withEvent:event];
-            break;
-        default:
-            break;
+    if ([hitView respondsToSelector:@selector(sendActionsForControlEvents:)]) {
+        [hitView sendActionsForControlEvents:UIControlEventTouchUpInside];
+        [self _log:[NSString stringWithFormat:@"[TouchSimulation] 🎯 直接触发控件: %@", NSStringFromClass([hitView class])]];
+    } else {
+        UIView *parent = hitView.superview;
+        while (parent && ![parent respondsToSelector:@selector(sendActionsForControlEvents:)]) {
+            parent = parent.superview;
+        }
+        if (parent) {
+            [parent sendActionsForControlEvents:UIControlEventTouchUpInside];
+            [self _log:[NSString stringWithFormat:@"[TouchSimulation] 🎯 触发父控件: %@", NSStringFromClass([parent class])]];
+        }
     }
 }
 
@@ -270,8 +320,6 @@ static uint32_t _fingerSeq = 1000;
         [self _log:@"[TouchSimulation] ⚠️ UIApplication 尚未完全初始化"];
     }
 }
-
-// MARK: - 底层原子操作
 
 - (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fingerID {
     _lastX = x;
@@ -289,10 +337,10 @@ static uint32_t _fingerSeq = 1000;
 
 - (void)upFinger:(uint32_t)fingerID {
     [self _dispatchEventWithTouchAtX:_lastX y:_lastY phase:UITouchPhaseEnded fingerID:fingerID];
+    [self _dispatchDirectToControlAtX:_lastX y:_lastY];
+    [self _releaseTouchForFingerID:fingerID];
     usleep(5000);
 }
-
-// MARK: - 高级封装
 
 - (void)tapAtX:(CGFloat)x y:(CGFloat)y delayMs:(int)ms fingerID:(uint32_t)fingerID {
     [self downAtX:x y:y fingerID:fingerID];
@@ -309,8 +357,6 @@ static uint32_t _fingerSeq = 1000;
 - (TouchSlide *)slideWithFingerID:(uint32_t)fingerID {
     return [[TouchSlide alloc] initWithSim:self fingerID:fingerID];
 }
-
-// MARK: - 兼容旧接口
 
 - (void)clickAtX:(CGFloat)x y:(CGFloat)y {
     [self tapAtX:x y:y delayMs:10 fingerID:0];
