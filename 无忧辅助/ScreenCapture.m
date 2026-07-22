@@ -34,7 +34,6 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     BOOL _keeping;
     unsigned char *_cachedBuffer;
     size_t _cachedSize;
-    uint32_t _lastSurfaceSeed; // 追踪 Surface 版本
 }
 
 + (instancetype)sharedInstance {
@@ -59,7 +58,6 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
         _height = 0;
         _bytesPerRow = 0;
         _rotation = 0;
-        _lastSurfaceSeed = 0;
         [self _connect];
 
         // 监听前台切换通知，主动重建 Framebuffer
@@ -82,10 +80,9 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 }
 
 - (void)_appWillResignActive:(NSNotification *)note {
-    // App 即将去激活时不立即断开（后台脚本还需要取色），
-    // 但标记下次取色需要重连
-    NSLog(@"[ScreenCapture] App 去激活，下次取色将重连");
-    _lastSurfaceSeed = 0;
+    // App 即将去激活时断开旧连接，确保下次取色拿到新前台的帧缓冲
+    NSLog(@"[ScreenCapture] App 去激活，断开旧 Framebuffer");
+    [self _disconnect];
 }
 
 - (void)dealloc {
@@ -183,13 +180,11 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     [self _disconnect];   // 会设 _connected = NO
     [self _connectImpl];  // 从头连接
     if (_connected && _surface) {
-        _lastSurfaceSeed = IOSurfaceGetSeed(_surface);
-        NSLog(@"[ScreenCapture] 重连成功: %dx%d seed=%u", _width, _height, _lastSurfaceSeed);
+        NSLog(@"[ScreenCapture] 重连成功: %dx%d", _width, _height);
     } else {
         usleep(50000); // 等 50ms 再试一次
         [self _connectImpl];
         if (_connected && _surface) {
-            _lastSurfaceSeed = IOSurfaceGetSeed(_surface);
             NSLog(@"[ScreenCapture] 第二次重连成功: %dx%d", _width, _height);
         } else {
             NSLog(@"[ScreenCapture] 重连失败");
@@ -205,7 +200,6 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     // IOMobileFramebufferRef 不是我们 own 的，不要 CFRelease
     _framebuffer = NULL;
     _connected = NO;
-    _lastSurfaceSeed = 0;
 }
 
 // MARK: - 锁定/解锁 IOSurface（公开 API）
@@ -213,17 +207,6 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 - (unsigned char *)_lockAndGetBuffer {
     if (_keeping && _cachedBuffer) {
         return _cachedBuffer;
-    }
-
-    // 检查 Surface 是否仍有效（对比 seed 值）
-    if (_connected && _surface) {
-        uint32_t seed = IOSurfaceGetSeed(_surface);
-        if (seed == _lastSurfaceSeed && seed != 0) {
-            // Surface 没变，跳过重连
-        } else {
-            _lastSurfaceSeed = seed;
-            // seed 变了说明是新 Surface，也可能变零
-        }
     }
 
     if (!_connected || !_surface) {
