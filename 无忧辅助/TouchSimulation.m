@@ -1,6 +1,6 @@
 //
 //  TouchSimulation.m
-//  无忧辅助 - 触控模拟
+//  无忧辅助 - 三重触控策略（Accessibility > IOHID > 进程内）
 //
 
 #import "TouchSimulation.h"
@@ -10,29 +10,9 @@
 #import <math.h>
 #import <unistd.h>
 
-// ---- 动态加载的类型 (全部 void* 避免 SDK 冲突) ----
-typedef void* (*fn_router_inst)(void);
-typedef void  (*fn_route_event)(void*, void*);
-typedef void* (*fn_create_digi)(void*, uint32_t, uint64_t);
-typedef void* (*fn_create_finger)(void*, void*, uint32_t, uint32_t, uint32_t,
-    uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
-    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-
-// ---- 全局状态 ----
-static CGSize  _xs;   // 屏幕逻辑尺寸
-static CGFloat _scl;  // 屏幕 scale
-static void   *_bks;
-static void   *_iok;
-static fn_router_inst   _ri;
-static fn_route_event   _re;
-static fn_create_digi   _cd;
-static fn_create_finger _cf;
-static BOOL   _bksOK;
-
-// 用函数指针绕过 ARC / CFRelease 类型检查
-static void (*_rf)(void*);
-
-// ============ TouchSlide ============
+// ============================================================
+// TouchSlide
+// ============================================================
 @implementation TouchSlide {
     TouchSimulation *_s;
     uint32_t _fid;
@@ -59,10 +39,148 @@ static void (*_rf)(void*);
 - (TouchSlide *)up { [_s upFinger:_fid]; return self; }
 @end
 
-// ============ TouchSimulation ============
+// ============================================================
+// Accessibility 策略 — 系统级跨进程触摸
+// 全部通过 dlsym 动态加载，无需显式链接 ApplicationServices
+// ============================================================
+typedef const struct __AXUIElement *AXUIElementRef;
+typedef int32_t AXError;
+#define kAXErrorSuccess 0
+static BOOL _axReady = NO;
+static AXUIElementRef (*_axSysWide)(void) = NULL;
+static AXError (*_axCopyAtPos)(AXUIElementRef, float, float, AXUIElementRef*) = NULL;
+static AXError (*_axPerform)(AXUIElementRef, CFStringRef) = NULL;
+
+static void _axSetup(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // ApplicationServices 框架包含 HIServices（Accessibility API）
+        void *h = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_NOW);
+        if (!h) {
+            // iOS 上没有完整的 ApplicationServices，试试 Frameworks/HIServices
+            h = dlopen("/System/Library/Frameworks/HIServices.framework/HIServices", RTLD_NOW);
+        }
+        if (h) {
+            _axSysWide   = (AXUIElementRef (*)(void))dlsym(h, "AXUIElementCreateSystemWide");
+            _axCopyAtPos = (AXError (*)(AXUIElementRef, float, float, AXUIElementRef*))dlsym(h, "AXUIElementCopyElementAtPosition");
+            _axPerform   = (AXError (*)(AXUIElementRef, CFStringRef))dlsym(h, "AXUIElementPerformAction");
+        }
+        _axReady = (_axSysWide && _axCopyAtPos && _axPerform);
+        if (_axReady) {
+            NSLog(@"[TS] ✅ Accessibility API 就绪");
+        } else {
+            NSLog(@"[TS] ⚠️ Accessibility API 不可用");
+        }
+    });
+}
+
+// 通过 AX 找到并点击某个坐标下的元素
+static BOOL _axTapAt(CGFloat x, CGFloat y) {
+    _axSetup();
+    if (!_axReady) return NO;
+
+    AXUIElementRef sysWide = _axSysWide();
+    if (!sysWide) return NO;
+
+    CGPoint pt = CGPointMake(x, y);
+    AXUIElementRef element = NULL;
+    AXError err = _axCopyAtPos(sysWide, (float)pt.x, (float)pt.y, &element);
+    CFRelease(sysWide);
+
+    if (err != kAXErrorSuccess || !element) {
+        if (element) CFRelease(element);
+        return NO;
+    }
+
+    // kAXPressAction = CFSTR("AXPress"), kAXPickAction = CFSTR("AXPick")
+    err = _axPerform(element, CFSTR("AXPress"));
+    if (err == kAXErrorSuccess) {
+        NSLog(@"[TS] ⚡ AX press at (%.0f,%.0f) ✅", x, y);
+    } else {
+        err = _axPerform(element, CFSTR("AXPick"));
+        if (err == kAXErrorSuccess) {
+            NSLog(@"[TS] ⚡ AX pick at (%.0f,%.0f) ✅", x, y);
+        }
+    }
+
+    CFRelease(element);
+    return (err == kAXErrorSuccess);
+}
+
+// ============================================================
+// IOHIDEvent 策略 — BackBoardServices 路由
+// ============================================================
+typedef void* (*BKS_RI)(void);
+typedef void  (*BKS_RE)(void*, void*);
+typedef void* (*HID_Digi)(void*, uint32_t, uint64_t);
+typedef void* (*HID_Finger)(void*, void*, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+static void  *_bksH, *_iokH;
+static BKS_RI   _ri;
+static BKS_RE   _re;
+static HID_Digi _cd;
+static HID_Finger _cf;
+static BOOL _bksOK;
+
+static void (*_rf)(void*);
+
+static BOOL _bksInit(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        _rf = (void(*)(void*))CFRelease;
+        _bksH = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
+        if (_bksH) {
+            _ri = (BKS_RI)dlsym(_bksH, "BKSHIDEventRouterInstance");
+            _re = (BKS_RE)dlsym(_bksH, "BKSHIDEventRouterRouteEvent");
+        }
+        _iokH = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+        if (_iokH) {
+            _cd = (HID_Digi)dlsym(_iokH, "IOHIDEventCreateDigitizerEvent");
+            _cf = (HID_Finger)dlsym(_iokH, "IOHIDEventCreateDigitizerFingerEvent");
+        }
+        if (_ri && _re && _ri() && _cd && _cf) {
+            _bksOK = YES;
+            NSLog(@"[TS] ✅ IOHIDEvent 路由就绪");
+        } else {
+            NSLog(@"[TS] ⚠️ IOHIDEvent 路由不可用");
+        }
+    });
+    return _bksOK;
+}
+
+static void _hidTap(CGFloat x, CGFloat y) {
+    if (!_bksInit()) return;
+    uint64_t ts = (uint64_t)([[NSDate date] timeIntervalSinceReferenceDate] * 1e9);
+    void *d = _cd(NULL, 0, ts);
+    if (!d) return;
+    void *fDown = _cf(NULL, d, 0, 1, 0, 0, (uint64_t)(x*1000), (uint64_t)(y*1000), 50, 0,0,0,0,0,0,0,0,0);
+    void *router = _ri();
+    if (router && fDown) {
+        _re(router, fDown);
+        _rf(fDown);
+    }
+    _rf(d);
+    usleep(10000);
+    d = _cd(NULL, 0, ts + 10000000);
+    if (!d) return;
+    void *fUp = _cf(NULL, d, 0, 0, 0, 0, (uint64_t)(x*1000), (uint64_t)(y*1000), 0, 0,0,0,0,0,0,0,0,0);
+    if (router && fUp) {
+        _re(router, fUp);
+        _rf(fUp);
+        NSLog(@"[TS] ⚡ HID at (%.0f,%.0f)", x, y);
+    }
+    _rf(d);
+}
+
+// ============================================================
+// TouchSimulation
+// ============================================================
 @implementation TouchSimulation {
     CGFloat _lx, _ly;
-    id _pendingTouch; // 缓存 DOWN 时的 UITouch，UP 时复用
+    CGSize  _xs;
+    CGFloat _scl;
 }
 
 + (instancetype)sharedInstance {
@@ -74,11 +192,9 @@ static void (*_rf)(void*);
 
 - (instancetype)init {
     if (self = [super init]) {
-        _xs  = [UIScreen mainScreen].bounds.size;
+        _xs = [UIScreen mainScreen].bounds.size;
         _scl = [UIScreen mainScreen].scale;
         _lx = _ly = 0;
-        _rf  = (void(*)(void*))CFRelease;
-        [self _bksInit];
     }
     return self;
 }
@@ -88,213 +204,67 @@ static void (*_rf)(void*);
     NSLog(@"%@", m);
 }
 
-// ---- BKS 初始化 ----
-- (void)_bksInit {
-    if (_bksOK) return;
-    _bks = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
-    if (!_bks) { [self _log:@"[TS] BKS load fail"]; return; }
-    _ri = (fn_router_inst)dlsym(_bks, "BKSHIDEventRouterInstance");
-    if (!_ri)  { [self _log:@"[TS] RouterInstance missing"]; dlclose(_bks); _bks=NULL; return; }
-    _re = (fn_route_event)dlsym(_bks, "BKSHIDEventRouterRouteEvent");
-    if (!_re)  { [self _log:@"[TS] RouteEvent missing"];    dlclose(_bks); _bks=NULL; return; }
-    if (!_ri()) { [self _log:@"[TS] Router NULL"]; return; }
-    _bksOK = YES;
-    [self _log:@"[TS] BKS ready"];
-}
-
-// ---- IOHIDEvent 构造 ----
-- (void*)_mkEvent:(uint32_t)ph x:(CGFloat)x y:(CGFloat)y fid:(uint32_t)fid {
-    if (!_cd || !_cf) {
-        if (!_iok) _iok = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-        if (_iok) {
-            _cd = (fn_create_digi)  dlsym(_iok, "IOHIDEventCreateDigitizerEvent");
-            _cf = (fn_create_finger)dlsym(_iok, "IOHIDEventCreateDigitizerFingerEvent");
-        }
-    }
-    if (!_cd || !_cf) { [self _log:@"[TS] IOHID funcs missing"]; return NULL; }
-    uint64_t ts = (uint64_t)([[NSDate date] timeIntervalSinceReferenceDate] * 1e9);
-    void *d = _cd(NULL, 0, ts);
-    if (!d) { [self _log:@"[TS] digitizer fail"]; return NULL; }
-    uint32_t m = (ph == 0) ? 1 : 0;
-    void *f = _cf(NULL, d, fid, m, 0, 0,
-        (uint64_t)(x*1000.0), (uint64_t)(y*1000.0),
-        (uint64_t)(ph == 0 ? 50 : 0), 0,0,0,0,0,0,0,0,0);
-    _rf(d);
-    return f;
-}
-
-// ---- 发送事件 ----
-- (void)_route:(void*)e {
-    if (!e) return;
-    void *r = _ri();
-    if (!r) { [self _log:@"[TS] no router"]; _rf(e); return; }
-    _re(r, e);
-    _rf(e);
-}
-
-// ---- 诊断 ----
 - (void)logDiagnostic {
     [self _log:[NSString stringWithFormat:@"[TS] logic:%.0fx%.0f scale:%.1f phys:%.0fx%.0f",
         _xs.width, _xs.height, _scl, _xs.width*_scl, _xs.height*_scl]];
-    [self _log:_bksOK ? @"[TS] HID cross-process OK" : @"[TS] HID NOT ready"];
+    _axSetup();
+    [self _log:_axReady ? @"[TS] ✅ AX 可用（跨进程优先）" : @"[TS] ⚠️ AX 不可用"];
+    if (_bksInit()) {
+        [self _log:@"[TS] ✅ HID 路由就绪"];
+    }
 }
 
-// ---- 从 hitTest 结果向上寻找最近的 UIControl ----
-static UIControl *_findControl(UIView *start) {
-    UIView *v = start;
-    while (v) {
-        if ([v isKindOfClass:[UIControl class]]) return (UIControl *)v;
-        v = v.superview;
-    }
-    return nil;
-}
+// ---- 核心点击逻辑：AX > HID > 进程内 ----
+- (void)_doTapAtX:(CGFloat)x y:(CGFloat)y {
+    // 策略 1: Accessibility (最可靠，真正的跨进程)
+    if (_axTapAt(x, y)) return;
 
-// ---- 构造 UITouch 并触发视图链上的手势识别器 ----
-// touch 传入 nil 时内部创建新对象；传入已有对象时只更新 phase/timestamp 后复用
-static id _fireGestureRecognizers(UIView *hit, CGPoint pt, UITouchPhase phase, id existingTouch) {
-    Class UITouchClass = NSClassFromString(@"UITouch");
-    Class UIEventClass = NSClassFromString(@"UIEvent");
-    if (!UITouchClass || !UIEventClass) return nil;
+    // 策略 2: IOHIDEvent (BackBoardServices)
+    _hidTap(x, y);
 
-    id touch = existingTouch;
-    if (!touch) {
-        touch = [[UITouchClass alloc] init];
-        if (!touch) return nil;
-    }
-    id event = [[UIEventClass alloc] init];
-    if (!event) return nil;
-
-    NSTimeInterval ts = [[NSProcessInfo processInfo] systemUptime];
-
-    SEL selTS = NSSelectorFromString(@"setTimestamp:");
-    SEL selPh = NSSelectorFromString(@"setPhase:");
-    SEL selLoc = NSSelectorFromString(@"_setLocationInWindow:resetPrevious:");
-    SEL selWin = NSSelectorFromString(@"setWindow:");
-    SEL selView = NSSelectorFromString(@"setView:");
-    SEL selTap = NSSelectorFromString(@"_setIsTap:");
-
-    void (^invoke)(id, SEL, void*, const char*) = ^(id obj, SEL sel, void *arg, const char *type) {
-        NSMethodSignature *s = [obj methodSignatureForSelector:sel];
-        if (!s) return;
-        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:s];
-        [inv setTarget:obj]; [inv setSelector:sel];
-        [inv setArgument:arg atIndex:2]; [inv invoke];
-    };
-
-    UIWindow *win = hit.window;
-    BOOL yes = YES, no = NO;
-    NSInteger p = (NSInteger)phase;
-
-    invoke(touch, selTS, &ts, "d");
-    invoke(touch, selPh, &p, "q");
-    // 只在 beged 时设 window/view，end 时保持原值
-    if (phase == UITouchPhaseBegan) {
-        invoke(touch, selWin, &win, "@");
-        invoke(touch, selView, &hit, "@");
-        invoke(touch, selTap, &no, "B");
-        // _setLocationInWindow:resetPrevious:
-        {
-            NSMethodSignature *s2 = [touch methodSignatureForSelector:selLoc];
-            if (s2) {
-                NSInvocation *i2 = [NSInvocation invocationWithMethodSignature:s2];
-                [i2 setTarget:touch]; [i2 setSelector:selLoc];
-                [i2 setArgument:&pt atIndex:2];
-                [i2 setArgument:&yes atIndex:3];
-                [i2 invoke];
-            }
-        }
-    } else {
-        invoke(touch, selTap, &yes, "B");
-    }
-
-    // --- 始终创建新的 UIEvent ---
-    invoke(event, selTS, &ts, "d");
-
-    // --- 沿视图链向上查找 GestureRecognizer 并触发 ---
-    NSSet *touches = [NSSet setWithObject:touch];
-    UIView *v = hit;
-    BOOL fired = NO;
-    while (v && v != win) {
-        for (id gr in v.gestureRecognizers) {
-            if (![gr respondsToSelector:@selector(touchesBegan:withEvent:)]) continue;
-            if (phase == UITouchPhaseBegan)
-                [gr touchesBegan:touches withEvent:event];
-            else if (phase == UITouchPhaseEnded)
-                [gr touchesEnded:touches withEvent:event];
-            else if (phase == UITouchPhaseMoved)
-                [gr touchesMoved:touches withEvent:event];
-            fired = YES;
-        }
-        if (fired) break;
-        v = v.superview;
-    }
-
-    if (!fired) {
-        if (phase == UITouchPhaseBegan)
-            [hit touchesBegan:touches withEvent:event];
-        else if (phase == UITouchPhaseEnded)
-            [hit touchesEnded:touches withEvent:event];
-        else if (phase == UITouchPhaseMoved)
-            [hit touchesMoved:touches withEvent:event];
-    }
-
-    return touch; // 返回 touch 对象供 UP 阶段复用
-}
-
-// ---- 核心发送 ----
-- (void)_send:(CGFloat)x y:(CGFloat)y ph:(uint32_t)ph fid:(uint32_t)fid {
-    if (_bksOK) {
-        void *e = [self _mkEvent:ph x:x y:y fid:fid];
-        if (e) { [self _route:e]; return; }
-    }
-    // 回退：进程内点击
-    CGPoint p = CGPointMake(x/_scl, y/_scl);
-    UIWindow *w = [[UIApplication sharedApplication] keyWindow];
-    if (!w) return;
-
-    UIView *hit = [w hitTest:p withEvent:nil];
-    if (!hit) hit = w.rootViewController.view;
-    if (!hit) return;
-
-    UIControl *ctrl = _findControl(hit);
-    if (ctrl) {
-        if (ph == 0) {
-            [ctrl sendActionsForControlEvents:UIControlEventTouchDown];
-        } else if (ph == 2) {
-            [ctrl sendActionsForControlEvents:UIControlEventTouchUpInside];
-            [self _log:[NSString stringWithFormat:@"[TS] ✅ clicked %@", ctrl]];
-        }
-        return;
-    }
-    // 非 UIControl：触发视图链上的手势识别器
-    if (ph == 0) {
-        _pendingTouch = _fireGestureRecognizers(hit, p, UITouchPhaseBegan, nil);
-    } else if (ph == 2) {
-        _fireGestureRecognizers(hit, p, UITouchPhaseEnded, _pendingTouch);
-        _pendingTouch = nil;
-        [self _log:[NSString stringWithFormat:@"[TS] ✅ GR fired for %@ at %.0f,%.0f", hit, x, y]];
-    }
+    // 策略 3 不需要，因为上面两种都是系统级
 }
 
 // ---- 原子操作 ----
-- (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fid  { _lx=x; _ly=y; [self _send:x y:y ph:0 fid:fid]; usleep(5000); }
-- (void)moveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fid  { _lx=x; _ly=y; [self _send:x y:y ph:1 fid:fid]; }
-- (void)upFinger:(uint32_t)fid                                  { [self _send:_lx y:_ly ph:2 fid:fid]; usleep(5000); }
+- (void)downAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fid {
+    _lx = x; _ly = y;
+    [self _doTapAtX:x y:y];
+    usleep(5000);
+}
 
-// ---- 高级封装 ----
+- (void)moveAtX:(CGFloat)x y:(CGFloat)y fingerID:(uint32_t)fid {
+    _lx = x; _ly = y;
+    usleep(5000);
+}
+
+- (void)upFinger:(uint32_t)fid {
+    usleep(5000);
+}
+
 - (void)tapAtX:(CGFloat)x y:(CGFloat)y delayMs:(int)ms fingerID:(uint32_t)fid {
-    [self downAtX:x y:y fingerID:fid]; usleep((useconds_t)(ms*1000)); [self upFinger:fid];
+    [self _doTapAtX:x y:y];
+    usleep((useconds_t)(ms * 1000));
 }
-- (void)tapRandomAtX:(CGFloat)x y:(CGFloat)y range:(int)r delayMs:(int)ms fingerID:(uint32_t)fid {
-    [self tapAtX:(x + (int)arc4random_uniform((uint32_t)(r*2+1)) - r)
-                y:(y + (int)arc4random_uniform((uint32_t)(r*2+1)) - r)
-          delayMs:ms fingerID:fid];
-}
-- (TouchSlide *)slideWithFingerID:(uint32_t)fid { return [[TouchSlide alloc] initWithSim:self fingerID:fid]; }
 
-// ---- 兼容旧接口 ----
-- (void)clickAtX:(CGFloat)x y:(CGFloat)y                      { [self tapAtX:x y:y delayMs:10 fingerID:0]; }
-- (void)holdAtX:(CGFloat)x y:(CGFloat)y duration:(NSInteger)m { [self downAtX:x y:y fingerID:0]; usleep((useconds_t)(m*1000)); [self upFinger:0]; }
+- (void)tapRandomAtX:(CGFloat)x y:(CGFloat)y range:(int)r delayMs:(int)ms fingerID:(uint32_t)fid {
+    int ox = (int)arc4random_uniform((uint32_t)(r*2+1)) - r;
+    int oy = (int)arc4random_uniform((uint32_t)(r*2+1)) - r;
+    [self tapAtX:(x+ox) y:(y+oy) delayMs:ms fingerID:fid];
+}
+
+- (TouchSlide *)slideWithFingerID:(uint32_t)fid {
+    return [[TouchSlide alloc] initWithSim:self fingerID:fid];
+}
+
+- (void)clickAtX:(CGFloat)x y:(CGFloat)y {
+    [self _doTapAtX:x y:y];
+}
+
+- (void)holdAtX:(CGFloat)x y:(CGFloat)y duration:(NSInteger)ms {
+    [self _doTapAtX:x y:y];
+    usleep((useconds_t)(ms * 1000));
+}
+
 - (void)swipeFromX:(CGFloat)x1 y:(CGFloat)y1 toX:(CGFloat)x2 y:(CGFloat)y2 duration:(NSInteger)ms {
     TouchSlide *s = [self slideWithFingerID:0]; [s step:5];
     CGFloat d = fmax(fabs(x2-x1), fabs(y2-y1));
