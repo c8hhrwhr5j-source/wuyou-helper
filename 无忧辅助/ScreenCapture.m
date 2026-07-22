@@ -13,7 +13,7 @@
 #import <spawn.h>
 #import <sys/wait.h>
 #import <IOKit/IOKitLib.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 
 // ---- IOMFB 直连 ----
 typedef struct __IOMobileFramebuffer *IMFBRef;
@@ -58,47 +58,6 @@ static void _initGlobalCapture(IOSurfaceRef *outSf, int *outW, int *outH, int *o
                           sidKeys[k], sid,
                           (int)IOSurfaceGetWidth(found), (int)IOSurfaceGetHeight(found));
                     break;
-                }
-            }
-        }
-
-        if (!found) {
-            // 策略 2：IOSurfaceRoot user client → create display console surface
-            io_service_t rootSvc = IOServiceGetMatchingService(kIOMainPortDefault,
-                IOServiceMatching("IOSurfaceRoot"));
-            if (rootSvc != MACH_PORT_NULL) {
-                io_connect_t conn = MACH_PORT_NULL;
-                for (int t = 0; t <= 5; t++) {
-                    if (IOServiceOpen(rootSvc, mach_task_self(), t, &conn) == KERN_SUCCESS) {
-                        NSLog(@"[GS] IOSurfaceRoot type=%d opened", t);
-                        break;
-                    }
-                }
-                IOObjectRelease(rootSvc);
-                if (conn != MACH_PORT_NULL) {
-                    // 尝试创建显示表面：用 IOSurfaceCreate 带 display 标记
-                    // IOSurfaceRoot 连接被保留，但 surface 通过 IOSurfaceCreate 创建
-                    CGSize ns = [UIScreen mainScreen].nativeBounds.size;
-                    int w = (int)ns.width, h = (int)ns.height;
-                    int bpe = 4; uint32_t pf = (uint32_t)'BGRA';
-                    CFMutableDictionaryRef dp = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
-                        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-                    CFNumberRef wn = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &w);
-                    CFNumberRef hn = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &h);
-                    CFNumberRef bn = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
-                    CFNumberRef pn = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &pf);
-                    CFDictionarySetValue(dp, kIOSurfaceWidth, wn);
-                    CFDictionarySetValue(dp, kIOSurfaceHeight, hn);
-                    CFDictionarySetValue(dp, kIOSurfaceBytesPerElement, bn);
-                    CFDictionarySetValue(dp, kIOSurfacePixelFormat, pn);
-                    CFDictionarySetValue(dp, CFSTR("IOSurfaceIsDisplayConsole"), kCFBooleanTrue);
-                    found = IOSurfaceCreate(dp);
-                    CFRelease(wn); CFRelease(hn); CFRelease(bn); CFRelease(pn); CFRelease(dp);
-                    if (found) {
-                        NSLog(@"[GS] ✅ IOSurfaceCreate+DisplayConsole w=%d h=%d",
-                              (int)IOSurfaceGetWidth(found), (int)IOSurfaceGetHeight(found));
-                    }
-                    // 不关闭 conn，保持连接（surface 可能依赖它）
                 }
             }
         }
