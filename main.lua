@@ -35,6 +35,7 @@ end
 function main()
     log("=== 热血传奇自动化(后台取色版) ===")
     log(string.format("分辨率: %d x %d", screen.resolution()))
+    log("[诊断] " .. screen.diagnose())   -- roothelper / IOMFB 状态
 
     screen.keep(true)
 

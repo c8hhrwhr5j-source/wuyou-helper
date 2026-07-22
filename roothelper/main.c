@@ -170,7 +170,7 @@ static int cmd_pixel(int x, int y) {
         kern_return_t ret = _IMFBGetMain(&fb);
         if (ret != KERN_SUCCESS || !fb) {
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR IOMFB 连接失败\n"); return 1;
+            RSP("ERR IOMFB 连接失败\n"); return 1;
         }
         IOSurfaceRef sf = NULL;
         for (int l = 0; l <= 2; l++) {
@@ -179,7 +179,7 @@ static int cmd_pixel(int x, int y) {
         }
         if (!sf) {
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR Surface 获取失败\n"); return 1;
+            RSP("ERR Surface 获取失败\n"); return 1;
         }
         int w = (int)IOSurfaceGetWidth(sf);
         int h = (int)IOSurfaceGetHeight(sf);
@@ -187,25 +187,25 @@ static int cmd_pixel(int x, int y) {
         if (x < 0 || y < 0 || x >= w || y >= h) {
             CFRelease(sf);
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR 坐标越界 %d,%d (%dx%d)\n", x, y, w, h); return 1;
+            RSP("ERR 坐标越界 %d,%d (%dx%d)\n", x, y, w, h); return 1;
         }
         ret = IOSurfaceLock(sf, 1, NULL);
         if (ret != KERN_SUCCESS) {
             CFRelease(sf);
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR Lock 失败 0x%x\n", ret); return 1;
+            RSP("ERR Lock 失败 0x%x\n", ret); return 1;
         }
         void *base = IOSurfaceGetBaseAddress(sf);
         if (!base) { IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR BaseAddress NULL\n"); return 1;
+            RSP("ERR BaseAddress NULL\n"); return 1;
         }
         int offset = y * bpr + x * 4;
         unsigned char *p = (unsigned char *)base + offset;
         int b = p[0], g = p[1], r = p[2];
         IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
         if (r > 0 || g > 0 || b > 0 || attempt == 1) {
-            printf("OK %d %d %d\n", r, g, b); return 0;
+            RSP("OK %d %d %d\n", r, g, b); return 0;
         }
         // 返回全黑，尝试 escalation
         kfd_escalate();
@@ -219,7 +219,7 @@ static int cmd_size(void) {
         IOMFBRef fb = NULL;
         if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR IOMFB 失败\n"); return 1;
+            RSP("ERR IOMFB 失败\n"); return 1;
         }
         IOSurfaceRef sf = NULL;
         for (int l = 0; l <= 2; l++) {
@@ -227,14 +227,14 @@ static int cmd_size(void) {
         }
         if (!sf) {
             if (attempt == 0) { kfd_escalate(); continue; }
-            printf("ERR Surface 失败\n"); return 1;
+            RSP("ERR Surface 失败\n"); return 1;
         }
         int w = (int)IOSurfaceGetWidth(sf);
         int h = (int)IOSurfaceGetHeight(sf);
         int bpr = (int)IOSurfaceGetBytesPerRow(sf);
         CFRelease(sf);
         if (w > 0 && h > 0) {
-            printf("SIZE %d %d %d\n", w, h, bpr); return 0;
+            RSP("SIZE %d %d %d\n", w, h, bpr); return 0;
         }
         kfd_escalate();
     }
@@ -247,7 +247,7 @@ static int cmd_capture(const char *path) {
     IOMFBRef fb = NULL;
     if (_IMFBGetMain(&fb) != KERN_SUCCESS || !fb) {
         if (attempt == 0) { kfd_escalate(); continue; }
-        printf("ERR IOMFB 失败\n"); return 1;
+        RSP("ERR IOMFB 失败\n"); return 1;
     }
     IOSurfaceRef sf = NULL;
     for (int l = 0; l <= 2; l++) {
@@ -255,7 +255,7 @@ static int cmd_capture(const char *path) {
     }
     if (!sf) {
         if (attempt == 0) { kfd_escalate(); continue; }
-        printf("ERR Surface 失败\n"); return 1;
+        RSP("ERR Surface 失败\n"); return 1;
     }
     int w = (int)IOSurfaceGetWidth(sf);
     int h = (int)IOSurfaceGetHeight(sf);
@@ -263,21 +263,21 @@ static int cmd_capture(const char *path) {
     if (IOSurfaceLock(sf, 1, NULL) != KERN_SUCCESS) {
         CFRelease(sf);
         if (attempt == 0) { kfd_escalate(); continue; }
-        printf("ERR Lock 失败\n"); return 1;
+        RSP("ERR Lock 失败\n"); return 1;
     }
     void *base = IOSurfaceGetBaseAddress(sf);
     if (!base) { IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
         if (attempt == 0) { kfd_escalate(); continue; }
-        printf("ERR BaseAddress NULL\n"); return 1;
+        RSP("ERR BaseAddress NULL\n"); return 1;
     }
     size_t total = (size_t)h * bpr;
     FILE *fp = fopen(path, "wb");
     if (!fp) { IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-        printf("ERR 无法创建文件 %s\n", path); return 1;
+        RSP("ERR 无法创建文件 %s\n", path); return 1;
     }
     fwrite(base, 1, total, fp); fclose(fp);
     IOSurfaceUnlock(sf, 1, NULL); CFRelease(sf);
-    printf("OK %d bytes\n", (int)total);
+    RSP("OK %d bytes\n", (int)total);
     return 0;
     }
     return 1;
@@ -290,6 +290,13 @@ static int cmd_capture(const char *path) {
 int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
+    // 关键修复：_rhCall 通过 pipe 读取 stdout，但 kfd.c 的 LOG/printf
+    // 会产生大量调试输出，填充管道导致真正的 "OK R G B" 响应丢失。
+    // 解决方案：保存原始 stdout→resp_fd，再把 stdout 重定向到 stderr，
+    // 这样所有 kfd/printf 调试输出走 stderr，响应通过 dprintf(resp_fd,...) 写入管道。
+    int resp_fd = dup(STDOUT_FILENO);           // resp_fd = 原始 pipe 写端副本
+    dup2(STDERR_FILENO, STDOUT_FILENO);         // fd1 → stderr，所有 printf 从此走 stderr
+    #define RSP(...) dprintf(resp_fd, __VA_ARGS__)
 
     if (argc < 2) {
         printf("==== iOS RootHelper (kfd) ====\n");

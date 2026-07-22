@@ -296,6 +296,13 @@ static int l_screen_alive(lua_State *L) {
     return 1;
 }
 
+// --- screen.diagnose() → string — 返回屏幕捕获诊断信息 ---
+static int l_screen_diagnose(lua_State *L) {
+    NSString *diag = [[ScreenCapture sharedInstance] diagnosticDescription];
+    lua_pushstring(L, [diag UTF8String]);
+    return 1;
+}
+
 // MARK: - 触控模块 touch.*
 
 // --- touch.down(id, x, y) ---
@@ -515,6 +522,7 @@ static const luaL_Reg g_screenLib[] = {
     {"isReady",      l_screen_isReady},
     {"refresh",      l_screen_refresh},
     {"alive",        l_screen_alive},
+    {"diagnose",     l_screen_diagnose},
     {NULL, NULL},
 };
 

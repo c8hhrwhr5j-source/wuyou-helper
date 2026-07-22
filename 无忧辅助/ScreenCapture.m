@@ -23,19 +23,33 @@ static void _fbload(void){static dispatch_once_t o;dispatch_once(&o,^{
 });}
 
 // ---- roothelper 通信 ----
+// 注意：roothelper 现在把 kfd 调试输出重定向到 stderr，
+// 只将 "OK/SIZE/ERR" 响应写到 stdout，管道不会被污染。
 static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     NSString *hp=[[NSBundle mainBundle]pathForResource:@"roothelper" ofType:nil];
     if(!hp)hp=[[[NSBundle mainBundle]bundlePath]stringByAppendingPathComponent:@"roothelper"];
-    if(![[NSFileManager defaultManager]fileExistsAtPath:hp])return NO;
+    if(![[NSFileManager defaultManager]fileExistsAtPath:hp]){
+        NSLog(@"[SCR] rhCall: roothelper binary not found at %@",hp);
+        return NO;
+    }
     const char *av[4]={[hp UTF8String],[cmd UTF8String],[arg UTF8String],NULL};
     pid_t pid;int fd[2];pipe(fd);
     posix_spawn_file_actions_t a;posix_spawn_file_actions_init(&a);
     posix_spawn_file_actions_adddup2(&a,fd[1],STDOUT_FILENO);posix_spawn_file_actions_addclose(&a,fd[0]);
     int r=posix_spawn(&pid,[hp UTF8String],&a,NULL,(char*const*)av,NULL);
     posix_spawn_file_actions_destroy(&a);close(fd[1]);
-    if(r!=0){close(fd[0]);return NO;}
-    int s;waitpid(pid,&s,0);ssize_t n=read(fd[0],out,sz-1);close(fd[0]);
-    if(n>0){out[n]='\0';return YES;}return NO;
+    if(r!=0){close(fd[0]);NSLog(@"[SCR] rhCall %@: posix_spawn err=%d",cmd,r);return NO;}
+    int s;waitpid(pid,&s,0);
+    // 循环读取所有输出（防止大数据被截断），总上限 8KB
+    ssize_t total=0,n;while((n=read(fd[0],out+total,((ssize_t)sz)-total-1))>0){total+=n;if(total>=((ssize_t)sz)-1)break;}
+    close(fd[0]);
+    if(total>0){out[total]='\0';
+        // 检查是否为 ERR 开头的错误响应
+        if(!strncmp(out,"ERR",3)){NSLog(@"[SCR] rhCall %@(%@) → %s",cmd,arg,out);}
+        return YES;
+    }
+    NSLog(@"[SCR] rhCall %@(%@): exit=%d no output",cmd,arg,WIFEXITED(s)?WEXITSTATUS(s):-1);
+    return NO;
 }
 
 @implementation ScreenCapture {
