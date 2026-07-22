@@ -203,7 +203,18 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     void *baseAddr = IOSurfaceGetBaseAddress(_surface);
     if (!baseAddr) {
         IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
-        return NULL;
+        // BaseAddress 为空说明 IOSurface 已失效（切后台导致），尝试重连
+        NSLog(@"[ScreenCapture] BaseAddress=NULL，Surface失效，尝试重连");
+        [self _reconnectIfNeeded];
+        if (!_connected || !_surface) return NULL;
+        ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
+        if (ret != KERN_SUCCESS) return NULL;
+        baseAddr = IOSurfaceGetBaseAddress(_surface);
+        if (!baseAddr) {
+            IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
+            NSLog(@"[ScreenCapture] 重连后 BaseAddress 仍为空");
+            return NULL;
+        }
     }
 
     size_t totalSize = (size_t)_height * _bytesPerRow;
