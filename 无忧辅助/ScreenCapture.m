@@ -7,7 +7,9 @@
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <stdlib.h>
+#import <string.h>
 #import <unistd.h>
+#import <signal.h>
 #import <spawn.h>
 #import <sys/wait.h>
 #import <IOSurface/IOSurfaceRef.h>
@@ -25,11 +27,19 @@ static void _fbload(void){static dispatch_once_t o;dispatch_once(&o,^{
 // ---- roothelper 通信 ----
 // 注意：roothelper 现在把 kfd 调试输出重定向到 stderr，
 // 只将 "OK/SIZE/ERR" 响应写到 stdout，管道不会被污染。
+static NSString *_rhLastError = nil;
 static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     NSString *hp=[[NSBundle mainBundle]pathForResource:@"roothelper" ofType:nil];
     if(!hp)hp=[[[NSBundle mainBundle]bundlePath]stringByAppendingPathComponent:@"roothelper"];
     if(![[NSFileManager defaultManager]fileExistsAtPath:hp]){
-        NSLog(@"[SCR] rhCall: roothelper binary not found at %@",hp);
+        _rhLastError=[NSString stringWithFormat:@"binary not found at %@",hp];
+        NSLog(@"[SCR] rhCall: %@",_rhLastError);
+        return NO;
+    }
+    // 检查是否可执行
+    if(access([hp UTF8String],X_OK)!=0){
+        _rhLastError=[NSString stringWithFormat:@"binary not executable: %@ (errno=%d)",hp,errno];
+        NSLog(@"[SCR] rhCall: %@",_rhLastError);
         return NO;
     }
     const char *av[4]={[hp UTF8String],[cmd UTF8String],[arg UTF8String],NULL};
@@ -38,17 +48,29 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     posix_spawn_file_actions_adddup2(&a,fd[1],STDOUT_FILENO);posix_spawn_file_actions_addclose(&a,fd[0]);
     int r=posix_spawn(&pid,[hp UTF8String],&a,NULL,(char*const*)av,NULL);
     posix_spawn_file_actions_destroy(&a);close(fd[1]);
-    if(r!=0){close(fd[0]);NSLog(@"[SCR] rhCall %@: posix_spawn err=%d",cmd,r);return NO;}
+    if(r!=0){close(fd[0]);_rhLastError=[NSString stringWithFormat:@"posix_spawn err=%d (%s)",r,strerror(r)];
+        NSLog(@"[SCR] rhCall %@: %@",cmd,_rhLastError);return NO;}
     int s;waitpid(pid,&s,0);
     // 循环读取所有输出（防止大数据被截断），总上限 8KB
     ssize_t total=0,n;while((n=read(fd[0],out+total,((ssize_t)sz)-total-1))>0){total+=n;if(total>=((ssize_t)sz)-1)break;}
     close(fd[0]);
     if(total>0){out[total]='\0';
-        // 检查是否为 ERR 开头的错误响应
-        if(!strncmp(out,"ERR",3)){NSLog(@"[SCR] rhCall %@(%@) → %s",cmd,arg,out);}
+        if(!strncmp(out,"ERR",3)){
+            _rhLastError=[NSString stringWithFormat:@"%@(%@) → %s",cmd,arg,out];
+            NSLog(@"[SCR] rhCall %@",_rhLastError);
+        }
         return YES;
     }
-    NSLog(@"[SCR] rhCall %@(%@): exit=%d no output",cmd,arg,WIFEXITED(s)?WEXITSTATUS(s):-1);
+    // 无输出：子进程可能被 AMFI 杀死或崩溃
+    if(WIFSIGNALED(s)){
+        _rhLastError=[NSString stringWithFormat:@"%@(%@) killed by signal %d (SIGKILL=%d AMFI?)",
+                      cmd,arg,WTERMSIG(s),SIGKILL];
+    }else if(WIFEXITED(s)){
+        _rhLastError=[NSString stringWithFormat:@"%@(%@) exit=%d no output",cmd,arg,WEXITSTATUS(s)];
+    }else{
+        _rhLastError=[NSString stringWithFormat:@"%@(%@) abnormal exit, status=0x%x",cmd,arg,s];
+    }
+    NSLog(@"[SCR] rhCall %@",_rhLastError);
     return NO;
 }
 
@@ -57,6 +79,7 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     int _rw,_rh,_rbpr; BOOL _rhOK;
     int _rot; BOOL _keep; unsigned char *_buf; size_t _bsz;
     int _blackStreak;
+    NSString *_rhDiag;   // roothelper 诊断信息（最后错误原因）
 }
 + (instancetype)sharedInstance{static ScreenCapture*i;static dispatch_once_t t;dispatch_once(&t,^{i=[[ScreenCapture alloc]init];});return i;}
 - (instancetype)init{if(self=[super init]){_fbOK=NO;_rhOK=NO;_rot=0;_blackStreak=0;[self _con];}return self;}
@@ -73,9 +96,9 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     // roothelper 尺寸
     char b[128]={0};if(_rhCall(@"size",@"",b,sizeof(b))){
         sscanf(b,"SIZE %d %d %d",&_rw,&_rh,&_rbpr);
-        if(_rw>0&&_rh>0){_rhOK=YES;NSLog(@"[SCR] roothelper size=%dx%d bpr=%d",_rw,_rh,_rbpr);}
-        else{NSLog(@"[SCR] roothelper size parse failed: %s",b);}
-    }else{NSLog(@"[SCR] roothelper size call failed");}
+        if(_rw>0&&_rh>0){_rhOK=YES;_rhDiag=@"OK";NSLog(@"[SCR] roothelper size=%dx%d bpr=%d",_rw,_rh,_rbpr);}
+        else{_rhDiag=[NSString stringWithFormat:@"parse failed: %s",b];NSLog(@"[SCR] roothelper %@",_rhDiag);}
+    }else{_rhDiag=_rhLastError?_rhLastError:@"size call failed (unknown)";NSLog(@"[SCR] roothelper %@",_rhDiag);}
     if(!_fbOK&&!_rhOK){CGSize s=[UIScreen mainScreen].nativeBounds.size;_w=(int)s.width;_h=(int)s.height;_bpr=_w*4;NSLog(@"[SCR] fallback to UIScreen: %dx%d",_w,_h);}
     if(!_rhOK){_rw=_w;_rh=_h;_rbpr=_bpr;}
     NSLog(@"[SCR] init done: fbOK=%d rhOK=%d w=%d h=%d rw=%d rh=%d",_fbOK,_rhOK,_w,_h,_rw,_rh);
@@ -85,8 +108,14 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     NSString *mode=_fbOK?[NSString stringWithFormat:@"IOMFB 直连 %dx%d",_w,_h]:
                    _rhOK?[NSString stringWithFormat:@"roothelper %dx%d",_rw,_rh]:
                    [NSString stringWithFormat:@"回退 %dx%d",_w,_h];
-    return [NSString stringWithFormat:@"屏幕捕获: %@\n安装方式: %@\n分辨率: %dx%d\n取色可用: %@\n",
-            mode,access("/var/mobile/Library",F_OK)==0?@"✅ TrollStore":@"❌ 沙盒内",
+    NSString *rhInfo=@"";
+    if(!_rhOK && _rhDiag){
+        rhInfo=[NSString stringWithFormat:@"\nroothelper: ❌ %@",_rhDiag];
+    }else if(_rhOK){
+        rhInfo=[NSString stringWithFormat:@"\nroothelper: ✅ %dx%d",_rw,_rh];
+    }
+    return [NSString stringWithFormat:@"屏幕捕获: %@%@\n安装方式: %@\n分辨率: %dx%d\n取色可用: %@\n",
+            mode,rhInfo,access("/var/mobile/Library",F_OK)==0?@"✅ TrollStore":@"❌ 沙盒内",
             _rhOK?_rw:_w,_rhOK?_rh:_h,(_fbOK||_rhOK||_w>0)?@"✅ 是":@"❌ 否"];
 }
 - (CGSize)screenSize{int w=_rhOK?_rw:_w,h=_rhOK?_rh:_h;return(_rot==90||_rot==270)?CGSizeMake(h,w):CGSizeMake(w,h);}
@@ -194,11 +223,14 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
         if(!_fbOK){_fb=NULL;}
     }
     // 同时刷新 roothelper 尺寸
-    char b[128]={0};if(_rhCall(@"size",@"",b,sizeof(b))){
+    char b[128]={0};
+    if(_rhCall(@"size",@"",b,sizeof(b))){
         int rw2,rh2,rbpr2;
         if(sscanf(b,"SIZE %d %d %d",&rw2,&rh2,&rbpr2)==3&&rw2>0&&rh2>0){
-            _rw=rw2;_rh=rh2;_rbpr=rbpr2;_rhOK=YES;
+            _rw=rw2;_rh=rh2;_rbpr=rbpr2;_rhOK=YES;_rhDiag=@"OK";
         }
+    }else{
+        _rhDiag=_rhLastError?_rhLastError:@"size call failed (unknown)";
     }
     if(!_rhOK){_rw=_w;_rh=_h;_rbpr=_bpr;}
 }
