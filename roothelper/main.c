@@ -160,6 +160,12 @@ static int cmd_respring(void) {
 }
 
 // ============================================================
+// 响应输出通道 — 始终写到管道（原始 stdout），不受 dup2 影响
+// ============================================================
+static int g_resp_fd = STDOUT_FILENO;   // 在 main() 中初始化为原始 stdout 的副本
+#define RSP(...) dprintf(g_resp_fd, __VA_ARGS__)
+
+// ============================================================
 // 屏幕捕获（通过 root 进程 IOMFB → dlsym 动态加载）
 // ============================================================
 
@@ -292,11 +298,10 @@ int main(int argc, char *argv[]) {
     setbuf(stderr, NULL);
     // 关键修复：_rhCall 通过 pipe 读取 stdout，但 kfd.c 的 LOG/printf
     // 会产生大量调试输出，填充管道导致真正的 "OK R G B" 响应丢失。
-    // 解决方案：保存原始 stdout→resp_fd，再把 stdout 重定向到 stderr，
-    // 这样所有 kfd/printf 调试输出走 stderr，响应通过 dprintf(resp_fd,...) 写入管道。
-    int resp_fd = dup(STDOUT_FILENO);           // resp_fd = 原始 pipe 写端副本
-    dup2(STDERR_FILENO, STDOUT_FILENO);         // fd1 → stderr，所有 printf 从此走 stderr
-    #define RSP(...) dprintf(resp_fd, __VA_ARGS__)
+    // 解决方案：保存原始 stdout 到 g_resp_fd，再把 fd1 重定向到 stderr，
+    // 这样所有 kfd/printf 调试输出走 stderr，响应通过 RSP(...) 写入管道。
+    g_resp_fd = dup(STDOUT_FILENO);              // g_resp_fd = 原始 pipe 写端副本
+    dup2(STDERR_FILENO, STDOUT_FILENO);          // fd1 → stderr，所有 printf 从此走 stderr
 
     if (argc < 2) {
         printf("==== iOS RootHelper (kfd) ====\n");
