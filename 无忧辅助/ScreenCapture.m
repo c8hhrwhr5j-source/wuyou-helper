@@ -6,16 +6,33 @@
 #import "ScreenCapture.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
+#import <dlfcn.h>
 #import <IOSurface/IOSurfaceRef.h>
 
 // ============================================================
 // CGDisplay 模式 — 后台可用（no-sandbox + allow-screen-capture）
+// CGDisplayCreateImage / CGMainDisplayID 在 IOKit 中是私有符号，dlsym 加载
 // ============================================================
-// 私有 API 声明（不在公开头文件中）
-extern CGImageRef CGDisplayCreateImage(uint32_t displayID);
-extern uint32_t CGMainDisplayID(void);
+static CGImageRef (*_CGDisplayCreateImage)(uint32_t) = NULL;
+static uint32_t   (*_CGMainDisplayID)(void) = NULL;
+
+static void _cgDisplayLoad(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        _CGDisplayCreateImage = (CGImageRef (*)(uint32_t))dlsym(RTLD_DEFAULT, "CGDisplayCreateImage");
+        _CGMainDisplayID      = (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+        if (_CGDisplayCreateImage && _CGMainDisplayID) {
+            NSLog(@"[SC] ✅ CGDisplay API 已加载");
+        } else {
+            NSLog(@"[SC] ⚠️ CGDisplay API 未找到");
+        }
+    });
+}
+
 static CGImageRef _captureDisplayImage(void) {
-    return CGDisplayCreateImage(CGMainDisplayID());
+    _cgDisplayLoad();
+    if (!_CGDisplayCreateImage || !_CGMainDisplayID) return NULL;
+    return _CGDisplayCreateImage(_CGMainDisplayID());
 }
 
 // 从 CGImage 取单像素
