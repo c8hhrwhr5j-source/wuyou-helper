@@ -225,32 +225,17 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 - (ScreenColor)colorAtX:(int)x y:(int)y {
     ScreenColor result = {0, 0, 0};
     [self _transformX:&x y:&y];
-    if (!_connected || !_surface || x < 0 || y < 0 || x >= _width || y >= _height) {
+    if (x < 0 || y < 0 || x >= _width || y >= _height) {
         return result;
     }
 
-    if (_keeping && _cachedBuffer) {
-        int offset = y * _bytesPerRow + x * 4;
-        unsigned char *pixel = _cachedBuffer + offset;
-        result.b = pixel[0];
-        result.g = pixel[1];
-        result.r = pixel[2];
-        return result;
-    }
+    unsigned char *buffer = [self _lockAndGetBuffer];
+    if (!buffer) return result;
 
-    kern_return_t ret = IOSurfaceLock(_surface, kIOSurfaceLockReadOnly, NULL);
-    if (ret != KERN_SUCCESS) return result;
-
-    void *baseAddr = IOSurfaceGetBaseAddress(_surface);
-    if (baseAddr) {
-        int offset = y * _bytesPerRow + x * 4;
-        unsigned char *pixel = (unsigned char *)baseAddr + offset;
-        result.b = pixel[0];
-        result.g = pixel[1];
-        result.r = pixel[2];
-    }
-
-    IOSurfaceUnlock(_surface, kIOSurfaceLockReadOnly, NULL);
+    int offset = y * _bytesPerRow + x * 4;
+    result.b = buffer[offset];
+    result.g = buffer[offset + 1];
+    result.r = buffer[offset + 2];
     return result;
 }
 
@@ -289,7 +274,9 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
             if (abs(r - color.r) <= tolerance &&
                 abs(g - color.g) <= tolerance &&
                 abs(b - color.b) <= tolerance) {
-                return CGPointMake(x, y);
+                int rx = x, ry = y;
+                [self _inverseTransformX:&rx y:&ry];
+                return CGPointMake(rx, ry);
             }
         }
     }
@@ -329,7 +316,9 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
             if (abs(r - color.r) <= tolerance &&
                 abs(g - color.g) <= tolerance &&
                 abs(b - color.b) <= tolerance) {
-                [results addObject:[NSValue valueWithCGPoint:CGPointMake(x, y)]];
+                int rx = x, ry = y;
+                [self _inverseTransformX:&rx y:&ry];
+                [results addObject:[NSValue valueWithCGPoint:CGPointMake(rx, ry)]];
             }
         }
     }
@@ -358,25 +347,49 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 }
 
 // 将旋转后的坐标转换为原图坐标
-// 原图 _width x _height，rotate后逻辑尺寸 = rotatedW x rotatedH
-// -90°(270): 逻辑 (rx,ry) → 原图 (ry, _height - rx)
-//  90°     : 逻辑 (rx,ry) → 原图 (_width - ry, rx)
-// 180°     : 逻辑 (rx,ry) → 原图 (_width - rx, _height - ry)
+// 原图 _width x _height，像素索引 0.._width-1, 0.._height-1
+// -90°(270): 逻辑 (rx,ry) → 原图 (ry, _height-1 - rx)
+//  90°     : 逻辑 (rx,ry) → 原图 (_width-1 - ry, rx)
+// 180°     : 逻辑 (rx,ry) → 原图 (_width-1 - rx, _height-1 - ry)
 - (void)_transformX:(int *)x y:(int *)y {
     if (_rotation == 0) return;
     int rx = *x, ry = *y;
+    int w1 = _width - 1;
+    int h1 = _height - 1;
     switch (_rotation) {
         case 90:
-            *x = _width - ry;
+            *x = w1 - ry;
             *y = rx;
             break;
         case 180:
-            *x = _width - rx;
-            *y = _height - ry;
+            *x = w1 - rx;
+            *y = h1 - ry;
             break;
         case 270:
             *x = ry;
-            *y = _height - rx;
+            *y = h1 - rx;
+            break;
+    }
+}
+
+// 反向：原图坐标转回旋转后的逻辑坐标
+- (void)_inverseTransformX:(int *)x y:(int *)y {
+    if (_rotation == 0) return;
+    int ox = *x, oy = *y;
+    int w1 = _width - 1;
+    int h1 = _height - 1;
+    switch (_rotation) {
+        case 90:
+            *x = oy;
+            *y = w1 - ox;
+            break;
+        case 180:
+            *x = w1 - ox;
+            *y = h1 - oy;
+            break;
+        case 270:
+            *x = h1 - oy;
+            *y = ox;
             break;
     }
 }
