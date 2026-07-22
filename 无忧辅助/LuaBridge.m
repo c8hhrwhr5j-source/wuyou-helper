@@ -160,8 +160,7 @@ static int l_screen_keep(lua_State *L) {
 // --- screen.rotate(deg) ---
 static int l_screen_rotate(lua_State *L) {
     int deg = (int)luaL_checkinteger(L, 1);
-    // iOS 上 rotate 通常不直接支持，记录日志提示
-    NSLog(@"[screen.rotate] 旋转角度: %d (iOS 上坐标系由设备方向决定)", deg);
+    [[ScreenCapture sharedInstance] setRotation:deg];
     return 0;
 }
 

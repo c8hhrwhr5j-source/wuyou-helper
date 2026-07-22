@@ -16,23 +16,32 @@ typedef struct {
 
 + (instancetype)sharedInstance;
 
-/// 获取屏幕分辨率（像素）
+/// 获取屏幕分辨率（像素），受 rotate 影响
 - (CGSize)screenSize;
 
-/// 获取指定像素点的颜色
+/// 获取指定像素点的颜色（坐标已应用 rotate）
 - (ScreenColor)colorAtX:(int)x y:(int)y;
 
-/// 在指定区域内查找颜色（返回坐标，找不到返回 {-1, -1}）
+/// 在指定区域内查找颜色（坐标已应用 rotate），返回原图坐标
 - (CGPoint)findColor:(ScreenColor)color
             tolerance:(int)tolerance
                    x1:(int)x1 y1:(int)y1
                    x2:(int)x2 y2:(int)y2;
 
-/// 查找所有匹配坐标
+/// 查找所有匹配坐标（坐标已应用 rotate）
 - (NSArray<NSValue *> *)findAllColors:(ScreenColor)color
                             tolerance:(int)tolerance
                                    x1:(int)x1 y1:(int)y1
                                    x2:(int)x2 y2:(int)y2;
+
+/// 旋转坐标系: 0=正常, 90/270=横屏, -90同270, 180=倒立
+- (void)setRotation:(int)degrees;
+
+/// 重置为默认坐标系
+- (void)resetRotation;
+
+/// 获取当前旋转角度
+- (int)rotation;
 
 /// 屏幕保持（缓存屏幕数据，后续取色不重新截图）
 - (void)keepScreen;

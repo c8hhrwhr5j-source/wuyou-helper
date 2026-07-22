@@ -27,6 +27,8 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     int _height;
     BOOL _connected;
 
+    int _rotation; // 0/90/180/270
+
     NSString *_diagMessage;
 
     BOOL _keeping;
@@ -55,6 +57,7 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
         _width = 0;
         _height = 0;
         _bytesPerRow = 0;
+        _rotation = 0;
         [self _connect];
     }
     return self;
@@ -200,6 +203,7 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 
 - (ScreenColor)colorAtX:(int)x y:(int)y {
     ScreenColor result = {0, 0, 0};
+    [self _transformX:&x y:&y];
     if (!_connected || !_surface || x < 0 || y < 0 || x >= _width || y >= _height) {
         return result;
     }
@@ -237,6 +241,13 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
                    x2:(int)x2 y2:(int)y2 {
     if (!_connected) return CGPointMake(-1, -1);
 
+    // 应用旋转到搜索区域
+    [self _transformX:&x1 y:&y1];
+    [self _transformX:&x2 y:&y2];
+    // normalize bounds after transform
+    if (x1 > x2) { int t = x1; x1 = x2; x2 = t; }
+    if (y1 > y2) { int t = y1; y1 = y2; y2 = t; }
+
     if (x2 <= 0 || x2 > _width)  x2 = _width;
     if (y2 <= 0 || y2 > _height) y2 = _height;
     if (x1 < 0) x1 = 0;
@@ -272,6 +283,11 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     NSMutableArray<NSValue *> *results = [NSMutableArray array];
     if (!_connected) return results;
 
+    [self _transformX:&x1 y:&y1];
+    [self _transformX:&x2 y:&y2];
+    if (x1 > x2) { int t = x1; x1 = x2; x2 = t; }
+    if (y1 > y2) { int t = y1; y1 = y2; y2 = t; }
+
     if (x2 <= 0 || x2 > _width)  x2 = _width;
     if (y2 <= 0 || y2 > _height) y2 = _height;
     if (x1 < 0) x1 = 0;
@@ -300,6 +316,54 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
     return results;
 }
 
+// MARK: - 坐标旋转
+
+- (void)setRotation:(int)degrees {
+    // 标准化到 0/90/180/270
+    int d = degrees % 360;
+    if (d < 0) d += 360;
+    if (d % 90 != 0) d = 0; // 不支持非 90 度增量
+    _rotation = d;
+    NSLog(@"[ScreenCapture] Rotation set to %d", _rotation);
+}
+
+- (void)resetRotation {
+    _rotation = 0;
+    NSLog(@"[ScreenCapture] Rotation reset to 0");
+}
+
+- (int)rotation {
+    return _rotation;
+}
+
+// 将旋转后的坐标转换为原图坐标
+- (void)_transformX:(int *)x y:(int *)y {
+    if (_rotation == 0) return;
+    int ox = *x, oy = *y;
+    switch (_rotation) {
+        case 90:
+            *x = oy;
+            *y = _width - ox;
+            break;
+        case 180:
+            *x = _width - ox;
+            *y = _height - oy;
+            break;
+        case 270:
+            *x = _height - oy;
+            *y = ox;
+            break;
+    }
+}
+
+// 获取旋转后的逻辑尺寸
+- (CGSize)screenSize {
+    if (_rotation == 90 || _rotation == 270) {
+        return CGSizeMake(_height, _width);
+    }
+    return CGSizeMake(_width, _height);
+}
+
 // MARK: - 屏幕缓存
 
 - (void)keepScreen {
@@ -315,10 +379,6 @@ extern kern_return_t IOMobileFramebufferGetLayerDefaultSurface(
 }
 
 // MARK: - 截图为 PNG
-
-- (CGSize)screenSize {
-    return CGSizeMake(_width, _height);
-}
 
 - (BOOL)snapshotToPath:(NSString *)path {
     return [self snapshotToPath:path x:0 y:0 w:_width h:_height];
