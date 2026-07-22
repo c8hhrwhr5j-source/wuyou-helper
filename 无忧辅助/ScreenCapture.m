@@ -53,16 +53,18 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
     _fbload();
     if(_fbMain&&_fbSurf&&_fbMain(&_fb)==KERN_SUCCESS&&_fb){
         for(int l=0;l<=2;l++){if(_fbSurf(_fb,l,&_sf)==KERN_SUCCESS&&_sf){_w=(int)IOSurfaceGetWidth(_sf);_h=(int)IOSurfaceGetHeight(_sf);
-        if(_w>0&&_h>0){_bpr=(int)IOSurfaceGetBytesPerRow(_sf);_fbOK=YES;break;}CFRelease(_sf);_sf=NULL;}}
+        if(_w>0&&_h>0){_bpr=(int)IOSurfaceGetBytesPerRow(_sf);_fbOK=YES;NSLog(@"[SCR] IOMFB layer%d=%dx%d bpr=%d",l,_w,_h,_bpr);break;}CFRelease(_sf);_sf=NULL;}}
         if(!_fbOK){_fb=NULL;}
     }
     // roothelper 尺寸
     char b[128]={0};if(_rhCall(@"size",@"",b,sizeof(b))){
         sscanf(b,"SIZE %d %d %d",&_rw,&_rh,&_rbpr);
-        if(_rw>0&&_rh>0)_rhOK=YES;
-    }
-    if(!_fbOK&&!_rhOK){CGSize s=[UIScreen mainScreen].nativeBounds.size;_w=(int)s.width;_h=(int)s.height;_bpr=_w*4;}
+        if(_rw>0&&_rh>0){_rhOK=YES;NSLog(@"[SCR] roothelper size=%dx%d bpr=%d",_rw,_rh,_rbpr);}
+        else{NSLog(@"[SCR] roothelper size parse failed: %s",b);}
+    }else{NSLog(@"[SCR] roothelper size call failed");}
+    if(!_fbOK&&!_rhOK){CGSize s=[UIScreen mainScreen].nativeBounds.size;_w=(int)s.width;_h=(int)s.height;_bpr=_w*4;NSLog(@"[SCR] fallback to UIScreen: %dx%d",_w,_h);}
     if(!_rhOK){_rw=_w;_rh=_h;_rbpr=_bpr;}
+    NSLog(@"[SCR] init done: fbOK=%d rhOK=%d w=%d h=%d rw=%d rh=%d",_fbOK,_rhOK,_w,_h,_rw,_rh);
 }
 - (BOOL)isConnected{return _fbOK||_rhOK||_w>0;}
 - (NSString*)diagnosticDescription{
@@ -106,13 +108,14 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
         }
     }
 
-    // 2. roothelper
-    if(_rhOK&&x>=0&&x<_rw&&y>=0&&y<_rh){
+    // 2. roothelper（独立后台进程，始终尝试）
+    if(x>=0&&x<_rw&&y>=0&&y<_rh){
         char buf[128]={0};NSString*coord=[NSString stringWithFormat:@"%d,%d",x,y];
         if(_rhCall(@"pixel",coord,buf,sizeof(buf))){int rr=0,gg=0,bb=0;
-            if(sscanf(buf,"OK %d %d %d",&rr,&gg,&bb)==3){c.r=(unsigned char)rr;c.g=(unsigned char)gg;c.b=(unsigned char)bb;}
+            if(sscanf(buf,"OK %d %d %d",&rr,&gg,&bb)==3){c.r=(unsigned char)rr;c.g=(unsigned char)gg;c.b=(unsigned char)bb;
+                if(rr||gg||bb){_rhOK=YES;NSLog(@"[SCR] rh pixel(%d,%d)=%d,%d,%d",x,y,rr,gg,bb);return c;}
+            }
         }
-        if(c.r||c.g||c.b)return c;
     }
 
     return c;
@@ -136,8 +139,8 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
             IOSurfaceUnlock(_sf,1,NULL);}
     }
 
-    // roothelper capture
-    if(_rhOK){
+    // roothelper capture（独立后台进程，始终尝试）
+    {
         NSString *tf=[NSTemporaryDirectory() stringByAppendingPathComponent:@"sc_cap.dat"];
         [[NSFileManager defaultManager]removeItemAtPath:tf error:nil];
         char db[256]={0};
@@ -146,6 +149,7 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
             [[NSFileManager defaultManager]removeItemAtPath:tf error:nil];
             size_t total=(size_t)_rh*_rbpr;
             if(d.length>=total){
+                _rhOK=YES;
                 unsigned char *m=(unsigned char*)d.bytes;
                 for(int ry=y1;ry<y2&&ry<_rh;ry++){unsigned char*row=m+ry*_rbpr;
                 for(int rx=x1;rx<x2&&rx<_rw;rx++){int i=rx*4;if(abs(row[i+2]-c.r)<=tol&&abs(row[i+1]-c.g)<=tol&&abs(row[i]-c.b)<=tol)
@@ -175,11 +179,19 @@ static BOOL _rhCall(NSString *cmd, NSString *arg, char *out, size_t sz){
         if(_w>0&&_h>0){_bpr=(int)IOSurfaceGetBytesPerRow(_sf);_fbOK=YES;break;}CFRelease(_sf);_sf=NULL;}}
         if(!_fbOK){_fb=NULL;}
     }
+    // 同时刷新 roothelper 尺寸
+    char b[128]={0};if(_rhCall(@"size",@"",b,sizeof(b))){
+        int rw2,rh2,rbpr2;
+        if(sscanf(b,"SIZE %d %d %d",&rw2,&rh2,&rbpr2)==3&&rw2>0&&rh2>0){
+            _rw=rw2;_rh=rh2;_rbpr=rbpr2;_rhOK=YES;
+        }
+    }
+    if(!_rhOK){_rw=_w;_rh=_h;_rbpr=_bpr;}
 }
 - (void)reconnectScreen{[self _reconnectIOMFB];}
 - (BOOL)isScreenAlive{
-    if(!_fbOK&&!_rhOK)return NO;
-    int tx=_w/2,ty=_h/2;if(_rhOK){tx=_rw/2;ty=_rh/2;}
+    if(!_fbOK&&_w<=0)return NO;
+    int tx=_w/2,ty=_h/2;
     ScreenColor c=[self colorAtX:tx y:ty];
     return (c.r>0||c.g>0||c.b>0);
 }

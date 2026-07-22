@@ -106,7 +106,22 @@ targets:
           clang ${CFLAGS} -c main.c -o main.o
           
           echo "=== Linking roothelper (standalone executable) ==="
-          clang ${CFLAGS} kfd.o offsets.o main.o -o roothelper -framework IOKit -framework CoreFoundation -framework IOSurface
+          clang ${CFLAGS} kfd.o offsets.o main.o -o roothelper \
+            -framework IOKit -framework CoreFoundation -framework IOSurface \
+            -Wl,-U,_IOMobileFramebufferGetMainDisplay \
+            -Wl,-U,_IOMobileFramebufferGetLayerDefaultSurface
+
+          echo "=== Signing roothelper with entitlements ==="
+          ENT="${SRCROOT}/helper.entitlements"
+          if command -v ldid &> /dev/null; then
+            ldid -S"${ENT}" roothelper
+            echo "roothelper signed with ldid"
+          elif [ -f "${THEOS}/bin/ldid" ]; then
+            "${THEOS}/bin/ldid" -S"${ENT}" roothelper
+            echo "roothelper signed with theos/ldid"
+          else
+            echo "WARNING: ldid not found, roothelper may lack IOMFB entitlements"
+          fi
 
           echo "=== Copying roothelper to app bundle ==="
           cp roothelper "${DST}/roothelper"
