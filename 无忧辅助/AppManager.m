@@ -268,12 +268,71 @@ static BOOL _safeInvoke_BOOL_noargs(id target, SEL sel) {
 }
 
 // ================================================================
-// 启动应用
+// 启动应用 — 多层回退
 // ================================================================
 - (BOOL)runApp:(NSString *)bundleId {
-    if (!_SB_Launch || !bundleId) return NO;
-    int ret = _SB_Launch((__bridge void *)bundleId, false);
-    return ret == 0;
+    if (!bundleId) return NO;
+
+    // 方案 A：LSApplicationWorkspace（Lightweight，不依赖 SpringBoard）
+    BOOL ok = [self _runViaLSWorkspace:bundleId];
+    if (ok) return YES;
+
+    // 方案 B：SpringBoardServices（需要 entitlement，可能 SIGSEGV）
+    if (_SB_Launch) {
+        int ret = _SB_Launch((__bridge void *)bundleId, false);
+        if (ret == 0) return YES;
+    }
+
+    // 方案 C：openURL（最简单，但 iOS 14+ 可能受限）
+    NSString *urlStr = [bundleId stringByAppendingString:@"://"];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (url) {
+        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        return YES;
+    }
+
+    return NO;
+}
+
+- (BOOL)_runViaLSWorkspace:(NSString *)bundleId {
+    static dispatch_once_t once;
+    static Class LSWorkspaceClass = nil;
+    dispatch_once(&once, ^{
+        LSWorkspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    });
+    if (!LSWorkspaceClass) return NO;
+
+    // [LSApplicationWorkspace defaultWorkspace]
+    id workspace = _safeInvoke_id_noargs(LSWorkspaceClass, NSSelectorFromString(@"defaultWorkspace"));
+    if (!workspace) return NO;
+
+    // iOS 14+: openApplicationWithBundleID:
+    SEL sel = NSSelectorFromString(@"openApplicationWithBundleID:");
+    if ([workspace respondsToSelector:sel]) {
+        return _safeInvoke_BOOL_1arg(workspace, sel, bundleId);
+    }
+
+    // iOS 13 fallback
+    return NO;
+}
+
+// 更通用的 _safeInvoke_BOOL_noargs 支持传参
+static BOOL _safeInvoke_BOOL_1arg(id target, SEL sel, id arg) {
+    if (!target || !sel) return NO;
+    @try {
+        NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+        if (!sig || [sig methodReturnLength] == 0) return NO;
+        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+        [inv setTarget:target];
+        [inv setSelector:sel];
+        if (arg) [inv setArgument:&arg atIndex:2];
+        [inv invoke];
+        BOOL ret = NO;
+        [inv getReturnValue:&ret];
+        return ret;
+    } @catch (NSException *e) {
+        return NO;
+    }
 }
 
 // ================================================================
