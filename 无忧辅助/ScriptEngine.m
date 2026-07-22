@@ -18,7 +18,7 @@
 // 这样 Lua 的 stop_script() 和 UI 停止按钮都能生效
 extern volatile int _global_script_stop_flag;
 static volatile BOOL   _globalPaused  = NO;
-static UIBackgroundTaskIdentifier _bgTask = UIBackgroundTaskInvalid;
+static UIBackgroundTaskIdentifier _bgTask = 0; // UIBackgroundTaskInvalid 不是编译时常量，运行时初始化
 static NSCondition    *_globalPauseCondition = nil;
 
 // lua_sethook 回调（每条 Lua 指令后触发，纯 C）
