@@ -19,10 +19,12 @@
 #import <unistd.h>
 #import <fcntl.h>
 
-// htonll 非 POSIX 标准函数，iOS SDK 不提供，自行实现
+// htonll 在较新 iOS SDK 中已作为宏提供，仅在未定义时自行实现
+#ifndef htonll
 static inline uint64_t htonll(uint64_t host) {
     return ((uint64_t)htonl((uint32_t)(host >> 32))) | ((uint64_t)htonl((uint32_t)(host & 0xFFFFFFFF)) << 32);
 }
+#endif
 
 #pragma mark - HTTP 响应工具
 
@@ -595,7 +597,7 @@ static NSData *WSTextFrame(NSString *text) {
             return;
         }
         [wsBuffer appendBytes:buf length:n];
-        [self processWSFrames:&wsBuffer clientFd:clientFd];
+        [self processWSFrames:wsBuffer clientFd:clientFd];
     });
     dispatch_resume(wsSource);
 
