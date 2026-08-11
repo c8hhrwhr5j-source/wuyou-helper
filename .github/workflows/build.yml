@@ -19,13 +19,17 @@ jobs:
       - name: Install dependencies
         run: |
           brew install xcodegen ldid
+          gem install xcpretty 2>/dev/null || true
 
       - name: Generate Xcode project
         run: |
           xcodegen generate
 
       - name: Build with xcodebuild
+        id: build_step
         run: |
+          mkdir -p build
+          set -o pipefail
           xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
             -configuration Release \
@@ -35,12 +39,21 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             -derivedDataPath build/DerivedData \
             build 2>&1 | tee build/build.log
+        continue-on-error: true
 
-      - name: Show build errors
-        if: failure()
+      - name: Show first error detail
+        if: steps.build_step.outcome == 'failure'
         run: |
-          echo "=== BUILD ERRORS ==="
-          grep -E 'error:|Error:|warning:.*-Win|fatal error' build/build.log | head -50 || true
+          echo "=== ERROR LINES ==="
+          grep -nE ': (error|fatal error):|error:' build/build.log | head -20 || true
+          echo "=== LAST 30 ERROR LINES (grep -A1) ==="
+          grep -A1 ': error:' build/build.log | head -60 || true
+
+      - name: Fail if build failed
+        if: steps.build_step.outcome == 'failure'
+        run: |
+          echo "Build failed!"
+          exit 1
 
       - name: Package IPA
         run: |
