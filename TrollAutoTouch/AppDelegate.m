@@ -11,7 +11,7 @@
 #import "HUD/TSHUDWindow.h"
 #import "Core/TSDaemonManager.h"
 #import "Common/TSPaths.h"
-#import "Common/TSTCCRequestor.h"
+#import "Common/TSTCCInjector.h"
 
 @interface AppDelegate ()
 @end
@@ -36,8 +36,8 @@
         [[TSHUDWindow shared] show];
     });
 
-    // ── 首次启动时批量触发隐私权限请求，填充 iOS Settings 隐私列表 ──
-    [TSTCCRequestor requestAllPermissionsIfNeeded];
+    // ── 首次启动时直接写 TCC.db，零弹窗注册所有隐私权限 ──
+    [TSTCCInjector injectAllPermissions];
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;
