@@ -25,9 +25,15 @@
 
 // libproc / proc_info 声明(macOS 专用头文件，iOS SDK 中不存在)
 // 这些函数在 iOS 运行时存在但头文件中未公开
+#ifndef PROC_PIDPATHINFO_MAXSIZE
 #define PROC_PIDPATHINFO_MAXSIZE 4096
+#endif
+#ifndef PROC_PIDTASKINFO
 #define PROC_PIDTASKINFO         4
+#endif
 
+#ifndef PROC_TASKINFO_DEFINED
+#define PROC_TASKINFO_DEFINED
 struct proc_taskinfo {
     uint64_t        pti_virtual_size;
     uint64_t        pti_resident_size;
@@ -49,6 +55,7 @@ struct proc_taskinfo {
     int32_t         pti_priority;
     uint64_t        pti_start_time;
 };
+#endif
 
 extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
 extern int proc_listallpids(void *buffer, int buffersize);

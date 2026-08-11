@@ -12,6 +12,12 @@
 #import <sys/sysctl.h>
 #import <signal.h>
 
+// proc_pidpath 是 macOS 私有 API，iOS SDK 无对应头文件，手动声明
+#ifndef PROC_PIDPATHINFO_MAXSIZE
+#define PROC_PIDPATHINFO_MAXSIZE 4096
+#endif
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+
 // ────────────────────────────────────────────────────────────
 #pragma mark - TSAppInfo
 // ────────────────────────────────────────────────────────────
