@@ -13,7 +13,6 @@
 //       若 captureFramebuffer 失败，会自动回退到应用内截屏。
 
 typedef struct __IOSurface *IOSurfaceRef;
-typedef struct __XPC_HANDLE__ *xpc_object_t; // 仅占位，实际用 void*
 
 // IOMobileFramebuffer 私有函数指针
 typedef void *(*IOMFBCreateFunc)(CFAllocatorRef);
@@ -71,9 +70,7 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     // 从 IOSurface 拷贝像素。这些函数来自 IOSurface.framework。
     size_t (*lock)(IOSurfaceRef, uint32_t, uint32_t *) =
         dlsym(_iosurfaceHandle, "IOSurfaceLock");
-    void (*unlock)(IOSurfaceRef, uint32_t, uint32_t *) =
-        dlsym(_iosurfaceHandle, "IOSurfaceUnlock");
-    void *(*baseAddr)(IOSurfaceRef) =
+    void (*baseAddr)(IOSurfaceRef) =
         dlsym(_iosurfaceHandle, "IOSurfaceGetBaseAddress");
     size_t (*widthFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
     size_t (*heightFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
@@ -125,8 +122,10 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     UIWindow *keyWindow = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (scene.activationState == UISceneActivationStateForegroundActive) {
-            for (UIWindow *w in scene.windows) {
-                if (w.isKeyWindow) { keyWindow = w; break; }
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    if (w.isKeyWindow) { keyWindow = w; break; }
+                }
             }
         }
     }
