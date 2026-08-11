@@ -56,11 +56,5 @@
 	<true/>
 	<key>com.apple.private.security.storage-exempt.heritable</key>
 	<true/>
-	<key>com.apple.private.security.container-required</key>
-	<string>application</string>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>T3DY639H6W.*</string>
-	</array>
 </dict>
 </plist>

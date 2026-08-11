@@ -50,7 +50,30 @@ jobs:
           fi
           mkdir -p build/Payload
           cp -R "$APP" build/Payload/
-          ldid -S"TrollAutoTouch/TrollAutoTouch.entitlements" "build/Payload/TrollAutoTouch.app/TrollAutoTouch"
+          APP_DST="build/Payload/TrollAutoTouch.app"
+
+          echo "[*] 拷贝 App 图标 PNG 到 .app 根目录 (TrollStore 需要) ..."
+          ICONSET="TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
+          if ls "$ICONSET"/*.png 1>/dev/null 2>&1; then
+            cp "$ICONSET"/*.png "$APP_DST/"
+            echo "  $(ls "$ICONSET"/*.png | tr '\n' ' ')"
+          else
+            echo "  [!] 未找到图标 PNG，用 sips 生成..."
+            SRC_ICON="TrollAutoTouch_icon.png"
+            if [ -f "$SRC_ICON" ]; then
+              sips -z 120 120 "$SRC_ICON" --out "$APP_DST/AppIcon60x60@2x.png" >/dev/null 2>&1
+              sips -z 180 180 "$SRC_ICON" --out "$APP_DST/AppIcon60x60@3x.png" >/dev/null 2>&1
+              echo "  AppIcon60x60@2x.png AppIcon60x60@3x.png"
+            fi
+          fi
+
+          echo "[*] 注入 entitlements (ldid) ..."
+          ldid -S"TrollAutoTouch/TrollAutoTouch.entitlements" "$APP_DST/TrollAutoTouch"
+
+          echo "[*] 验证 ldid 注入结果 ..."
+          ldid -e "$APP_DST/TrollAutoTouch" | head -20
+          echo "  ... (验证 no-sandbox 是否注入)"
+
           cd build && zip -qry TrollAutoTouch.ipa Payload
           echo "[OK] build/TrollAutoTouch.ipa"
 
