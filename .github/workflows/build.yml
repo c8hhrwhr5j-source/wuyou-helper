@@ -18,16 +18,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install xcodegen
-          mkdir -p $HOME/.local/bin
-          curl -fsSL -o $HOME/.local/bin/ldid \
-            https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64
-          chmod +x $HOME/.local/bin/ldid
-          xattr -cr $HOME/.local/bin/ldid 2>/dev/null || true
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          echo "[*] ldid simple test:"
-          ldid 2>&1 || true
-          file $HOME/.local/bin/ldid
+          brew install ldid xcodegen
+          ldid 2>&1 | head -2 || true
 
       - name: Generate Xcode project
         run: |
@@ -63,89 +55,69 @@ jobs:
           cp -R "$APP" build/Payload/
           APP_DST="build/Payload/TrollAutoTouch.app"
           BIN="$APP_DST/TrollAutoTouch"
+          ENT="$PWD/TrollAutoTouch/TrollAutoTouch.entitlements"
 
-          # ======== 0: 架构诊断 ========
+          # ======== 架构诊断 ========
           echo ""
-          echo "=== 架构诊断 ==="
-          echo "[*] lipo -info:"
+          echo "=== 架构 ==="
           lipo -info "$BIN"
-          echo "[*] file:"
           file "$BIN"
-          echo "[*] codesign -dv (签名状态):"
-          codesign -dvvv "$BIN" 2>&1 || echo "  (无签名)"
 
-          # ======== 1: 清理签名 ========
+          # ======== 清理旧签名 ========
           echo ""
           echo "=== 清理签名 ==="
-          if [ -d "$APP_DST/_CodeSignature" ]; then
-            echo "[*] 删除 _CodeSignature/"
-            rm -rf "$APP_DST/_CodeSignature"
-          else
-            echo "[*] 无 _CodeSignature"
-          fi
-          # 不在这里用 codesign --remove-signature，先让 ldid 自己处理
+          rm -rf "$APP_DST/_CodeSignature"
+          codesign --remove-signature "$BIN" 2>/dev/null && echo "[OK] 签名已移除" || echo "[*] 二进制无签名"
 
-          # ======== 2: 图标 ========
+          # ======== 图标 ========
           echo ""
           echo "=== 图标 ==="
-          # 删除 xcodebuild 可能带进来的旧 AppIcon.png
           rm -f "$APP_DST/AppIcon.png" "$APP_DST/icon-1024.ico"
-          ICONSET="TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
-          if ls "$ICONSET"/*.png 1>/dev/null 2>&1; then
-            cp "$ICONSET"/*.png "$APP_DST/"
-            echo "[OK] 拷贝图标:"
-            ls "$ICONSET"/*.png | while read f; do echo "    $(basename $f)"; done
-          fi
+          ICONSET="$PWD/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
+          ls "$ICONSET"/*.png 1>/dev/null 2>&1 && cp "$ICONSET"/*.png "$APP_DST/" && echo "[OK]" || echo "[!] no icons"
 
-          # ======== 3: ldid 测试 - 先试最小 entitlements ========
+          # ======== 策略 A: codesign 嵌入 entitlements + ldid 假签 ========
           echo ""
-          echo "=== ldid 调试 ==="
-          echo "[*] ldid 可执行文件检查:"
-          file $(which ldid)
+          echo "=== 策略A: codesign(嵌入entitlements) -> ldid(假签) ==="
+          codesign -s - -f --entitlements "$ENT" "$BIN" 2>&1
+          echo "[codesign 返回: $?]"
+          
           echo ""
-
-          # 创建最小 entitlements（只两个关键权限），排除其他权限干扰
-          MINENT=$(mktemp -t min_entitlements)
-          cat > "$MINENT" << 'PLISTEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>platform-application</key>
-              <true/>
-              <key>com.apple.private.security.no-sandbox</key>
-              <true/>
-          </dict>
-          </plist>
-          PLISTEOF
-          echo "[*] 最小 entitlements 内容:"
-          cat "$MINENT"
+          echo "[验证] codesign --entitlements:"
+          codesign -d --entitlements - "$BIN" 2>&1 | grep -A5 "<?xml" || echo "(无)"
 
           echo ""
-          echo "[>] 测试: ldid -S(minimal) $BIN"
-          ldid -S"$MINENT" "$BIN"
-          echo "[<] 返回码: $?"
-          echo "[*] ldid -e (最小 entitlements):"
+          echo "[>] ldid -S (假签覆盖, 应该保留 entitlements)"
+          ldid -S "$BIN"
+          echo "[ldid 返回: $?]"
+
+          echo ""
+          echo "[验证] ldid -e (假签后):"
+          ldid -e "$BIN"
+          
+          echo ""
+          echo "[验证] codesign --entitlements (假签后):"
+          codesign -d --entitlements - "$BIN" 2>&1 | grep -A5 "<?xml" || echo "(无)"
+
+          # ======== 策略 B: 直接 ldid 两步（如果 A 不行） ========
+          echo ""
+          echo "=== 策略B: ldid两步 (先空签, 再注entitlements) ==="
+          codesign --remove-signature "$BIN" 2>/dev/null || true
+          echo "[>] ldid -S (空签)"
+          ldid -S "$BIN"
+          echo "[>] ldid -S(entitlements)"
+          ldid -S"$ENT" "$BIN"
+          echo "[验证] ldid -e:"
           ldid -e "$BIN"
 
-          # ======== 如果最小 entitlements 成功，再试完整版 ========
+          # ======== Info.plist ========
           echo ""
-          echo "[>] 测试: ldid -S(full) $BIN"
-          ldid -S"TrollAutoTouch/TrollAutoTouch.entitlements" "$BIN"
-          echo "[<] 返回码: $?"
-          echo "[*] ldid -e (完整 entitlements):"
-          ldid -e "$BIN"
+          echo "=== Info.plist ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$APP_DST/Info.plist" 2>/dev/null || echo "(无 CFBundleIcons)"
+          
           echo ""
-          echo "(看上面是否有 no-sandbox 和 platform-application)"
-
-          # ======== 最后检查 Info.plist ========
-          echo ""
-          echo "=== Info.plist CFBundleIcons ==="
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$APP_DST/Info.plist" 2>/dev/null || echo "(无 CFBundleIcons)"
-
-          echo ""
-          echo "=== .app 根目录 PNG ==="
-          find "$APP_DST" -maxdepth 1 -name "*.png" -exec basename {} \;
+          echo "=== .app PNG ==="
+          find "$APP_DST" -maxdepth 1 -name "*.png" | while read f; do echo "  $(basename $f) ($(stat -f%z "$f") bytes)"; done
 
           # ======== 打包 ========
           cd build && zip -qry TrollAutoTouch.ipa Payload
