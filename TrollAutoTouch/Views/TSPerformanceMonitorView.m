@@ -115,7 +115,7 @@ static NSString *fmtBytes(uint64_t b) {
     [self _label:@"CPU 使用率" rect:CGRectMake(leftPad, y, leftW, rowH) font:f color:nil];
     _cpuSpark = [self _spark:CGRectMake(sparkX, y + 10, sparkW, rowH - 18)
                        stroke:[TSColors success]
-                         fill:[TSColors success colorWithAlphaComponent:0.12]];
+                         fill:[[TSColors success] colorWithAlphaComponent:0.12]];
     _cpuPercentLabel = [self _label:@"0.00%" rect:CGRectMake(numX, y, numW, rowH)
                                   font:[UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium]
                                  color:[TSColors success]];
@@ -125,7 +125,7 @@ static NSString *fmtBytes(uint64_t b) {
     [self _label:@"MEM 使用率" rect:CGRectMake(leftPad, y, leftW, rowH) font:f color:nil];
     _memSpark = [self _spark:CGRectMake(sparkX, y + 10, sparkW, rowH - 18)
                        stroke:[TSColors warning]
-                         fill:[TSColors warning colorWithAlphaComponent:0.12]];
+                         fill:[[TSColors warning] colorWithAlphaComponent:0.12]];
     _memSpark.barMode = YES;
     _memPercentLabel = [self _label:@"0.00%" rect:CGRectMake(numX, y, numW, rowH)
                                   font:[UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium]
@@ -137,10 +137,10 @@ static NSString *fmtBytes(uint64_t b) {
     CGFloat hH = (rowH - 14) / 2;
     _netUpSpark = [self _spark:CGRectMake(sparkX, y + 6, sparkW, hH)
                        stroke:[TSColors tint]
-                         fill:[TSColors tint colorWithAlphaComponent:0.10]];
+                         fill:[[TSColors tint] colorWithAlphaComponent:0.10]];
     _netDownSpark = [self _spark:CGRectMake(sparkX, y + rowH / 2 + 2, sparkW, hH)
                          stroke:[TSColors danger]
-                           fill:[TSColors danger colorWithAlphaComponent:0.10]];
+                           fill:[[TSColors danger] colorWithAlphaComponent:0.10]];
     _netUpLabel   = [self _label:@"↑0B" rect:CGRectMake(numX, y + 4, numW, hH)
                               font:[UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular]
                              color:[TSColors tint]];
