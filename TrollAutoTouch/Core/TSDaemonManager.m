@@ -99,8 +99,7 @@
     // 启动心跳
     [self startHeartbeat];
 
-    // 显示悬浮窗
-    [self showHUD];
+    // 悬浮窗默认关闭，用户可通过界面手动开启
 
     _state = TSDaemonStateRunning;
     NSLog(@"[Daemon] 所有服务已启动");

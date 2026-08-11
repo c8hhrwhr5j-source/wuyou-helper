@@ -19,7 +19,7 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     ENABLE_BITCODE: NO
     # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -lsqlite3
 targets:
   TrollAutoTouch:
     type: application

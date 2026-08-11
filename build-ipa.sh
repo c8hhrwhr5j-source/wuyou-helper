@@ -30,6 +30,49 @@ sign_copy_entitlements() {
   fi
 }
 
+# ── 准备 App 图标：从源 PNG 生成各尺寸并放到 .app 根目录 ──
+prepare_icons() {
+  local app="$1"
+  local src="$ROOT/TrollAutoTouch_icon.png"
+
+  if [ ! -f "$src" ]; then
+    echo "[!] 未找到源图标 $src，跳过图标准备"
+    return
+  fi
+
+  echo "[*] 准备 App 图标..."
+
+  # 核心文件名（Info.plist CFBundleIconFiles = ["AppIcon"]）
+  # iOS 会根据设备从 AppIcon*.png 中选合适尺寸
+  cp "$src" "$app/AppIcon.png"
+
+  # 若 macOS 有 sips，生成各尺寸以适配 Retina 屏
+  if command -v sips >/dev/null 2>&1; then
+    # iPhone 主屏幕 (60pt)
+    sips -z 120 120 "$src" --out "$app/AppIcon60x60@2x.png" >/dev/null 2>&1
+    sips -z 180 180 "$src" --out "$app/AppIcon60x60@3x.png" >/dev/null 2>&1
+    # 设置/通知 (20pt)
+    sips -z  40  40 "$src" --out "$app/AppIcon20x20@2x.png" >/dev/null 2>&1
+    sips -z  60  60 "$src" --out "$app/AppIcon20x20@3x.png" >/dev/null 2>&1
+    # 设置 (29pt)
+    sips -z  58  58 "$src" --out "$app/AppIcon29x29@2x.png" >/dev/null 2>&1
+    sips -z  87  87 "$src" --out "$app/AppIcon29x29@3x.png" >/dev/null 2>&1
+    # Spotlight (40pt)
+    sips -z  80  80 "$src" --out "$app/AppIcon40x40@2x.png" >/dev/null 2>&1
+    sips -z 120 120 "$src" --out "$app/AppIcon40x40@3x.png" >/dev/null 2>&1
+    # iPad (76pt / 83.5pt)
+    sips -z 152 152 "$src" --out "$app/AppIcon76x76@2x~ipad.png" >/dev/null 2>&1
+    sips -z 167 167 "$src" --out "$app/AppIcon83.5x83.5@2x~ipad.png" >/dev/null 2>&1
+    # App Store / 巨魔内部 (1024pt)
+    sips -z 1024 1024 "$src" --out "$app/icon-1024.png" >/dev/null 2>&1
+    echo "[*] 图标生成完成（sips）"
+  else
+    # 无 sips 时仅放单张 1024，iOS 会自动缩放
+    cp "$src" "$app/icon-1024.png"
+    echo "[*] 图标拷贝完成（单文件，iOS 自动缩放）"
+  fi
+}
+
 case "$MODE" in
   xcode)
     echo "[*] 用 xcodebuild 编译 (Release, 不签名)"
@@ -51,6 +94,7 @@ case "$MODE" in
     [ -z "$APP" ] && { echo "[x] 未找到编译产物 TrollAutoTouch.app"; exit 1; }
     rm -rf "$PAYLOAD"; mkdir -p "$PAYLOAD"
     cp -R "$APP" "$PAYLOAD/"
+    prepare_icons "$PAYLOAD/TrollAutoTouch.app"
     sign_copy_entitlements "$PAYLOAD/TrollAutoTouch.app"
     ;;
   payload)
@@ -58,6 +102,7 @@ case "$MODE" in
     [ -z "$APP" ] && { echo "用法: $0 payload path/to/TrollAutoTouch.app"; exit 1; }
     rm -rf "$PAYLOAD"; mkdir -p "$PAYLOAD"
     cp -R "$APP" "$PAYLOAD/"
+    prepare_icons "$PAYLOAD/TrollAutoTouch.app"
     sign_copy_entitlements "$PAYLOAD/TrollAutoTouch.app"
     ;;
   *)

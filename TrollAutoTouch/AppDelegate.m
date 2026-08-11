@@ -11,6 +11,7 @@
 #import "HUD/TSHUDWindow.h"
 #import "Core/TSDaemonManager.h"
 #import "Common/TSPaths.h"
+#import "Common/TSTCCInjector.h"
 
 @interface AppDelegate ()
 @end
@@ -21,19 +22,19 @@
     // ── 确保目录存在 ──
     [TSPaths ensureDirectoriesExist];
 
+    // ── 运行时注入 TCC 权限（直接写 TCC.db + 重启 tccd）──
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [TSTCCInjector grantAllPermissions];
+    });
+
     // ── 创建主窗口（旧式 UIWindow，不依赖 UIScene）──
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [TSColors bg];
     self.window.rootViewController = [[MainTabBarController alloc] init];
     [self.window makeKeyAndVisible];
 
-    // ── 启动核心服务 ──
+    // ── 启动核心服务（悬浮窗默认关闭，用户手动开启）──
     [[TSDaemonManager shared] startAll];
-
-    // ── 创建 HUD 悬浮窗（延迟到主循环下一帧，确保窗口层级正确）──
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[TSHUDWindow shared] show];
-    });
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;
@@ -51,9 +52,6 @@
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
-    if ([[TSHUDWindow shared] isHidden]) {
-        [[TSHUDWindow shared] show];
-    }
 }
 
 @end
