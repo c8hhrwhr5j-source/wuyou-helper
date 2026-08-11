@@ -11,9 +11,6 @@
 #import <sys/stat.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
-#import <sys/proc.h>
-#import <sys/proc_info.h>
-#import <libproc.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -26,9 +23,37 @@
 #import <fcntl.h>
 #import <sys/time.h>
 
-// 外部声明(系统私有函数)
+// libproc / proc_info 声明(macOS 专用头文件，iOS SDK 中不存在)
+// 这些函数在 iOS 运行时存在但头文件中未公开
+#define PROC_PIDPATHINFO_MAXSIZE 4096
+#define PROC_PIDTASKINFO         4
+
+struct proc_taskinfo {
+    uint64_t        pti_virtual_size;
+    uint64_t        pti_resident_size;
+    uint64_t        pti_total_user;
+    uint64_t        pti_total_system;
+    uint64_t        pti_threads_user;
+    uint64_t        pti_threads_system;
+    int32_t         pti_policy;
+    int32_t         pti_faults;
+    int32_t         pti_pageins;
+    int32_t         pti_cow_faults;
+    int32_t         pti_messages_sent;
+    int32_t         pti_messages_received;
+    int32_t         pti_syscalls_mach;
+    int32_t         pti_syscalls_unix;
+    int32_t         pti_csw;
+    int32_t         pti_threadnum;
+    int32_t         pti_numrunning;
+    int32_t         pti_priority;
+    uint64_t        pti_start_time;
+};
+
 extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
 extern int proc_listallpids(void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, uint32_t buffersize);
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 
 #pragma mark - 结果类型
 
