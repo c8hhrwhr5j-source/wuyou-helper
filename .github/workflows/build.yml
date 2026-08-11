@@ -44,10 +44,10 @@ jobs:
       - name: Show first error detail
         if: steps.build_step.outcome == 'failure'
         run: |
-          echo "=== ERROR LINES ==="
-          grep -nE ': (error|fatal error):|error:' build/build.log | head -20 || true
-          echo "=== LAST 30 ERROR LINES (grep -A1) ==="
-          grep -A1 ': error:' build/build.log | head -60 || true
+          echo "=== BUILD FAILURE ERRORS ==="
+          grep -n -E 'error[:]|Error[:]|error |^/.*\.m:[0-9]+:[0-9]+:' build/build.log | head -30 || true
+          echo "=== LAST 50 LINES ==="
+          tail -50 build/build.log || true
 
       - name: Fail if build failed
         if: steps.build_step.outcome == 'failure'
