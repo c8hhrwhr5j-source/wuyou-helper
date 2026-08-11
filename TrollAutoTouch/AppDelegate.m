@@ -10,8 +10,6 @@
 #import "ViewController.h"
 #import "HUD/TSHUDWindow.h"
 #import "Core/TSDaemonManager.h"
-#import "Core/TSKeyboardInjector.h"
-#import "Core/TSToolExecutor.h"
 
 @interface AppDelegate ()
 @end
@@ -26,33 +24,30 @@
     [self.window makeKeyAndVisible];
 
     // ── 启动核心服务 ──
-    [[TSDaemonManager shared] startKeepAlive];
-    [[TSKeyboardInjector shared] start];
+    [[TSDaemonManager shared] startAll];
 
     // ── 创建 HUD 悬浮窗（延迟到主循环下一帧，确保窗口层级正确）──
     dispatch_async(dispatch_get_main_queue(), ^{
         [[TSHUDWindow shared] show];
     });
 
-    appLog(@"App 启动完成 ✓");
+    NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
-    // 保持后台活
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
-    [[TSDaemonManager shared] enterBackground];
+    [[TSDaemonManager shared] beginBackgroundTask];
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
-    [[TSDaemonManager shared] enterForeground];
+    [[TSDaemonManager shared] endBackgroundTask];
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
-    // HUD 恢复显示
-    if (![TSHUDWindow shared].hidden) {
+    if ([[TSHUDWindow shared] isHidden]) {
         [[TSHUDWindow shared] show];
     }
 }
