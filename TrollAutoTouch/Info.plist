@@ -37,23 +37,6 @@
     <!-- 本地通知权限声明 -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>TrollAutoTouch 使用本地网络进行远程控制</string>
-    <key>UIApplicationSceneManifest</key>
-    <dict>
-        <key>UIApplicationSupportsMultipleScenes</key>
-        <false/>
-        <key>UISceneConfigurations</key>
-        <dict>
-            <key>UIWindowSceneSessionRoleApplication</key>
-            <array>
-                <dict>
-                    <key>UISceneConfigurationName</key>
-                    <string>Default</string>
-                    <key>UISceneDelegateClassName</key>
-                    <string>SceneDelegate</string>
-                </dict>
-            </array>
-        </dict>
-    </dict>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIRequiredDeviceCapabilities</key>

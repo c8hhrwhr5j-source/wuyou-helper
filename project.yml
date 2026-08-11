@@ -28,6 +28,7 @@ targets:
     sources:
       - path: TrollAutoTouch
         excludes:
+          - "SceneDelegate.*"
           - "Resources/demo.script"
           - "Resources/lua/**"
     resources:

@@ -23,6 +23,15 @@
 #import <fcntl.h>
 #import <sys/time.h>
 
+// ── posix_spawn 的私有 persona API ──
+// 来源: TrollServer / TrollStore，允许以 root 身份 spawn 子进程
+extern int posix_spawnattr_set_persona_np(posix_spawnattr_t * __restrict, uid_t, uint32_t);
+extern int posix_spawnattr_set_persona_uid_np(posix_spawnattr_t * __restrict, uid_t);
+extern int posix_spawnattr_set_persona_gid_np(posix_spawnattr_t * __restrict, gid_t);
+
+static const uint32_t POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE = 1;
+static const uid_t    POSIX_SPAWN_PERSONA_ID_ROOT       = 99;
+
 // libproc / proc_info 声明(macOS 专用头文件，iOS SDK 中不存在)
 // 这些函数在 iOS 运行时存在但头文件中未公开
 #ifndef PROC_PIDPATHINFO_MAXSIZE
@@ -130,6 +139,15 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 
     pid_t pid;
     char *argv[] = {"/bin/sh", "-c", (char *)[command UTF8String], NULL};
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+
+    // ── 以 root 身份 spawn（需要 platform-application + persona-mgmt 权限）──
+    posix_spawnattr_set_persona_np(&attr, POSIX_SPAWN_PERSONA_ID_ROOT, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+    posix_spawnattr_set_persona_uid_np(&attr, 0);
+    posix_spawnattr_set_persona_gid_np(&attr, 0);
+
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
@@ -137,7 +155,8 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     posix_spawn_file_actions_addclose(&actions, outPipe[0]);
     posix_spawn_file_actions_addclose(&actions, errPipe[0]);
 
-    int spawnErr = posix_spawn(&pid, "/bin/sh", &actions, NULL, argv, NULL);
+    int spawnErr = posix_spawn(&pid, "/bin/sh", &actions, &attr, argv, NULL);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
 
     // 关闭写端

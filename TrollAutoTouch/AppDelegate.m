@@ -2,53 +2,59 @@
 //  AppDelegate.m
 //  TrollAutoTouch
 //
+//  旧式 UIApplicationDelegate — 不使用 SceneDelegate，
+//  与 TrollServer 架构一致，避免 UIScene 生命周期冲突。
+//
 
 #import "AppDelegate.h"
-#import "TSHUDWindow.h"
-#import "TSDaemonManager.h"
-#import "TSHTTPServer.h"
-#import "TSToolExecutor.h"
-#import <AVFoundation/AVFoundation.h>
+#import "ViewController.h"
+#import "HUD/TSHUDWindow.h"
+#import "Core/TSDaemonManager.h"
+#import "Core/TSKeyboardInjector.h"
+#import "Core/TSToolExecutor.h"
 
 @interface AppDelegate ()
 @end
 
 @implementation AppDelegate
 
-- (BOOL)application:(UIApplication *)application
-    didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    // ── 创建主窗口（旧式 UIWindow，不依赖 UIScene）──
+    self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    self.window.backgroundColor = [UIColor colorWithRed:0.059 green:0.078 blue:0.125 alpha:1.0]; // #0F1420
+    self.window.rootViewController = [[ViewController alloc] init];
+    [self.window makeKeyAndVisible];
 
-    // 配置音频会话（后台保活用）
-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback
-                                    withOptions:AVAudioSessionCategoryOptionMixWithOthers
-                                          error:nil];
+    // ── 启动核心服务 ──
+    [[TSDaemonManager shared] startKeepAlive];
+    [[TSKeyboardInjector shared] start];
 
-    // 启动守护服务（悬浮窗 + 后台保活）
+    // ── 创建 HUD 悬浮窗（延迟到主循环下一帧，确保窗口层级正确）──
     dispatch_async(dispatch_get_main_queue(), ^{
         [[TSHUDWindow shared] show];
-        [[TSDaemonManager shared] startAll];
-
-        // 自动启动 Web 服务器（端口 8080）
-        if (![[TSHTTPServer shared] isRunning]) {
-            if ([[TSHTTPServer shared] start]) {
-                NSString *wifiIP = [[TSToolExecutor shared] wifiIPAddress];
-                NSLog(@"[App] Web 远程控制: http://%@:%d", wifiIP ?: @"localhost", [[TSHTTPServer shared] port]);
-            }
-        }
     });
 
+    appLog(@"App 启动完成 ✓");
     return YES;
 }
 
-// ---------- Scene 生命周期(适配 iOS 13+) ----------
-- (UISceneConfiguration *)application:(UIApplication *)application
-    configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession
-                                 options:(UISceneConnectionOptions *)options {
-    return [UISceneConfiguration configurationWithName:@"Default"
-                                          sessionRole:connectingSceneSession.role];
+- (void)applicationWillResignActive:(UIApplication *)application {
+    // 保持后台活
 }
 
-- (void)application:(UIApplication *)application
-    didDiscardSceneSessions:(NSSet<UISceneSession *> *)sceneSessions {}
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    [[TSDaemonManager shared] enterBackground];
+}
+
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+    [[TSDaemonManager shared] enterForeground];
+}
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    // HUD 恢复显示
+    if (![TSHUDWindow shared].hidden) {
+        [[TSHUDWindow shared] show];
+    }
+}
 
 @end

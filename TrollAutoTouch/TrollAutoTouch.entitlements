@@ -6,6 +6,18 @@
          这些权限只能通过 TrollStore (或开发者证书) 签名后生效，
          普通 App Store 签名无法使用。对应原版 TrollAutoScript 的能力。 -->
 
+    <!-- ═══ Root 权限突破（沙盒/功能/容器/隐私）═══ -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
+    <key>com.apple.private.skip-library-validation</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
+    <true/>
+
     <!-- 跨进程：获取任务端口 / 进程信息 (用于前台 App 检测等) -->
     <key>get-task-allow</key>
     <true/>
