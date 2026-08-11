@@ -2,12 +2,13 @@
 //  TSPerformanceMonitorView.m
 //  TrollAutoTouch
 //
-//  性能监控面板：CPU/MEM/网络 + sparkline
-//  对应 TAS 设置页底部 性能 section
+//  性能监控面板：CPU/MEM/网络 使用率 + sparkline 实时刷新
+//  浅色主题
 //
 
 #import "TSPerformanceMonitorView.h"
 #import "../Core/TSToolExecutor.h"
+#import "../Common/TSPaths.h"
 #import <sys/sysctl.h>
 #import <mach/mach.h>
 #import <ifaddrs.h>
@@ -93,43 +94,59 @@ static NSString *fmtBytes(uint64_t b) {
 }
 
 - (void)_build {
-    CGFloat w = self.bounds.size.width ?: 320;
-    CGFloat rowH = 36;
-    CGFloat leftW = 42, sparkW = 80, numW = 64, gap = 8;
-    CGFloat sparkX = leftW + gap;
+    CGFloat w = self.bounds.size.width ?: 300;
+    CGFloat leftPad = 12, rightPad = 12;
+    CGFloat titleH = 26;
+    CGFloat rowH = 38;
+    CGFloat leftW = 78, sparkW = 110, numW = 72, gap = 6;
+    CGFloat sparkX = leftPad + leftW + gap;
     CGFloat numX = sparkX + sparkW + gap;
-    CGFloat labelWidth = w - 2 * 12;
-    UIFont *f = [UIFont systemFontOfSize:13];
+    UIFont *f = [UIFont systemFontOfSize:12];
 
     // ── 标题 ──
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, w - 24, 26)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(leftPad, 6, w - leftPad - rightPad, titleH)];
     title.text = @"性能";
-    title.textColor = [UIColor colorWithWhite:0.65 alpha:1];
-    title.font = [UIFont boldSystemFontOfSize:14];
+    title.textColor = [TSColors secondaryLabel];
+    title.font = [UIFont boldSystemFontOfSize:13];
     [self addSubview:title];
 
     // ── CPU ──
-    CGFloat y = 28;
-    [self _label:@"CPU 使用率" rect:CGRectMake(12, y, leftW, rowH) font:f color:nil];
-    _cpuSpark = [self _spark:CGRectMake(sparkX, y + 8, sparkW, rowH - 16) stroke:[UIColor colorWithRed:0.3 green:0.85 blue:0.4 alpha:1] fill:[UIColor colorWithRed:0.3 green:0.85 blue:0.4 alpha:0.15]];
-    _cpuPercentLabel = [self _label:@"0.00%" rect:CGRectMake(numX, y, numW, rowH) font:f color:[UIColor colorWithRed:0.3 green:0.85 blue:0.4 alpha:1]];
+    CGFloat y = titleH + 6;
+    [self _label:@"CPU 使用率" rect:CGRectMake(leftPad, y, leftW, rowH) font:f color:nil];
+    _cpuSpark = [self _spark:CGRectMake(sparkX, y + 10, sparkW, rowH - 18)
+                       stroke:[TSColors success]
+                         fill:[TSColors success colorWithAlphaComponent:0.12]];
+    _cpuPercentLabel = [self _label:@"0.00%" rect:CGRectMake(numX, y, numW, rowH)
+                                  font:[UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium]
+                                 color:[TSColors success]];
 
     // ── MEM ──
     y += rowH;
-    [self _label:@"MEM 使用率" rect:CGRectMake(12, y, leftW, rowH) font:f color:nil];
-    _memSpark = [self _spark:CGRectMake(sparkX, y + 8, sparkW, rowH - 16) stroke:[UIColor colorWithRed:1.0 green:0.7 blue:0.1 alpha:1] fill:[UIColor colorWithRed:1.0 green:0.7 blue:0.1 alpha:0.15]];
-    _memSpark.barMode = YES; // 柱状
-    _memPercentLabel = [self _label:@"0.00%" rect:CGRectMake(numX, y, numW, rowH) font:f color:[UIColor colorWithRed:1.0 green:0.7 blue:0.1 alpha:1]];
+    [self _label:@"MEM 使用率" rect:CGRectMake(leftPad, y, leftW, rowH) font:f color:nil];
+    _memSpark = [self _spark:CGRectMake(sparkX, y + 10, sparkW, rowH - 18)
+                       stroke:[TSColors warning]
+                         fill:[TSColors warning colorWithAlphaComponent:0.12]];
+    _memSpark.barMode = YES;
+    _memPercentLabel = [self _label:@"0.00%" rect:CGRectMake(numX, y, numW, rowH)
+                                  font:[UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium]
+                                 color:[TSColors warning]];
 
     // ── 网络 ──
     y += rowH;
-    [self _label:@"网络使用率" rect:CGRectMake(12, y, leftW, rowH) font:f color:nil];
-
-    _netUpSpark = [self _spark:CGRectMake(sparkX, y + 6, sparkW, (rowH - 14) / 2) stroke:[UIColor colorWithRed:0.3 green:0.6 blue:1.0 alpha:1] fill:[UIColor colorWithRed:0.3 green:0.6 blue:1.0 alpha:0.1]];
-    _netDownSpark = [self _spark:CGRectMake(sparkX, y + rowH / 2 + 2, sparkW, (rowH - 14) / 2) stroke:[UIColor colorWithRed:1.0 green:0.4 blue:0.4 alpha:1] fill:[UIColor colorWithRed:1.0 green:0.4 blue:0.4 alpha:0.1]];
-
-    _netUpLabel   = [self _label:@"↑0B" rect:CGRectMake(numX, y + 2, numW, rowH / 2) font:[UIFont systemFontOfSize:11] color:[UIColor colorWithRed:0.3 green:0.6 blue:1.0 alpha:1]];
-    _netDownLabel = [self _label:@"↓0B" rect:CGRectMake(numX, y + rowH / 2 + 2, numW, rowH / 2) font:[UIFont systemFontOfSize:11] color:[UIColor colorWithRed:1.0 green:0.4 blue:0.4 alpha:1]];
+    [self _label:@"网络使用率" rect:CGRectMake(leftPad, y, leftW, rowH) font:f color:nil];
+    CGFloat hH = (rowH - 14) / 2;
+    _netUpSpark = [self _spark:CGRectMake(sparkX, y + 6, sparkW, hH)
+                       stroke:[TSColors tint]
+                         fill:[TSColors tint colorWithAlphaComponent:0.10]];
+    _netDownSpark = [self _spark:CGRectMake(sparkX, y + rowH / 2 + 2, sparkW, hH)
+                         stroke:[TSColors danger]
+                           fill:[TSColors danger colorWithAlphaComponent:0.10]];
+    _netUpLabel   = [self _label:@"↑0B" rect:CGRectMake(numX, y + 4, numW, hH)
+                              font:[UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular]
+                             color:[TSColors tint]];
+    _netDownLabel = [self _label:@"↓0B" rect:CGRectMake(numX, y + rowH / 2 + 2, numW, hH)
+                              font:[UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular]
+                             color:[TSColors danger]];
 }
 
 - (UILabel *)_label:(NSString *)txt rect:(CGRect)r font:(UIFont *)f color:(UIColor *)c {
@@ -137,7 +154,7 @@ static NSString *fmtBytes(uint64_t b) {
     l.text = txt;
     l.font = f;
     l.textAlignment = NSTextAlignmentLeft;
-    l.textColor = c ?: [UIColor colorWithWhite:0.85 alpha:1];
+    l.textColor = c ?: [TSColors secondaryLabel];
     l.backgroundColor = [UIColor clearColor];
     [self addSubview:l];
     return l;
@@ -180,8 +197,6 @@ static NSString *fmtBytes(uint64_t b) {
 
             self.netUpLabel.text   = [@"↑" stringByAppendingString:fmtBytes(up)];
             self.netDownLabel.text = [@"↓" stringByAppendingString:fmtBytes(down)];
-            // network sparkline uses dummy values for visual effect since absolute bytes
-            // don't normalize well; just show a mild pulse
             CGFloat pulseUp   = (sin(CACurrentMediaTime() * 0.7) + 1) / 2 * 0.2 + 0.05;
             CGFloat pulseDown = (sin(CACurrentMediaTime() * 0.7 + 1.5) + 1) / 2 * 0.25 + 0.05;
             [self.netUpSpark appendValue:pulseUp];

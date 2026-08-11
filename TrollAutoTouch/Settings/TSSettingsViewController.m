@@ -3,7 +3,7 @@
 //  TrollAutoTouch
 //
 //  设置页：服务开关 (TAS/远程访问/触摸显示/悬浮窗) + 服务地址 + 性能面板
-//  对齐 TAS 原版设置页布局
+//  对齐 TAS 原版设置页布局；浅色主题
 //
 
 #import "TSSettingsViewController.h"
@@ -11,6 +11,7 @@
 #import "../Core/TSToolExecutor.h"
 #import "../Script/TSHTTPServer.h"
 #import "../HUD/TSHUDWindow.h"
+#import "../Common/TSPaths.h"
 
 #pragma mark - Switch Cell
 
@@ -26,21 +27,21 @@
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseId {
     self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseId];
     if (self) {
-        self.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
+        self.backgroundColor = [TSColors card];
         self.selectionStyle  = UITableViewCellSelectionStyleNone;
 
         _iconView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 11, 22, 22)];
         _iconView.contentMode = UIViewContentModeScaleAspectFit;
-        _iconView.tintColor = [UIColor whiteColor];
+        _iconView.tintColor = [TSColors tint];
         [self.contentView addSubview:_iconView];
 
         _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(46, 12, 200, 20)];
         _titleLabel.font = [UIFont systemFontOfSize:15];
-        _titleLabel.textColor = [UIColor whiteColor];
+        _titleLabel.textColor = [TSColors label];
         [self.contentView addSubview:_titleLabel];
 
         _sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-        _sw.onTintColor = [UIColor colorWithRed:0.25 green:0.78 blue:0.35 alpha:1];
+        _sw.onTintColor = [TSColors switchOn];
         [self.contentView addSubview:_sw];
 
         [_sw addTarget:self action:@selector(_toggled:) forControlEvents:UIControlEventValueChanged];
@@ -71,12 +72,12 @@
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseId {
     self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseId];
     if (self) {
-        self.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
+        self.backgroundColor = [TSColors card];
         self.selectionStyle  = UITableViewCellSelectionStyleNone;
 
         _urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, 300, 44)];
         _urlLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-        _urlLabel.textColor = [UIColor colorWithRed:0.4 green:0.6 blue:1.0 alpha:1];
+        _urlLabel.textColor = [TSColors tint];
         _urlLabel.textAlignment = NSTextAlignmentLeft;
         _urlLabel.numberOfLines = 0;
         [self.contentView addSubview:_urlLabel];
@@ -115,15 +116,22 @@
 
 - (void)loadView {
     [super loadView];
-    self.view.backgroundColor = [UIColor colorWithWhite:0.04 alpha:1];
+    self.view.backgroundColor = [TSColors bg];
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    UILabel *title = [[UILabel alloc] init];
+    title.text = @"设置";
+    title.font = [UIFont boldSystemFontOfSize:17];
+    title.textColor = [TSColors label];
+    [title sizeToFit];
+    self.navigationItem.titleView = title;
+
     _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
     _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tableView.backgroundColor  = [UIColor colorWithWhite:0.04 alpha:1];
+    _tableView.backgroundColor  = [TSColors bg];
     _tableView.delegate   = self;
     _tableView.dataSource = self;
     _tableView.rowHeight  = 44;
@@ -131,14 +139,20 @@
     [_tableView registerClass:[TSURLInfoCell class] forCellReuseIdentifier:@"url"];
     [self.view addSubview:_tableView];
 
-    // 性能面板
+    // 性能面板 (浅色背景)
     CGFloat perfH = 160;
-    _perfView = [[TSPerformanceMonitorView alloc] initWithFrame:
-                 CGRectMake(0, self.view.bounds.size.height - perfH - 48 - 34, self.view.bounds.size.width, perfH)];
-    _perfView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
-    [self.view addSubview:_perfView];
+    UIView *perfContainer = [[UIView alloc] initWithFrame:
+        CGRectMake(8, self.view.bounds.size.height - perfH - 48 - 34, self.view.bounds.size.width - 16, perfH)];
+    perfContainer.backgroundColor = [TSColors card];
+    perfContainer.layer.cornerRadius = 12;
+    perfContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    [self.view addSubview:perfContainer];
 
-    _tableView.contentInset = UIEdgeInsetsMake(0, 0, perfH + 8, 0);
+    _perfView = [[TSPerformanceMonitorView alloc] initWithFrame:CGRectMake(0, 0, perfContainer.bounds.size.width, perfContainer.bounds.size.height)];
+    _perfView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [perfContainer addSubview:_perfView];
+
+    _tableView.contentInset = UIEdgeInsetsMake(0, 0, perfH + 24, 0);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -176,7 +190,6 @@
 
 - (void)_toggleTouch:(BOOL)on {
     _touchDisplayOn = on;
-    // TODO: toggle touch indicator overlay
 }
 
 - (void)_toggleFloat:(BOOL)on {
@@ -205,7 +218,7 @@
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.row == 0) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
-        c.iconView.image = [self _icon:@"bolt.fill" size:16];
+        c.iconView.image = [self _icon:@"bolt.fill"];
         c.titleLabel.text = @"TAS 服务";
         [c.sw setOn:_tasServiceOn animated:NO];
         __weak typeof(self) ws = self;
@@ -213,7 +226,7 @@
         return c;
     } else if (ip.row == 1) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
-        c.iconView.image = [self _icon:@"globe" size:16];
+        c.iconView.image = [self _icon:@"globe"];
         c.titleLabel.text = @"远程访问";
         [c.sw setOn:_remoteAccessOn animated:NO];
         __weak typeof(self) ws = self;
@@ -221,7 +234,7 @@
         return c;
     } else if (ip.row == 2) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
-        c.iconView.image = [self _icon:@"hand.point.up.fill" size:16];
+        c.iconView.image = [self _icon:@"hand.point.up.fill"];
         c.titleLabel.text = @"触摸显示";
         [c.sw setOn:_touchDisplayOn animated:NO];
         __weak typeof(self) ws = self;
@@ -229,7 +242,7 @@
         return c;
     } else if (ip.row == 3) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
-        c.iconView.image = [self _icon:@"rectangle.on.rectangle" size:16];
+        c.iconView.image = [self _icon:@"rectangle.on.rectangle"];
         c.titleLabel.text = @"悬浮窗口";
         [c.sw setOn:_floatWindowOn animated:NO];
         __weak typeof(self) ws = self;
@@ -256,9 +269,9 @@
     }
 }
 
-- (UIImage *)_icon:(NSString *)name size:(CGFloat)s {
+- (UIImage *)_icon:(NSString *)name {
     if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:s
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:16
                                                                                          weight:UIImageSymbolWeightMedium];
         return [[UIImage systemImageNamed:name] imageByApplyingSymbolConfiguration:cfg];
     }

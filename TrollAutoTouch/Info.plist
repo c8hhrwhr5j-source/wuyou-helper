@@ -39,6 +39,8 @@
     <string>TrollAutoTouch 使用本地网络进行远程控制</string>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>UIUserInterfaceStyle</key>
+    <string>Light</string>
     <key>UIRequiredDeviceCapabilities</key>
     <array>
         <string>arm64</string>
