@@ -2,161 +2,65 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>application-identifier</key>
-	<string>T3DY639H6W.com.apple.application</string>
-	<key>aps-environment</key>
-	<string>production</string>
 	<key>platform-application</key>
 	<true/>
-	<key>com.apple.QuartzCore.global-capture</key>
-	<true/>
-	<key>com.apple.backboard.client</key>
-	<true/>
-	<key>com.apple.backboardd.launchapplications</key>
-	<true/>
-	<key>com.apple.coreaudio.allow-peertalk-loopback</key>
-	<true/>
-	<key>com.apple.frontboard.debugapps</key>
-	<true/>
-	<key>com.apple.frontboard.launchapplications</key>
-	<true/>
-	<key>com.apple.frontboard.unrestricted-launch</key>
-	<true/>
-	<key>com.apple.private.MobileContainerManager.otherIdContainers</key>
-	<array>
-		<string>systemgroup.com.apple.homesharing</string>
-	</array>
-	<key>com.apple.private.allow-screen-lock</key>
-	<true/>
-	<key>com.apple.private.allow-splash-screen</key>
-	<true/>
-	<key>com.apple.private.assets.bypass-asset-types-check</key>
-	<true/>
-	<key>com.apple.private.coreservices.canmaplsdatabase</key>
-	<true/>
-	<key>com.apple.private.tcc.allow</key>
-	<array>
-		<string>kTCCServiceAll</string>
-		<string>kTCCServiceAccessibility</string>
-		<string>kTCCServiceAddressBook</string>
-		<string>kTCCServiceBluetoothAlways</string>
-		<string>kTCCServiceBluetoothPeripheral</string>
-		<string>kTCCServiceCalendar</string>
-		<string>kTCCServiceCalls</string>
-		<string>kTCCServiceCamera</string>
-		<string>kTCCServiceFacebook</string>
-		<string>kTCCServiceKeyboardNetwork</string>
-		<string>kTCCServiceLiverpool</string>
-		<string>kTCCServiceLocation</string>
-		<string>kTCCServiceMediaLibrary</string>
-		<string>kTCCServiceMicrophone</string>
-		<string>kTCCServiceMotion</string>
-		<string>kTCCServiceMSO</string>
-		<string>kTCCServicePhotos</string>
-		<string>kTCCServiceReminders</string>
-		<string>kTCCServiceShareKit</string>
-		<string>kTCCServiceSinaWeibo</string>
-		<string>kTCCServiceSiri</string>
-		<string>kTCCServiceSpeechRecognition</string>
-		<string>kTCCServiceTencentWeibo</string>
-		<string>kTCCServiceTwitter</string>
-		<string>kTCCServiceUbiquity</string>
-		<string>kTCCServiceWillow</string>
-	</array>
-	<key>com.apple.private.tcc.manager</key>
-	<true/>
-	<key>com.apple.private.memorystatus</key>
-	<true/>
-	<key>com.apple.private.nsurlsessiond-allow-eviction</key>
-	<true/>
-	<key>com.apple.private.persona-mgmt</key>
-	<true/>
-	<key>com.apple.private.screen-capture</key>
-	<true/>
-	<!-- 可访问的容器: 无限制 -->
-	<key>com.apple.private.security.container-required</key>
-	<string>application</string>
-	<key>com.apple.private.security.no-container</key>
-	<false/>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
-	<key>com.apple.private.security.storage.AppBundles</key>
+	<key>com.apple.security.exception.skip-library-validation</key>
 	<true/>
-	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<key>dynamic-codesigning</key>
 	<true/>
-	<key>com.apple.private.security.storage.MobileDocuments</key>
+	<key>get-task-allow</key>
 	<true/>
-	<key>com.apple.private.security.storage-exempt.heritable</key>
+	<key>task_for_pid-allow</key>
 	<true/>
-	<!-- 沙盒: 非沙盒 + 可访问大部分文件系统 -->
-	<key>com.apple.security.exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/</string>
-	</array>
-	<key>com.apple.private.thread-get-state</key>
+	<key>run-unsigned-code</key>
 	<true/>
-	<key>com.apple.private.thread-set-state</key>
+	<key>proc_info-allow</key>
 	<true/>
 	<key>com.apple.system-task-ports</key>
 	<true/>
 	<key>com.apple.system-task-ports.control</key>
 	<true/>
-	<key>com.apple.springboard.activate</key>
+	<key>com.apple.private.thread-get-state</key>
 	<true/>
-	<key>com.apple.springboard.appbackgroundstyle</key>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
+	<key>com.apple.private.memorystatus</key>
+	<true/>
+	<key>com.apple.private.screen-capture</key>
+	<true/>
+	<key>com.apple.frontboard.launchapplications</key>
+	<true/>
+	<key>com.apple.frontboard.debugapps</key>
+	<true/>
+	<key>com.apple.frontboard.unrestricted-launch</key>
+	<true/>
+	<key>com.apple.backboardd.launchapplications</key>
 	<true/>
 	<key>com.apple.springboard.debugapplications</key>
 	<true/>
-	<key>com.apple.springboard.frontmostApplication.bundleID</key>
+	<key>com.apple.springboard.appbackgroundstyle</key>
+	<true/>
+	<key>com.apple.springboard.activate</key>
 	<true/>
 	<key>com.apple.springboard.setbadgestring</key>
 	<true/>
-	<key>com.apple.springboard.wipedevice</key>
-	<true/>
-	<key>com.apple.springboard.accessibility-window-hosting</key>
-	<true/>
 	<key>com.apple.springboard.CFUserNotification</key>
 	<true/>
-	<key>get-task-allow</key>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
-	<key>proc_info-allow</key>
+	<key>com.apple.private.security.storage.AppBundles</key>
 	<true/>
-	<key>run-unsigned-code</key>
+	<key>com.apple.private.security.storage.MobileDocuments</key>
 	<true/>
-	<key>task_for_pid-allow</key>
+	<key>com.apple.private.security.storage-exempt.heritable</key>
 	<true/>
-	<key>fairplay-client</key>
-	<string>505792035</string>
-	<key>vm-pressure-level</key>
-	<true/>
-	<!-- 可访问的钥匙串组 -->
+	<key>com.apple.private.security.container-required</key>
+	<string>application</string>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>T3DY639H6W.*</string>
-		<string>apple</string>
-		<string>apple.identities</string>
-		<string>T3DY639H6W.*</string>
-		<string>apple</string>
-		<string>com.apple.identities</string>
-		<string>com.apple.mobilemail.smime</string>
-		<string>com.apple.hap.pairing</string>
-		<string>com.apple.PassbookUIService</string>
-		<string>com.apple.ProtectedCloudStorage</string>
-		<string>com.apple.ProtectedCloudStorage.com.apple.ProtectedCloudStorage</string>
-		<string>com.apple.assistantd</string>
-		<string>com.apple.assistantd.cloud</string>
-		<string>com.apple.assistantd.sync</string>
-		<string>com.apple.assistantd.sync.nano</string>
-		<string>com.apple.assistantd.sync.nano2</string>
-		<string>com.apple.assistantd.sync2</string>
-		<string>com.apple.assistantd.sync3</string>
-		<string>com.apple.assistantd.sync4</string>
-		<string>com.apple.assistantd.sync5</string>
-		<string>com.apple.assistantd.sync6</string>
-		<string>com.apple.assistantd.sync7</string>
-		<string>com.apple.assistantd.sync8</string>
-		<string>com.apple.assistantd.sync9</string>
-		<string>com.apple.assistantd.sync10</string>
 	</array>
 </dict>
 </plist>
