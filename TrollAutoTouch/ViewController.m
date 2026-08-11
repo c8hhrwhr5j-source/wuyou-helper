@@ -18,6 +18,7 @@
 #import "TSHTTPServer.h"
 #import "TSOCREngine.h"
 #import "TSDaemonManager.h"
+#import "TSColorFinder.h"
 #import "TSToolExecutor.h"
 
 @interface ViewController () <TSLogDelegate, TSWebControlDelegate>
