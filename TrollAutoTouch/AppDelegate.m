@@ -7,7 +7,7 @@
 //
 
 #import "AppDelegate.h"
-#import "ViewController.h"
+#import "MainTabBarController.h"
 #import "HUD/TSHUDWindow.h"
 #import "Core/TSDaemonManager.h"
 
@@ -20,7 +20,7 @@
     // ── 创建主窗口（旧式 UIWindow，不依赖 UIScene）──
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [UIColor colorWithRed:0.059 green:0.078 blue:0.125 alpha:1.0]; // #0F1420
-    self.window.rootViewController = [[ViewController alloc] init];
+    self.window.rootViewController = [[MainTabBarController alloc] init];
     [self.window makeKeyAndVisible];
 
     // ── 启动核心服务 ──
