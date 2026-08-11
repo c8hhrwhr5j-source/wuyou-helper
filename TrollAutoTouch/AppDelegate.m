@@ -11,6 +11,7 @@
 #import "HUD/TSHUDWindow.h"
 #import "Core/TSDaemonManager.h"
 #import "Common/TSPaths.h"
+#import "Common/TSTCCRequestor.h"
 
 @interface AppDelegate ()
 @end
@@ -34,6 +35,9 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         [[TSHUDWindow shared] show];
     });
+
+    // ── 首次启动时批量触发隐私权限请求，填充 iOS Settings 隐私列表 ──
+    [TSTCCRequestor requestAllPermissionsIfNeeded];
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;

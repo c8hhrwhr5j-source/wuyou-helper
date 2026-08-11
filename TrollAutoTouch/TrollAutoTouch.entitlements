@@ -2,93 +2,128 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- ===== TrollStore 自动化核心权限 =====
-         这些权限只能通过 TrollStore (或开发者证书) 签名后生效，
-         普通 App Store 签名无法使用。对应原版 TrollAutoScript 的能力。 -->
-
-    <!-- ═══ Root 权限突破（沙盒/功能/容器/隐私）═══ -->
-    <key>com.apple.private.security.no-sandbox</key>
-    <true/>
-    <key>platform-application</key>
-    <true/>
-    <key>com.apple.private.persona-mgmt</key>
-    <true/>
-    <key>com.apple.private.skip-library-validation</key>
-    <true/>
-    <key>com.apple.private.security.storage.AppDataContainers</key>
-    <true/>
-
-    <!-- 跨进程：获取任务端口 / 进程信息 (用于前台 App 检测等) -->
-    <key>get-task-allow</key>
-    <true/>
-    <key>task_for_pid-allow</key>
-    <true/>
-    <key>proc_info-allow</key>
-    <true/>
-    <key>run-unsigned-code</key>
-    <true/>
-
-    <!-- 调试 / 启动任意 App -->
-    <key>com.apple.springboard.debugapplications</key>
-    <true/>
-    <key>com.apple.frontboard.debugapplications</key>
-    <true/>
-    <key>com.apple.frontboard.launchapplications</key>
-    <true/>
-    <key>com.apple.frontboard.systemappservices</key>
-    <true/>
-    <key>com.apple.frontboard.visibility</key>
-    <true/>
-    <key>com.apple.frontboard.workspace-service</key>
-    <true/>
-    <key>com.apple.runningboard.assertions.frontboard</key>
-    <true/>
-
-    <!-- BackBoard 触摸系统 (IOHIDEvent 注入所需) -->
-    <key>com.apple.backboard.client</key>
-    <true/>
-    <key>com.apple.backboardd.launchapplications</key>
-    <true/>
-    <key>com.apple.backboardd.cancelsTouchesInHostedContent</key>
-    <true/>
-    <key>com.apple.backboardd.hostCanRequireTouchesFromHostedContent</key>
-    <true/>
-
-    <!-- IOSurface: 直接读取 GPU 帧缓冲做高速截屏 -->
-    <key>com.apple.QuartzCore.global-capture</key>
-    <true/>
-    <key>com.apple.QuartzCore.secure-capture</key>
-    <true/>
-
-    <!-- 容器管理: 读写自身/其他 App 沙盒 (脚本/日志存放) -->
-    <key>com.apple.private.MobileContainerManager.allowed</key>
-    <true/>
-    <key>com.apple.private.MobileInstallationHelperService.allowed</key>
-    <true/>
-
-    <!-- 辅助功能: 系统级悬浮窗 + 触摸补助 -->
-    <key>com.apple.accessibility.Accessibility</key>
-    <true/>
-
-    <!-- SpringBoard 系统级悬浮窗 (需要在所有 App 之上显示 HUD) -->
-    <key>com.apple.springboard.activate</key>
-    <true/>
-    <key>com.apple.springboard.apps-on-dock</key>
-    <true/>
-    <key>com.apple.springboard.hardware-button-service</key>
-    <true/>
-
-    <!-- 后台服务域：支持注册系统级后台服务 -->
-    <key>com.apple.BSServiceDomain.SystemService</key>
-    <dict>
-        <key>com.apple.systemservice.keep-alive</key>
-        <true/>
-    </dict>
-
-    <!-- 网络扩展：WebSocket 服务器端口绑定 -->
-    <key>com.apple.security.network.server</key>
-    <true/>
-    <key>com.apple.security.network.client</key>
-    <true/>
+	<key>application-identifier</key>
+	<string>T3DY639H6W.com.apple.application</string>
+	<key>aps-environment</key>
+	<string>production</string>
+	<key>com.apple.QuartzCore.global-capture</key>
+	<true/>
+	<key>com.apple.backboard.client</key>
+	<true/>
+	<key>com.apple.backboardd.launchapplications</key>
+	<true/>
+	<key>com.apple.coreaudio.allow-peertalk-loopback</key>
+	<true/>
+	<key>com.apple.frontboard.debugapps</key>
+	<true/>
+	<key>com.apple.frontboard.launchapplications</key>
+	<true/>
+	<key>com.apple.frontboard.unrestricted-launch</key>
+	<true/>
+	<key>com.apple.private.MobileContainerManager.otherIdContainers</key>
+	<array>
+		<string>systemgroup.com.apple.homesharing</string>
+	</array>
+	<key>com.apple.private.allow-screen-lock</key>
+	<true/>
+	<key>com.apple.private.allow-splash-screen</key>
+	<true/>
+	<key>com.apple.private.assets.bypass-asset-types-check</key>
+	<true/>
+	<key>com.apple.private.coreservices.canmaplsdatabase</key>
+	<true/>
+	<key>com.apple.private.memorystatus</key>
+	<true/>
+	<key>com.apple.private.nsurlsessiond-allow-eviction</key>
+	<true/>
+	<key>com.apple.private.persona-mgmt</key>
+	<true/>
+	<key>com.apple.private.screen-capture</key>
+	<true/>
+	<!-- 可访问的容器: 无限制 -->
+	<key>com.apple.private.security.container-required</key>
+	<string>application</string>
+	<key>com.apple.private.security.no-container</key>
+	<false/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppBundles</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
+	<key>com.apple.private.security.storage.MobileDocuments</key>
+	<true/>
+	<key>com.apple.private.security.storage-exempt.heritable</key>
+	<true/>
+	<!-- 沙盒: 非沙盒 + 可访问大部分文件系统 -->
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.private.thread-get-state</key>
+	<true/>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>com.apple.system-task-ports.control</key>
+	<true/>
+	<key>com.apple.springboard.activate</key>
+	<true/>
+	<key>com.apple.springboard.appbackgroundstyle</key>
+	<true/>
+	<key>com.apple.springboard.debugapplications</key>
+	<true/>
+	<key>com.apple.springboard.frontmostApplication.bundleID</key>
+	<true/>
+	<key>com.apple.springboard.setbadgestring</key>
+	<true/>
+	<key>com.apple.springboard.wipedevice</key>
+	<true/>
+	<key>com.apple.springboard.accessibility-window-hosting</key>
+	<true/>
+	<key>com.apple.springboard.CFUserNotification</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+	<key>proc_info-allow</key>
+	<true/>
+	<key>run-unsigned-code</key>
+	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
+	<key>fairplay-client</key>
+	<string>505792035</string>
+	<key>vm-pressure-level</key>
+	<true/>
+	<!-- 可访问的钥匙串组 -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>T3DY639H6W.*</string>
+		<string>apple</string>
+		<string>apple.identities</string>
+		<string>T3DY639H6W.*</string>
+		<string>apple</string>
+		<string>com.apple.identities</string>
+		<string>com.apple.mobilemail.smime</string>
+		<string>com.apple.hap.pairing</string>
+		<string>com.apple.PassbookUIService</string>
+		<string>com.apple.ProtectedCloudStorage</string>
+		<string>com.apple.ProtectedCloudStorage.com.apple.ProtectedCloudStorage</string>
+		<string>com.apple.assistantd</string>
+		<string>com.apple.assistantd.cloud</string>
+		<string>com.apple.assistantd.sync</string>
+		<string>com.apple.assistantd.sync.nano</string>
+		<string>com.apple.assistantd.sync.nano2</string>
+		<string>com.apple.assistantd.sync2</string>
+		<string>com.apple.assistantd.sync3</string>
+		<string>com.apple.assistantd.sync4</string>
+		<string>com.apple.assistantd.sync5</string>
+		<string>com.apple.assistantd.sync6</string>
+		<string>com.apple.assistantd.sync7</string>
+		<string>com.apple.assistantd.sync8</string>
+		<string>com.apple.assistantd.sync9</string>
+		<string>com.apple.assistantd.sync10</string>
+	</array>
 </dict>
 </plist>

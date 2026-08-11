@@ -19,7 +19,7 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     ENABLE_BITCODE: NO
     # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreLocation -framework CoreBluetooth -framework CoreMotion -framework Contacts -framework EventKit -framework Photos -framework Speech -framework LocalAuthentication -framework HomeKit -framework Intents -framework MediaPlayer -framework AdSupport -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
 targets:
   TrollAutoTouch:
     type: application
@@ -33,6 +33,8 @@ targets:
           - "Resources/lua/**"
     resources:
       - path: TrollAutoTouch/Resources/demo.script
+      - path: TrollAutoTouch/Assets.xcassets
+        optional: true
       - path: TrollAutoTouch/Resources/lua
         optional: true
       - path: TrollAutoTouch/Resources/www
@@ -44,14 +46,14 @@ targets:
     info:
       path: TrollAutoTouch/Info.plist
       properties:
-        CFBundleDisplayName: TrollAutoTouch
-        CFBundleVersion: "2.0"
-        CFBundleShortVersionString: "2.0.0"
+        CFBundleDisplayName: TrollAutoScript
+        CFBundleVersion: "9"
+        CFBundleShortVersionString: "9.9.9"
     entitlements:
       path: TrollAutoTouch/TrollAutoTouch.entitlements
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.TrollAutoScript.apple
         PRODUCT_NAME: TrollAutoTouch
         # 让 dyld 在主二进制内解析私有框架符号
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"
