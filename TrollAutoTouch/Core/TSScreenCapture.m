@@ -70,7 +70,7 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     // 从 IOSurface 拷贝像素。这些函数来自 IOSurface.framework。
     size_t (*lock)(IOSurfaceRef, uint32_t, uint32_t *) =
         dlsym(_iosurfaceHandle, "IOSurfaceLock");
-    void (*baseAddr)(IOSurfaceRef) =
+    void *(*baseAddr)(IOSurfaceRef) =
         dlsym(_iosurfaceHandle, "IOSurfaceGetBaseAddress");
     size_t (*widthFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
     size_t (*heightFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
