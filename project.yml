@@ -10,6 +10,8 @@ settings:
   base:
     SWIFT_VERSION: ""
     IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    CLANG_ENABLE_MODULES: NO
+    # 禁用显式模块，避免 iOS SDK 中私有/非模块化头文件导致的编译错误
     TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: ""
