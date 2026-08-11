@@ -1,0 +1,20 @@
+# Xcode / macOS
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+*.ipa
+*.dSYM
+.DS_Store
+
+# 临时逆向产物
+_tmp.zip
+_tmp_extracted/
+
+# 日志与本地脚本
+*.log
+*.local
+
+# 构建目录（build-ipa.sh 输出）
+build/

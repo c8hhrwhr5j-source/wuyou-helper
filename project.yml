@@ -1,0 +1,54 @@
+# XcodeGen 项目定义 —— 生成 TrollAutoTouch.xcodeproj
+# 用法:  安装 xcodegen (brew install xcodegen) 后，在本目录执行 `xcodegen generate`
+name: TrollAutoTouch
+options:
+  bundleIdPrefix: com.trollautotouch
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    ENABLE_BITCODE: NO
+    # 链接私有/公开框架
+    OTHER_LDFLAGS: -weak_framework IOKit -weak_framework BackBoardServices -weak_framework FrontBoard -weak_framework FrontBoardServices -weak_framework XCTest -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -lf2
+targets:
+  TrollAutoTouch:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: TrollAutoTouch
+        excludes:
+          - "Resources/demo.script"
+          - "Resources/lua/**"
+    resources:
+      - path: TrollAutoTouch/Resources/demo.script
+      - path: TrollAutoTouch/Resources/lua
+        optional: true
+      - path: TrollAutoTouch/Resources/www
+        optional: true
+      - path: TrollAutoTouch/Resources/lib
+        optional: true
+      - path: TrollAutoTouch/Resources/res
+        optional: true
+    info:
+      path: TrollAutoTouch/Info.plist
+      properties:
+        CFBundleDisplayName: TrollAutoTouch
+        CFBundleVersion: "2.0"
+        CFBundleShortVersionString: "2.0.0"
+    entitlements:
+      path: TrollAutoTouch/TrollAutoTouch.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.app
+        PRODUCT_NAME: TrollAutoTouch
+        # 让 dyld 在主二进制内解析私有框架符号
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ===== TrollStore 自动化核心权限 =====
+         这些权限只能通过 TrollStore (或开发者证书) 签名后生效，
+         普通 App Store 签名无法使用。对应原版 TrollAutoScript 的能力。 -->
+
+    <!-- 跨进程：获取任务端口 / 进程信息 (用于前台 App 检测等) -->
+    <key>get-task-allow</key>
+    <true/>
+    <key>task_for_pid-allow</key>
+    <true/>
+    <key>proc_info-allow</key>
+    <true/>
+    <key>run-unsigned-code</key>
+    <true/>
+
+    <!-- 调试 / 启动任意 App -->
+    <key>com.apple.springboard.debugapplications</key>
+    <true/>
+    <key>com.apple.frontboard.debugapplications</key>
+    <true/>
+    <key>com.apple.frontboard.launchapplications</key>
+    <true/>
+    <key>com.apple.frontboard.systemappservices</key>
+    <true/>
+    <key>com.apple.frontboard.visibility</key>
+    <true/>
+    <key>com.apple.frontboard.workspace-service</key>
+    <true/>
+    <key>com.apple.runningboard.assertions.frontboard</key>
+    <true/>
+
+    <!-- BackBoard 触摸系统 (IOHIDEvent 注入所需) -->
+    <key>com.apple.backboard.client</key>
+    <true/>
+    <key>com.apple.backboardd.launchapplications</key>
+    <true/>
+    <key>com.apple.backboardd.cancelsTouchesInHostedContent</key>
+    <true/>
+    <key>com.apple.backboardd.hostCanRequireTouchesFromHostedContent</key>
+    <true/>
+
+    <!-- IOSurface: 直接读取 GPU 帧缓冲做高速截屏 -->
+    <key>com.apple.QuartzCore.global-capture</key>
+    <true/>
+    <key>com.apple.QuartzCore.secure-capture</key>
+    <true/>
+
+    <!-- 容器管理: 读写自身/其他 App 沙盒 (脚本/日志存放) -->
+    <key>com.apple.private.MobileContainerManager.allowed</key>
+    <true/>
+    <key>com.apple.private.MobileInstallationHelperService.allowed</key>
+    <true/>
+
+    <!-- 辅助功能: 系统级悬浮窗 + 触摸补助 -->
+    <key>com.apple.accessibility.Accessibility</key>
+    <true/>
+
+    <!-- SpringBoard 系统级悬浮窗 (需要在所有 App 之上显示 HUD) -->
+    <key>com.apple.springboard.activate</key>
+    <true/>
+    <key>com.apple.springboard.apps-on-dock</key>
+    <true/>
+    <key>com.apple.springboard.hardware-button-service</key>
+    <true/>
+
+    <!-- 后台服务域：支持注册系统级后台服务 -->
+    <key>com.apple.BSServiceDomain.SystemService</key>
+    <dict>
+        <key>com.apple.systemservice.keep-alive</key>
+        <true/>
+    </dict>
+
+    <!-- 网络扩展：WebSocket 服务器端口绑定 -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

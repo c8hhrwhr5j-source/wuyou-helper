@@ -1,0 +1,57 @@
+name: Build TrollAutoTouch IPA
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew install xcodegen ldid
+
+      - name: Generate Xcode project
+        run: |
+          xcodegen generate
+
+      - name: Build with xcodebuild
+        run: |
+          xcodebuild -project TrollAutoTouch.xcodeproj \
+            -scheme TrollAutoTouch \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -derivedDataPath build/DerivedData \
+            build
+
+      - name: Package IPA
+        run: |
+          APP=$(find build/DerivedData -name 'TrollAutoTouch.app' -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "[-] TrollAutoTouch.app not found"
+            exit 1
+          fi
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          ldid -S"TrollAutoTouch/TrollAutoTouch.entitlements" "build/Payload/TrollAutoTouch.app/TrollAutoTouch"
+          cd build && zip -qry TrollAutoTouch.ipa Payload
+          echo "[OK] build/TrollAutoTouch.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollAutoTouch
+          path: build/TrollAutoTouch.ipa
+          if-no-files-found: error
