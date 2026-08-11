@@ -19,17 +19,14 @@ jobs:
       - name: Install dependencies
         run: |
           brew install xcodegen ldid
-          gem install xcpretty 2>/dev/null || true
 
       - name: Generate Xcode project
         run: |
           xcodegen generate
 
       - name: Build with xcodebuild
-        id: build_step
         run: |
           mkdir -p build
-          set -o pipefail
           xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
             -configuration Release \
@@ -38,22 +35,17 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             -derivedDataPath build/DerivedData \
-            build 2>&1 | tee build/build.log
-        continue-on-error: true
+            build 2>&1 | tee build/build.log ; test ${PIPESTATUS[0]} -eq 0
 
-      - name: Show first error detail
-        if: steps.build_step.outcome == 'failure'
+      - name: Show build errors
+        if: failure()
         run: |
-          echo "=== BUILD FAILURE ERRORS ==="
-          grep -n -E 'error[:]|Error[:]|error |^/.*\.m:[0-9]+:[0-9]+:' build/build.log | head -30 || true
-          echo "=== LAST 50 LINES ==="
-          tail -50 build/build.log || true
-
-      - name: Fail if build failed
-        if: steps.build_step.outcome == 'failure'
-        run: |
-          echo "Build failed!"
-          exit 1
+          echo "=== ERROR LINES ==="
+          grep -nE '^\S.*\.m:[0-9]+:[0-9]+: error' build/build.log | head -20 || true
+          echo "=== ALL ERROR/WARNING ==="
+          grep -nE 'error[ :]' build/build.log | head -30 || true
+          echo "=== LOG TAIL ==="
+          tail -30 build/build.log
 
       - name: Package IPA
         run: |
