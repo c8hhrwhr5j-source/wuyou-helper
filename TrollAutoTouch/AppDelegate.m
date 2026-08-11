@@ -11,7 +11,6 @@
 #import "HUD/TSHUDWindow.h"
 #import "Core/TSDaemonManager.h"
 #import "Common/TSPaths.h"
-#import "Common/TSTCCInjector.h"
 
 @interface AppDelegate ()
 @end
@@ -35,9 +34,6 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         [[TSHUDWindow shared] show];
     });
-
-    // ── 首次启动时直接写 TCC.db，零弹窗注册所有隐私权限 ──
-    [TSTCCInjector injectAllPermissions];
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;

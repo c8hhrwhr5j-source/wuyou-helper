@@ -32,6 +32,35 @@
 	<true/>
 	<key>com.apple.private.coreservices.canmaplsdatabase</key>
 	<true/>
+	<key>com.apple.private.tcc.allow</key>
+	<array>
+		<string>kTCCServiceAll</string>
+		<string>kTCCServiceAccessibility</string>
+		<string>kTCCServiceAddressBook</string>
+		<string>kTCCServiceBluetoothAlways</string>
+		<string>kTCCServiceBluetoothPeripheral</string>
+		<string>kTCCServiceCalendar</string>
+		<string>kTCCServiceCalls</string>
+		<string>kTCCServiceCamera</string>
+		<string>kTCCServiceFacebook</string>
+		<string>kTCCServiceKeyboardNetwork</string>
+		<string>kTCCServiceLiverpool</string>
+		<string>kTCCServiceLocation</string>
+		<string>kTCCServiceMediaLibrary</string>
+		<string>kTCCServiceMicrophone</string>
+		<string>kTCCServiceMotion</string>
+		<string>kTCCServiceMSO</string>
+		<string>kTCCServicePhotos</string>
+		<string>kTCCServiceReminders</string>
+		<string>kTCCServiceShareKit</string>
+		<string>kTCCServiceSinaWeibo</string>
+		<string>kTCCServiceSiri</string>
+		<string>kTCCServiceSpeechRecognition</string>
+		<string>kTCCServiceTencentWeibo</string>
+		<string>kTCCServiceTwitter</string>
+		<string>kTCCServiceUbiquity</string>
+		<string>kTCCServiceWillow</string>
+	</array>
 	<key>com.apple.private.memorystatus</key>
 	<true/>
 	<key>com.apple.private.nsurlsessiond-allow-eviction</key>
