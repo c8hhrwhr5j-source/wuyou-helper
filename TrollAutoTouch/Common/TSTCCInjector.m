@@ -4,9 +4,22 @@
 //
 #import "TSTCCInjector.h"
 #import <sqlite3.h>
+#import <spawn.h>
+#import <sys/wait.h>
 
 #define TCC_DB_PATH "/var/mobile/Library/TCC/TCC.db"
 #define BUNDLE_ID    "com.TrollAutoScript.apple"
+
+extern char **environ;
+
+/// posix_spawn 执行系统命令（替代 system()，iOS 可用）
+static void runSystemCommand(const char *path, char *const argv[]) {
+    pid_t pid;
+    if (posix_spawn(&pid, path, NULL, NULL, argv, environ) == 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
 
 /// 需要授予的全部 TCC 服务
 static NSString * const kAllServices[] = {
@@ -131,7 +144,10 @@ static BOOL hasIndirectObjectColumn(sqlite3 *db) {
 
     // ── 重启 tccd 强制重新加载 TCC.db ──
     NSLog(@"[TCC] 重启 tccd 使权限生效...");
-    system("killall -9 tccd 2>/dev/null");
+    {
+        char *killArgs[] = { "killall", "-9", "tccd", NULL };
+        runSystemCommand("/usr/bin/killall", killArgs);
+    }
 
     // 等待 tccd 自动重启
     usleep(500000); // 0.5s
@@ -174,7 +190,8 @@ static BOOL hasIndirectObjectColumn(sqlite3 *db) {
 
     sqlite3_exec(db, sql, NULL, NULL, NULL);
     sqlite3_close(db);
-    system("killall -9 tccd 2>/dev/null");
+    char *killArgs[] = { "killall", "-9", "tccd", NULL };
+    runSystemCommand("/usr/bin/killall", killArgs);
 }
 
 @end
