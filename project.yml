@@ -19,7 +19,7 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     ENABLE_BITCODE: NO
     # 链接私有/公开框架
-    OTHER_LDFLAGS: -weak_framework IOKit -weak_framework BackBoardServices -weak_framework FrontBoard -weak_framework FrontBoardServices -weak_framework XCTest -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
+    OTHER_LDFLAGS: -weak_framework IOKit -weak_framework FrontBoard -weak_framework FrontBoardServices -weak_framework XCTest -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
 targets:
   TrollAutoTouch:
     type: application
