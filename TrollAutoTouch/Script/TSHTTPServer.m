@@ -19,6 +19,11 @@
 #import <unistd.h>
 #import <fcntl.h>
 
+// htonll 非 POSIX 标准函数，iOS SDK 不提供，自行实现
+static inline uint64_t htonll(uint64_t host) {
+    return ((uint64_t)htonl((uint32_t)(host >> 32))) | ((uint64_t)htonl((uint32_t)(host & 0xFFFFFFFF)) << 32);
+}
+
 #pragma mark - HTTP 响应工具
 
 static NSData *HTTPResponse(int code, NSString *status, NSString *contentType, NSData *body,

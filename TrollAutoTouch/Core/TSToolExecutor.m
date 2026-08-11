@@ -7,6 +7,7 @@
 //
 
 #import "TSToolExecutor.h"
+#import "TSDeviceInfo.h"
 #import <spawn.h>
 #import <sys/stat.h>
 #import <sys/sysctl.h>

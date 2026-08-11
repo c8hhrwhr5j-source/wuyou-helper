@@ -4,6 +4,7 @@
 //
 
 #import "TSColorFinder.h"
+#import <limits.h>
 
 @implementation TSColorResult
 @end
