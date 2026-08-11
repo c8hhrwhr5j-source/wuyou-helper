@@ -67,9 +67,11 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     kern_return_t kr = getSurface(fb, &surface);
     if (kr != KERN_SUCCESS || !surface) { return NO; }
 
-    // 从 IOSurface 拷贝像素。这些函数来自 IOSurface.framework。
-    size_t (*lock)(IOSurfaceRef, uint32_t, uint32_t *) =
+    // 从 IOSurface 拷贝像素。这些函数来自 IOSurface.framework，通过 dlopen/dlsym 动态加载。
+    kern_return_t (*lockFn)(IOSurfaceRef, uint32_t, uint32_t *) =
         dlsym(_iosurfaceHandle, "IOSurfaceLock");
+    kern_return_t (*unlockFn)(IOSurfaceRef, uint32_t, uint32_t *) =
+        dlsym(_iosurfaceHandle, "IOSurfaceUnlock");
     void *(*baseAddr)(IOSurfaceRef) =
         dlsym(_iosurfaceHandle, "IOSurfaceGetBaseAddress");
     size_t (*widthFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
@@ -77,9 +79,9 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     size_t (*bytesPerRowFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetBytesPerRow");
     uint32_t (*pixelFormatFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetPixelFormat");
 
-    if (!lock || !baseAddr || !widthFn || !heightFn || !bytesPerRowFn) { return NO; }
+    if (!lockFn || !unlockFn || !baseAddr || !widthFn || !heightFn || !bytesPerRowFn) { return NO; }
 
-    IOSurfaceLock(surface, 0, NULL);
+    lockFn(surface, 0, NULL);
     size_t w = widthFn(surface);
     size_t h = heightFn(surface);
     size_t bpr = bytesPerRowFn(surface);
@@ -87,7 +89,7 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
 
     // 帧缓冲通常是 BGRA 'BGRA'(0x41524742)。统一转成 RGBA。
     uint8_t *out = malloc(w * h * 4);
-    if (!out) { IOSurfaceUnlock(surface, 0, NULL); return NO; }
+    if (!out) { unlockFn(surface, 0, NULL); return NO; }
 
     uint32_t fmt = pixelFormatFn ? pixelFormatFn(surface) : 0x42475241; // 默认假设 BGRA
     for (size_t y = 0; y < h; y++) {
@@ -107,7 +109,7 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
             }
         }
     }
-    IOSurfaceUnlock(surface, 0, NULL);
+    unlockFn(surface, 0, NULL);
 
     *pixelsOut = out;
     *widthOut = (int)w;
