@@ -350,7 +350,7 @@
         TSCmdResult *res = [[TSToolExecutor shared] executeCommand:cmd];
         dispatch_async(dispatch_get_main_queue(), ^{
             [self _log:[NSString stringWithFormat:@"结果 (exit=%d, %.2fs):\n%@",
-                        res.exitCode, res.elapsed, res.stdout.length > 0 ? res.stdout : res.stderr]];
+                        res.exitCode, res.elapsed, res.standardOutput.length > 0 ? res.standardOutput : res.standardError]];
         });
     });
 }

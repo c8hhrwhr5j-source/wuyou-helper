@@ -21,8 +21,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 命令执行结果
 @interface TSCmdResult : NSObject
 @property (nonatomic, assign) int           exitCode;
-@property (nonatomic, copy)   NSString     *stdout;
-@property (nonatomic, copy)   NSString     *stderr;
+@property (nonatomic, copy)   NSString     *standardOutput;
+@property (nonatomic, copy)   NSString     *standardError;
 @property (nonatomic, assign) NSTimeInterval elapsed;
 @end
 

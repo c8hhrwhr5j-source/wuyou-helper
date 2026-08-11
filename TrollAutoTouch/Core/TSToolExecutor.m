@@ -68,8 +68,8 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 - (NSString *)description {
     return [NSString stringWithFormat:@"<TSCmdResult exit=%d elapsed=%.3fs out=\"%@\" err=\"%@\">",
             _exitCode, _elapsed,
-            _stdout.length > 100 ? [[_stdout substringToIndex:100] stringByAppendingString:@"..."] : _stdout,
-            _stderr.length > 100 ? [[_stderr substringToIndex:100] stringByAppendingString:@"..."] : _stderr];
+            _standardOutput.length > 100 ? [[_standardOutput substringToIndex:100] stringByAppendingString:@"..."] : _standardOutput,
+            _standardError.length > 100 ? [[_standardError substringToIndex:100] stringByAppendingString:@"..."] : _standardError];
 }
 @end
 
@@ -148,7 +148,7 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
         close(outPipe[0]);
         close(errPipe[0]);
         result.exitCode = -1;
-        result.stderr = [NSString stringWithFormat:@"spawn error: %s", strerror(spawnErr)];
+        result.standardError = [NSString stringWithFormat:@"spawn error: %s", strerror(spawnErr)];
         result.elapsed = [[NSDate date] timeIntervalSince1970] - start;
         return result;
     }
@@ -165,7 +165,7 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
         if (now > deadline) {
             kill(pid, SIGKILL);
             result.exitCode = -2;
-            result.stderr = @"命令执行超时";
+            result.standardError = @"命令执行超时";
             break;
         }
 
@@ -198,8 +198,8 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     close(outPipe[0]);
     close(errPipe[0]);
 
-    result.stdout = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding] ?: @"";
-    result.stderr = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] ?: result.stderr ?: @"";
+    result.standardOutput = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding] ?: @"";
+    result.standardError = [[NSString alloc] initWithData:errData encoding:NSUTF8StringEncoding] ?: result.standardError ?: @"";
     result.elapsed = [[NSDate date] timeIntervalSince1970] - start;
 
     return result;
@@ -591,7 +591,7 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     }
 
     // 架构
-    info[@"architecture"] = @(sizeof(void *) == 8 ? @"arm64" : @"armv7");
+    info[@"architecture"] = sizeof(void *) == 8 ? @"arm64" : @"armv7";
 
     return info;
 }

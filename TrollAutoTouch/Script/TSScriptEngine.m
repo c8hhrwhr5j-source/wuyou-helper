@@ -937,9 +937,9 @@
 
     TSCmdResult *result = [[TSToolExecutor shared] executeCommand:cmdStr];
     if (result.exitCode == 0) {
-        [self log:[NSString stringWithFormat:@"exec OK (%.2fs):\n%@", result.elapsed, result.stdout ?: @""]];
+        [self log:[NSString stringWithFormat:@"exec OK (%.2fs):\n%@", result.elapsed, result.standardOutput ?: @""]];
     } else {
-        [self logError:[NSString stringWithFormat:@"exec 失败 (exit=%d): %@", result.exitCode, result.stderr]];
+        [self logError:[NSString stringWithFormat:@"exec 失败 (exit=%d): %@", result.exitCode, result.standardError]];
         return NO;
     }
     return YES;
