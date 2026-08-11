@@ -18,8 +18,8 @@ settings:
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGNING_ALLOWED: NO
     ENABLE_BITCODE: NO
-    # 只保留代码中实际 #import 的框架；私有框架 (IOKit/IOSurface 等) 均通过 dlopen 运行时加载
-    OTHER_LDFLAGS: -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
+    # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
 targets:
   TrollAutoTouch:
     type: application
