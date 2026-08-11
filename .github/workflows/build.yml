@@ -34,7 +34,13 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             -derivedDataPath build/DerivedData \
-            build
+            build 2>&1 | tee build/build.log
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "=== BUILD ERRORS ==="
+          grep -E 'error:|Error:|warning:.*-Win|fatal error' build/build.log | head -50 || true
 
       - name: Package IPA
         run: |

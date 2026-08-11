@@ -7,7 +7,6 @@
 //
 
 #import "TSToolExecutor.h"
-#import "TSDeviceInfo.h"
 #import <spawn.h>
 #import <sys/stat.h>
 #import <sys/sysctl.h>
@@ -455,7 +454,24 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 }
 
 - (nullable NSString *)wifiIPAddress {
-    return [TSDeviceInfo shared].wifiIPAddress; // 复用已有实现
+    struct ifaddrs *interfaces = NULL;
+    NSString *ip = nil;
+
+    if (getifaddrs(&interfaces) == 0) {
+        for (struct ifaddrs *cursor = interfaces; cursor; cursor = cursor->ifa_next) {
+            if (cursor->ifa_addr && cursor->ifa_addr->sa_family == AF_INET) {
+                NSString *name = [NSString stringWithUTF8String:cursor->ifa_name];
+                if ([name isEqualToString:@"en0"]) {
+                    char addrStr[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &((struct sockaddr_in *)cursor->ifa_addr)->sin_addr, addrStr, sizeof(addrStr));
+                    ip = [NSString stringWithUTF8String:addrStr];
+                    break;
+                }
+            }
+        }
+        freeifaddrs(interfaces);
+    }
+    return ip;
 }
 
 - (nullable NSString *)cellularIPAddress {
