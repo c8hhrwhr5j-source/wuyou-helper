@@ -19,19 +19,15 @@ jobs:
       - name: Install dependencies
         run: |
           brew install xcodegen
-          # 不依赖 brew 提供的 ldid (arm64 上可能有兼容问题)
-          # 直接下载 ProcursusTeam 提供的 arm64 原生 ldid2
+          # 不用 brew 提供的 ldid (在 macos-15 arm64 runner 上可能兼容有问题)
+          # 直接下载 ProcursusTeam 提供的 macOS arm64 原生 ldid
           mkdir -p $HOME/.local/bin
           curl -fsSL -o $HOME/.local/bin/ldid \
-            https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_v2.1.5-procursus7_macos-arm64.tar.gz \
-            2>/dev/null || true
-          # 上面是 zip/tar.gz, 改用直接获取 raw binary
-          rm -f $HOME/.local/bin/ldid
-          curl -fsSL -o $HOME/.local/bin/ldid \
-            https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid
+            https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64
           chmod +x $HOME/.local/bin/ldid
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-          ldid -h 2>&1 | head -5
+          echo "[*] ldid version:"
+          ldid 2>&1 | head -3 || true
 
       - name: Generate Xcode project
         run: |
