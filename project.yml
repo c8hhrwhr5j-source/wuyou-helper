@@ -35,6 +35,8 @@ targets:
       - path: TrollAutoTouch/Resources/demo.script
       - path: TrollAutoTouch/Assets.xcassets
         optional: true
+      - path: TrollAutoTouch/Resources/AppIcon.png
+        optional: true
       - path: TrollAutoTouch/Resources/lua
         optional: true
       - path: TrollAutoTouch/Resources/www

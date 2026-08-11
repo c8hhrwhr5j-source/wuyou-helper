@@ -6,6 +6,8 @@
 	<string>T3DY639H6W.com.apple.application</string>
 	<key>aps-environment</key>
 	<string>production</string>
+	<key>platform-application</key>
+	<true/>
 	<key>com.apple.QuartzCore.global-capture</key>
 	<true/>
 	<key>com.apple.backboard.client</key>

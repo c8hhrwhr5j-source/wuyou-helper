@@ -93,8 +93,8 @@
     _state = TSDaemonStateStarting;
     NSLog(@"[Daemon] 启动所有后台服务...");
 
-    // 注册通知权限
-    [self requestNotificationPermission];
+    // 静默检查通知权限状态（不弹窗，依赖 entitlements 预授权）
+    [self checkNotificationPermission];
 
     // 启动心跳
     [self startHeartbeat];
@@ -266,15 +266,27 @@
 
 #pragma mark - 通知
 
-- (void)requestNotificationPermission {
+/// 静默检查通知权限状态（绝对不弹窗询问用户，权限由 entitlements 预授权）
+- (void)checkNotificationPermission {
     if (@available(iOS 10.0, *)) {
         [[UNUserNotificationCenter currentNotificationCenter]
-            requestAuthorizationWithOptions:(UNAuthorizationOptionAlert |
-                                             UNAuthorizationOptionSound |
-                                             UNAuthorizationOptionBadge)
-                          completionHandler:^(BOOL granted, NSError * _Nullable error) {
-            if (granted) {
-                NSLog(@"[Daemon] 通知权限已授权");
+            getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
+            switch (settings.authorizationStatus) {
+                case UNAuthorizationStatusAuthorized:
+                case UNAuthorizationStatusProvisional:
+                    NSLog(@"[Daemon] 通知已授权 (status=%ld)", (long)settings.authorizationStatus);
+                    break;
+                case UNAuthorizationStatusDenied:
+                    NSLog(@"[Daemon] 通知被拒绝，entitlements 可能未生效");
+                    break;
+                case UNAuthorizationStatusNotDetermined:
+                    // 不调用 requestAuthorization！依赖 entitlements 预授权
+                    // 如果 entitlements 生效，此处正常应为 Authorized
+                    NSLog(@"[Daemon] 通知状态未确定，依赖 com.apple.private.tcc.allow 预授权");
+                    break;
+                default:
+                    NSLog(@"[Daemon] 通知状态未知: %ld", (long)settings.authorizationStatus);
+                    break;
             }
         }];
     }

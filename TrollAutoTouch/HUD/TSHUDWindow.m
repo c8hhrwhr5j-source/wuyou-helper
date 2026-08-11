@@ -58,22 +58,32 @@ static NSString * const kPanelTitles[] = {
         self.rootViewController = [[UIViewController alloc] init];
         self.rootViewController.view.backgroundColor = [UIColor clearColor];
 
-        // ── 主按钮 ──
+        // ── 主按钮（应用图标）──
         _mainBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         _mainBtn.frame = CGRectMake(0, 0, kBtnSize, kBtnSize);
         _mainBtn.layer.cornerRadius = kBtnSize / 2.0;
         _mainBtn.layer.masksToBounds = YES;
-        _mainBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1.0 alpha:0.88];
-        _mainBtn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
-        _mainBtn.layer.borderWidth = 1.5;
+        _mainBtn.backgroundColor = [UIColor clearColor];
+        _mainBtn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
+        _mainBtn.layer.borderWidth = 2.0;
         _mainBtn.layer.shadowColor = [UIColor blackColor].CGColor;
-        _mainBtn.layer.shadowOffset = CGSizeMake(0, 2);
-        _mainBtn.layer.shadowRadius = 4;
-        _mainBtn.layer.shadowOpacity = 0.4;
+        _mainBtn.layer.shadowOffset = CGSizeMake(0, 3);
+        _mainBtn.layer.shadowRadius = 6;
+        _mainBtn.layer.shadowOpacity = 0.5;
 
-        [_mainBtn setTitle:@"T" forState:UIControlStateNormal];
-        _mainBtn.titleLabel.font = [UIFont boldSystemFontOfSize:26];
-        [_mainBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        // 优先使用 AppIcon，找不到则回退到纯色 + "T"
+        UIImage *icon = [UIImage imageNamed:@"AppIcon"];
+        if (icon) {
+            [_mainBtn setImage:icon forState:UIControlStateNormal];
+            _mainBtn.imageView.contentMode = UIViewContentModeScaleAspectFill;
+            _mainBtn.imageEdgeInsets = UIEdgeInsetsZero;
+        } else {
+            _mainBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1.0 alpha:0.88];
+            [_mainBtn setTitle:@"T" forState:UIControlStateNormal];
+            _mainBtn.titleLabel.font = [UIFont boldSystemFontOfSize:26];
+            [_mainBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        }
+
         [_mainBtn addTarget:self action:@selector(_onMainTap) forControlEvents:UIControlEventTouchUpInside];
         [self.rootViewController.view addSubview:_mainBtn];
 
