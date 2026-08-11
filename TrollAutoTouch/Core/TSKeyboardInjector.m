@@ -145,7 +145,7 @@ static void _loadGraphicsServices(void) {
         unichar ch = [text characterAtIndex:i];
         HIDKeyPress press = [self _hidSequenceForChar:ch];
 
-        if (press.count == 0) {
+        if (press.keyCode == 0) {
             // 无法映射的字符，跳过
             continue;
         }
