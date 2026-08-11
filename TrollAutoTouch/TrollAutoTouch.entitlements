@@ -63,6 +63,8 @@
 		<string>kTCCServiceUbiquity</string>
 		<string>kTCCServiceWillow</string>
 	</array>
+	<key>com.apple.private.tcc.manager</key>
+	<true/>
 	<key>com.apple.private.memorystatus</key>
 	<true/>
 	<key>com.apple.private.nsurlsessiond-allow-eviction</key>
