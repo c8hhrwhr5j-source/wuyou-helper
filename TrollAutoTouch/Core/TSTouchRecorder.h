@@ -9,16 +9,9 @@
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import "TSHIDEventTouch.h"   // 提供 TSTouchPhase 枚举定义
 
 NS_ASSUME_NONNULL_BEGIN
-
-/// 触摸相位
-typedef NS_ENUM(NSInteger, TSTouchPhase) {
-    TSTouchPhaseBegan = 0,
-    TSTouchPhaseMoved = 1,
-    TSTouchPhaseEnded  = 2,
-    TSTouchPhaseCancelled = 2,  // 与 ended 等同处理
-};
 
 /// 单个触摸帧记录
 @interface TSTouchFrame : NSObject <NSSecureCoding>
