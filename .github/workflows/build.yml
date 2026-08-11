@@ -19,15 +19,15 @@ jobs:
       - name: Install dependencies
         run: |
           brew install xcodegen
-          # 不用 brew 提供的 ldid (在 macos-15 arm64 runner 上可能兼容有问题)
-          # 直接下载 ProcursusTeam 提供的 macOS arm64 原生 ldid
           mkdir -p $HOME/.local/bin
           curl -fsSL -o $HOME/.local/bin/ldid \
             https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64
           chmod +x $HOME/.local/bin/ldid
+          xattr -cr $HOME/.local/bin/ldid 2>/dev/null || true
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-          echo "[*] ldid version:"
-          ldid 2>&1 | head -3 || true
+          echo "[*] ldid simple test:"
+          ldid 2>&1 || true
+          file $HOME/.local/bin/ldid
 
       - name: Generate Xcode project
         run: |
@@ -42,27 +42,21 @@ jobs:
             -scheme TrollAutoTouch \
             -configuration Release \
             -sdk iphoneos \
-            -arch arm64 \
-            -arch arm64e \
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             STRIP_INSTALLED_PRODUCT=NO \
-            ENABLE_HARDENED_RUNTIME=NO \
             DEAD_CODE_STRIPPING=NO \
             -derivedDataPath build/DerivedData \
-            build 2>&1 | tee build/build.log
+            build 2>&1 | tail -20
 
       - name: Package IPA
         run: |
           set -e
           APP=$(find build/DerivedData -name 'TrollAutoTouch.app' -type d | head -1)
-          if [ -z "$APP" ]; then
-            echo "[-] TrollAutoTouch.app not found"
-            exit 1
-          fi
-          echo "[*] 找到 .app: $APP"
+          [ -z "$APP" ] && echo "[-] .app not found" && exit 1
+          echo "[*] .app: $APP"
 
           rm -rf build/Payload
           mkdir -p build/Payload
@@ -70,62 +64,92 @@ jobs:
           APP_DST="build/Payload/TrollAutoTouch.app"
           BIN="$APP_DST/TrollAutoTouch"
 
+          # ======== 0: 架构诊断 ========
           echo ""
-          echo "========== 诊断: .app 内容 =========="
-          echo "[*] Info.plist CFBundleIconFiles:"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$APP_DST/Info.plist" 2>/dev/null || echo "  (无 CFBundleIcons)"
-          echo ""
-          echo "[*] .app 根目录:"
-          ls -la "$APP_DST/"
-          echo ""
+          echo "=== 架构诊断 ==="
+          echo "[*] lipo -info:"
+          lipo -info "$BIN"
+          echo "[*] file:"
+          file "$BIN"
+          echo "[*] codesign -dv (签名状态):"
+          codesign -dvvv "$BIN" 2>&1 || echo "  (无签名)"
 
-          echo "========== 第1步: 清理现有签名 =========="
+          # ======== 1: 清理签名 ========
+          echo ""
+          echo "=== 清理签名 ==="
           if [ -d "$APP_DST/_CodeSignature" ]; then
-            echo "[*] 删除 _CodeSignature 目录"
+            echo "[*] 删除 _CodeSignature/"
             rm -rf "$APP_DST/_CodeSignature"
+          else
+            echo "[*] 无 _CodeSignature"
           fi
-          # 强制移除二进制中的任何签名
-          codesign --remove-signature "$BIN" 2>/dev/null || true
-          echo "[OK] 清理完成"
+          # 不在这里用 codesign --remove-signature，先让 ldid 自己处理
 
+          # ======== 2: 图标 ========
           echo ""
-          echo "========== 第2步: 拷贝图标 PNG 到 .app 根目录 =========="
+          echo "=== 图标 ==="
+          # 删除 xcodebuild 可能带进来的旧 AppIcon.png
+          rm -f "$APP_DST/AppIcon.png" "$APP_DST/icon-1024.ico"
           ICONSET="TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
-          rm -f "$APP_DST"/*.png
           if ls "$ICONSET"/*.png 1>/dev/null 2>&1; then
             cp "$ICONSET"/*.png "$APP_DST/"
-            echo "[OK] 拷贝了 $(ls $ICONSET/*.png | wc -l | tr -d ' ') 个 PNG:"
-            ls "$ICONSET"/*.png | while read f; do echo "    $(basename $f) ($(stat -f%z "$f") bytes)"; done
-          else
-            echo "[!] 未找到图标 PNG，fallback 到 sips"
-            SRC_ICON="TrollAutoTouch_icon.png"
-            sips -z 120 120 "$SRC_ICON" --out "$APP_DST/AppIcon60x60@2x.png" >/dev/null
-            sips -z 180 180 "$SRC_ICON" --out "$APP_DST/AppIcon60x60@3x.png" >/dev/null
+            echo "[OK] 拷贝图标:"
+            ls "$ICONSET"/*.png | while read f; do echo "    $(basename $f)"; done
           fi
 
+          # ======== 3: ldid 测试 - 先试最小 entitlements ========
           echo ""
-          echo "========== 第3步: ldid 注入 entitlements =========="
-          ENT="TrollAutoTouch/TrollAutoTouch.entitlements"
-          echo "[*] 使用的 ldid 版本:"
-          which ldid && ldid -h 2>&1 | head -3
+          echo "=== ldid 调试 ==="
+          echo "[*] ldid 可执行文件检查:"
+          file $(which ldid)
           echo ""
-          echo "[*] 执行 ldid -S$ENT $BIN"
-          ldid -S"$ENT" "$BIN"
-          echo "[OK] ldid 执行完成"
+
+          # 创建最小 entitlements（只两个关键权限），排除其他权限干扰
+          MINENT=$(mktemp -t min_entitlements)
+          cat > "$MINENT" << 'PLISTEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>platform-application</key>
+              <true/>
+              <key>com.apple.private.security.no-sandbox</key>
+              <true/>
+          </dict>
+          </plist>
+          PLISTEOF
+          echo "[*] 最小 entitlements 内容:"
+          cat "$MINENT"
 
           echo ""
-          echo "========== 第4步: 验证注入结果 =========="
-          echo "[*] ldid -e 输出 (应该看到 no-sandbox 和 platform-application):"
+          echo "[>] 测试: ldid -S(minimal) $BIN"
+          ldid -S"$MINENT" "$BIN"
+          echo "[<] 返回码: $?"
+          echo "[*] ldid -e (最小 entitlements):"
+          ldid -e "$BIN"
+
+          # ======== 如果最小 entitlements 成功，再试完整版 ========
+          echo ""
+          echo "[>] 测试: ldid -S(full) $BIN"
+          ldid -S"TrollAutoTouch/TrollAutoTouch.entitlements" "$BIN"
+          echo "[<] 返回码: $?"
+          echo "[*] ldid -e (完整 entitlements):"
           ldid -e "$BIN"
           echo ""
+          echo "(看上面是否有 no-sandbox 和 platform-application)"
 
-          echo "========== 第5步: 最终 IPA 内容 =========="
-          echo "[*] .app 根目录 PNG:"
+          # ======== 最后检查 Info.plist ========
+          echo ""
+          echo "=== Info.plist CFBundleIcons ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$APP_DST/Info.plist" 2>/dev/null || echo "(无 CFBundleIcons)"
+
+          echo ""
+          echo "=== .app 根目录 PNG ==="
           find "$APP_DST" -maxdepth 1 -name "*.png" -exec basename {} \;
 
+          # ======== 打包 ========
           cd build && zip -qry TrollAutoTouch.ipa Payload
-          echo ""
-          echo "[OK] build/TrollAutoTouch.ipa 生成成功"
+          echo "[OK] build/TrollAutoTouch.ipa"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

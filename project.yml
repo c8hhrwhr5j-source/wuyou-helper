@@ -35,8 +35,6 @@ targets:
       - path: TrollAutoTouch/Resources/demo.script
       - path: TrollAutoTouch/Assets.xcassets
         optional: true
-      - path: TrollAutoTouch/Resources/AppIcon.png
-        optional: true
       - path: TrollAutoTouch/Resources/lua
         optional: true
       - path: TrollAutoTouch/Resources/www
@@ -51,6 +49,17 @@ targets:
         CFBundleDisplayName: TrollAutoScript
         CFBundleVersion: "9"
         CFBundleShortVersionString: "9.9.9"
+        CFBundleIcons:
+          CFBundlePrimaryIcon:
+            CFBundleIconFiles:
+              - AppIcon60x60
+            UIPrerenderedIcon: false
+        CFBundleIcons~ipad:
+          CFBundlePrimaryIcon:
+            CFBundleIconFiles:
+              - AppIcon60x60
+              - AppIcon76x76
+            UIPrerenderedIcon: false
     entitlements:
       path: TrollAutoTouch/TrollAutoTouch.entitlements
     settings:
