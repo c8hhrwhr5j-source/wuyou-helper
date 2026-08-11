@@ -38,12 +38,21 @@ prepare_icons() {
 
   echo "[*] 准备 App 图标..."
 
-  # 用 sips 从源图生成正确尺寸（仅生成 Info.plist CFBundleIconFiles 要求的尺寸）
+  # 用 sips 从源图生成正确尺寸
   if command -v sips >/dev/null 2>&1; then
+    # 桌面图标 (60x60pt)
     sips -z 120 120 "$src" --out "$app/AppIcon60x60@2x.png" >/dev/null 2>&1
     sips -z 180 180 "$src" --out "$app/AppIcon60x60@3x.png" >/dev/null 2>&1
+    # App Switcher / Spotlight (40x40pt) — 这就是后台卡片顶部图标
+    sips -z  80  80 "$src" --out "$app/AppIcon40x40@2x.png" >/dev/null 2>&1
+    sips -z 120 120 "$src" --out "$app/AppIcon40x40@3x.png" >/dev/null 2>&1
+    # 设置 / 搜索小图标 (29x29pt)
+    sips -z  58  58 "$src" --out "$app/AppIcon29x29@2x.png" >/dev/null 2>&1
+    sips -z  87  87 "$src" --out "$app/AppIcon29x29@3x.png" >/dev/null 2>&1
+    # iPad (76x76pt)
     sips -z  76  76 "$src" --out "$app/AppIcon76x76~ipad.png"    >/dev/null 2>&1
     sips -z 152 152 "$src" --out "$app/AppIcon76x76@2x~ipad.png" >/dev/null 2>&1
+    # App Store (1024x1024)
     sips -z 1024 1024 "$src" --out "$app/icon-1024.png"          >/dev/null 2>&1
     echo "[*] 图标生成完成（sips）"
   else

@@ -17,9 +17,13 @@
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
 		<dict>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
 			<key>CFBundleIconFiles</key>
 			<array>
 				<string>AppIcon60x60</string>
+				<string>AppIcon40x40</string>
+				<string>AppIcon29x29</string>
 			</array>
 			<key>UIPrerenderedIcon</key>
 			<false/>
@@ -29,10 +33,14 @@
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
 		<dict>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
 			<key>CFBundleIconFiles</key>
 			<array>
 				<string>AppIcon60x60</string>
 				<string>AppIcon76x76</string>
+				<string>AppIcon40x40</string>
+				<string>AppIcon29x29</string>
 			</array>
 			<key>UIPrerenderedIcon</key>
 			<false/>
