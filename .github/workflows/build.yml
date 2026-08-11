@@ -17,16 +17,17 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
-        run: |
-          brew install xcodegen ldid
+        run: brew install xcodegen ldid
 
       - name: Generate Xcode project
         run: |
+          rm -rf TrollAutoTouch.xcodeproj
           xcodegen generate
 
-      - name: Build with xcodebuild
+      - name: Build
         run: |
           mkdir -p build
+          set +e
           xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
             -configuration Release \
@@ -35,17 +36,10 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             -derivedDataPath build/DerivedData \
-            build 2>&1 | tee build/build.log ; test ${PIPESTATUS[0]} -eq 0
-
-      - name: Show build errors
-        if: failure()
-        run: |
-          echo "=== ERROR LINES ==="
-          grep -nE '^\S.*\.m:[0-9]+:[0-9]+: error' build/build.log | head -20 || true
-          echo "=== ALL ERROR/WARNING ==="
-          grep -nE 'error[ :]' build/build.log | head -30 || true
-          echo "=== LOG TAIL ==="
-          tail -30 build/build.log
+            build > build/build.log 2>&1
+          BUILD_EXIT=$?
+          cat build/build.log
+          exit $BUILD_EXIT
 
       - name: Package IPA
         run: |
