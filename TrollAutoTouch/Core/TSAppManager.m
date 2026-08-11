@@ -351,16 +351,10 @@ static void _loadMobileInstallation(void) {
     __block BOOL result = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         UIApplication *app = [UIApplication sharedApplication];
-        if ([app respondsToSelector:@selector(openURL:options:completionHandler:)]) {
-            [app openURL:url options:@{} completionHandler:^(BOOL success) {
-                result = success;
-                dispatch_semaphore_signal(sema);
-            }];
-        } else {
-            // 兼容旧版
-            result = [app openURL:url];
+        [app openURL:url options:@{} completionHandler:^(BOOL success) {
+            result = success;
             dispatch_semaphore_signal(sema);
-        }
+        }];
     });
     dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
     return result;
