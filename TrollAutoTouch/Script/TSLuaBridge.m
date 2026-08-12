@@ -14,8 +14,9 @@
 //    pasteboard / plist / file / key / str
 //
 //  线程模型:
-//    - 所有 Lua 脚本在同一个后台串行队列(global_queue + @synchronized)执行，
-//      避免并发访问 lua_State。
+//    - 所有 Lua 脚本在同一个后台串行队列(global_queue)执行，避免并发访问 lua_State。
+//    - 停止标志用 volatile BOOL 无锁读写，不持有 self 锁，
+//      保证主线程点"停止"时能立即生效，不会因脚本持有锁而卡死主线程。
 //    - 日志回调在主线程调用 logHandler。
 
 #import "TSLuaBridge.h"
@@ -47,7 +48,10 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
 
-static BOOL _stopRequested = NO;
+// 跨线程标志: Lua 后台线程读、主线程(停止按钮)写。
+// 必须用 volatile + 无锁赋值，绝不能放在 @synchronized(self) 里——
+// 否则脚本运行期间 Lua 线程持有 self 锁, 主线程 stop 抢锁会永久阻塞, 应用卡死。
+static volatile BOOL _stopRequested = NO;
 
 @interface TSLuaBridge ()
 - (void)_execute:(NSString *)code filePath:(nullable NSString *)path;
@@ -194,6 +198,17 @@ static int l_screen_getSize(lua_State *L) {
 }
 
 #pragma mark - 截屏/找色
+
+/// Lua 指令计数钩子: 每执行 N 条指令检查一次停止标志。
+/// 这样即使脚本是死循环(如 while true do end，不调用 mSleep/sleep)，
+/// 点击"停止"后也能被 lua_pcall 的 longjmp 中断，而不是无限跑下去。
+static void luaStopHook(lua_State *L, lua_Debug *ar) {
+    if (_stopRequested) {
+        // 先移除钩子再抛错，避免 longjmp 后重复进入钩子导致二次错误
+        lua_sethook(L, NULL, 0, 0);
+        luaL_error(L, "脚本已被停止");
+    }
+}
 
 /// 取整屏 RGBA 像素，返回给调用方(需 free)
 static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
@@ -1069,31 +1084,30 @@ static void lua_register_all(lua_State *L) {
 #pragma mark - 执行
 
 - (void)runString:(NSString *)code {
+    // 注意: 绝不能用 @synchronized(self) 包住 _execute ——
+    // 脚本运行期间会一直持有 self 锁, 主线程 stop() 抢锁会永久阻塞导致应用卡死。
+    // _luaQueue 本身就是串行队列, 已保证同一时间只有一个脚本在跑。
     dispatch_async(_luaQueue, ^{
-        @synchronized (self) {
-            [self _execute:code filePath:nil];
-        }
+        [self _execute:code filePath:nil];
     });
 }
 
 - (void)runFile:(NSString *)path {
     dispatch_async(_luaQueue, ^{
-        @synchronized (self) {
-            NSError *err = nil;
-            NSString *code = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
-            if (err || !code) {
-                lua_log([NSString stringWithFormat:@"[Lua] 读取脚本失败: %@", path]);
-                return;
-            }
-            [self _execute:code filePath:path];
+        NSError *err = nil;
+        NSString *code = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+        if (err || !code) {
+            lua_log([NSString stringWithFormat:@"[Lua] 读取脚本失败: %@", path]);
+            return;
         }
+        [self _execute:code filePath:path];
     });
 }
 
 - (void)stop {
-    @synchronized (self) {
-        _stopRequested = YES;
-    }
+    // 直接写 volatile 标志, 不抢 self 锁: 脚本正在 _luaQueue 上跑, 主线程这里必须能立即返回,
+    // 否则若脚本是死循环(不检查 _stopRequested), 主线程会永远卡在锁上, 整个 App 无响应。
+    _stopRequested = YES;
     // 立即补发所有未抬起的触摸，避免脚本被中断后留下"幽灵手指"导致屏幕点击无响应
     [[TSHIDEventTouch shared] releaseAllTouches];
     dispatch_async(_luaQueue, ^{
@@ -1106,9 +1120,7 @@ static void lua_register_all(lua_State *L) {
 }
 
 - (void)_execute:(NSString *)code filePath:(NSString *)path {
-    @synchronized (self) {
-        _stopRequested = NO;
-    }
+    _stopRequested = NO;
     self.runningPath = path;
     self.isRunning = YES;
 
@@ -1143,6 +1155,10 @@ static void lua_register_all(lua_State *L) {
         return;
     }
 
+    // 注册指令计数钩子(每 5000 条指令检查一次停止标志)。
+    // 开销极小，但能保证死循环脚本也能被"停止"按钮真正中断。
+    lua_sethook(L, luaStopHook, LUA_MASKCOUNT, 5000);
+
     int pcallRet = lua_pcall(L, 0, 0, 0);
     if (pcallRet != LUA_OK) {
         size_t errLen = 0;
@@ -1155,9 +1171,7 @@ static void lua_register_all(lua_State *L) {
     // 兜底：无论脚本如何结束(正常/停止/报错)，都释放所有残留触摸
     [[TSHIDEventTouch shared] releaseAllTouches];
 
-    @synchronized (self) {
-        _stopRequested = NO;
-    }
+    _stopRequested = NO;
     self.runningPath = nil;
     self.isRunning = NO;
     lua_log(@"[Lua] 脚本执行结束");

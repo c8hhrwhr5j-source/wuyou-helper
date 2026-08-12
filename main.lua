@@ -12,7 +12,7 @@ function main()
             sleep(1000)
         else
             local c = getColor(254, 667)
-            logStr(string.format("颜色 = 0x%06X", c))
+            log("坚屏颜色 "..c)
         end
 
         if getColor(665, 496) == 0xA56D29 then
@@ -21,7 +21,7 @@ function main()
             sleep(1000)
         else
             local c = getColor(665, 496)
-            logStr(string.format("颜色 = 0x%06X", c))
+            log("横屏颜色 "..c)
         end
 
     end
