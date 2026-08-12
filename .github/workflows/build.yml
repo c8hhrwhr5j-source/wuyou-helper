@@ -49,6 +49,11 @@ jobs:
           [ -f "$ICONSET/AppIcon29x29@2x.png" ] || sips -z 58 58 "$SRC" --out "$ICONSET/AppIcon29x29@2x.png" >/dev/null
           [ -f "$ICONSET/AppIcon29x29@3x.png" ] || sips -z 87 87 "$SRC" --out "$ICONSET/AppIcon29x29@3x.png" >/dev/null
           echo "[OK] iconset PNG 就绪"
+          # 打印关键构建设置，便于诊断（如 HEADER_SEARCH_PATHS 未生效时快速发现）
+          echo "[*] 关键构建设置:"
+          xcodebuild -project TrollAutoTouch.xcodeproj -scheme TrollAutoTouch \
+            -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null \
+            | grep -E "HEADER_SEARCH_PATHS|GCC_C_LANGUAGE_STANDARD" || echo "  (未找到设置!)"
           mkdir -p build
           # ENABLE_CHAINED_FIXUPS=NO + -Wl,-no_fixup_chains(已写入 project.yml):
           # 禁用 chained fixups，兼容 Procursus ldid / TrollStore。
@@ -70,6 +75,17 @@ jobs:
             build > /tmp/xcodebuild.log 2>&1; then
             echo "[x] xcodebuild 编译失败，完整日志:"
             tail -80 /tmp/xcodebuild.log
+            # 写入 step summary，无需登录即可在 Actions 页面看到错误明细
+            {
+              echo "## xcodebuild 失败详情"
+              echo ""
+              echo '```'
+              grep -nE "error:|warning:|note:|fatal|file not found|duplicate symbol|Undefined symbols|ld: |clang:" /tmp/xcodebuild.log | tail -60
+              echo ""
+              echo "--- 日志尾部 ---"
+              tail -120 /tmp/xcodebuild.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           tail -5 /tmp/xcodebuild.log

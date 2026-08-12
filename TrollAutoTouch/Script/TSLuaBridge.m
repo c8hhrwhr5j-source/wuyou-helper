@@ -805,6 +805,8 @@ static int l_key_inputText(lua_State *L) {
 
 static void lua_register_all(lua_State *L) {
     // ── 全局函数 ──
+    // luaL_setfuncs 需要把函数写进栈顶的表；这里先压入全局表 _G，写完再弹出。
+    lua_pushglobaltable(L);
     static const luaL_Reg globals[] = {
         {"print",       l_global_print},
         {"logStr",      l_global_logStr},
@@ -828,6 +830,7 @@ static void lua_register_all(lua_State *L) {
         {NULL, NULL}
     };
     luaL_setfuncs(L, globals, 0);
+    lua_pop(L, 1);  // 弹出 _G
 
     // ── touch 模块 ──
     static const luaL_Reg touchLib[] = {
