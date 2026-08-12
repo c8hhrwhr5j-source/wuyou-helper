@@ -29,7 +29,8 @@
 #import <string.h>
 #import "../vendor/lua/lua.h"
 #import "../vendor/lua/lauxlib.h"
-#import "../vendor/lua/lualib.h"#import "TSScreenCapture.h"
+#import "../vendor/lua/lualib.h"
+#import "TSScreenCapture.h"
 #import "TSColorFinder.h"
 #import "TSHIDEventTouch.h"
 #import "TSAppManager.h"
