@@ -179,7 +179,7 @@ keepScreen(false)         -- 释放缓存(画面变化后必须释放并重新�
 ## 6. 系统信息与设备
 
 ```lua
--- 屏幕尺寸
+-- 屏幕尺寸(分辨率): 全局 getScreenSize() / sys.screenSize() / screen.getSize() 等效
 local w, h = getScreenSize()
 logStr(string.format("屏幕 %.0f x %.0f", w, h))
 
@@ -192,6 +192,10 @@ local w2, h2 = sys.screenSize()
 local ip = sys.getIP()                  -- WiFi IP
 local battery = sys.battery()           -- 电量 0~1
 ```
+
+> **注意**：`getScreenSize()` 返回**逻辑分辨率（点）**，如 iPhone 15 Pro Max 为 `430 x 932`，物理像素是 `1290 x 2796`。
+> 本引擎的 `tap` / `findColor` / `getColor` / `swipe` 等全部使用**同一套点坐标**，直接用返回值即可，无需换算。
+> 如需截图文件的物理像素尺寸，可用 `file.readImage(路径)` 返回 `w, h`（该值为像素）。
 
 ---
 
