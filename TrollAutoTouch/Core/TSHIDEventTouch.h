@@ -45,6 +45,10 @@ typedef NS_ENUM(NSInteger, TSTouchPhase) {
 - (void)swipeFromPoint:(CGPoint)from toPoint:(CGPoint)to
               duration:(NSTimeInterval)duration steps:(NSInteger)steps;
 
+/// 释放所有仍处于按下状态的手指(补发 touchUp)。
+/// 用于脚本停止/出错时清理，避免留下"幽灵手指"导致后续真实触摸被系统吞掉。
+- (void)releaseAllTouches;
+
 @end
 
 NS_ASSUME_NONNULL_END

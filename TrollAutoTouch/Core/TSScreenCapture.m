@@ -139,7 +139,9 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
 
         UIView *view = keyWindow;
         UIGraphicsBeginImageContextWithOptions(view.bounds.size, YES, [UIScreen mainScreen].scale);
-        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:YES];
+        // afterScreenUpdates:NO —— 用当前已渲染的内容，不强制等待下一帧，
+        // 避免在屏幕有动画/主线程繁忙时长时间阻塞。
+        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
         img = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
     };

@@ -67,6 +67,10 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
 @interface TSHIDEventTouch ()
 @property (nonatomic, assign) IOHIDEventSystemClientRef client;
+// 当前仍处于按下状态的手指 index 集合，及每个手指的最后位置。
+// 用于 releaseAllTouches 在脚本停止时补发 touchUp，避免幽灵手指。
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *pressedIndexes;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *lastPoints;
 @end
 
 @implementation TSHIDEventTouch
@@ -83,6 +87,8 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _pressedIndexes = [NSMutableSet set];
+        _lastPoints = [NSMutableDictionary dictionary];
         [self _setupClient];
     }
     return self;
@@ -109,6 +115,17 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
                           index:(uint32_t)index
                           phase:(TSTouchPhase)phase {
     if (!_client) { return; }
+
+    // 同步按压状态，供 releaseAllTouches 清理残留触摸
+    @synchronized (self) {
+        if (phase == TSTouchPhaseEnded) {
+            [_pressedIndexes removeObject:@(index)];
+            [_lastPoints removeObjectForKey:@(index)];
+        } else {
+            [_pressedIndexes addObject:@(index)];
+            _lastPoints[@(index)] = [NSValue valueWithCGPoint:point];
+        }
+    }
 
     // 坐标：使用屏幕逻辑点(左上为原点)。
     // 部分机型需按屏幕宽高归一化；此处先按绝对点处理(与 ZXTouch 默认一致)。
@@ -181,6 +198,30 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
 - (void)touchUpAtPoint:(CGPoint)point index:(NSInteger)index {
     [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseEnded];
+}
+
+- (void)releaseAllTouches {
+    // 先快照当前按下的手指及其最后位置，再清空记录，最后逐个补发 touchUp。
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
+    @synchronized (self) {
+        for (NSNumber *idx in [_pressedIndexes allObjects]) {
+            NSValue *v = _lastPoints[idx];
+            CGPoint p = v ? v.CGPointValue : CGPointZero;
+            [items addObject:@{
+                @"index": idx,
+                @"point": [NSValue valueWithCGPoint:p],
+            }];
+        }
+        [_pressedIndexes removeAllObjects];
+        [_lastPoints removeAllObjects];
+    }
+    for (NSDictionary *item in items) {
+        NSNumber *idx = item[@"index"];
+        NSValue *pv = item[@"point"];
+        [self _sendFingerEventAtPoint:pv.CGPointValue
+                                index:idx.unsignedIntValue
+                                phase:TSTouchPhaseEnded];
+    }
 }
 
 - (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration {

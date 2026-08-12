@@ -8,6 +8,16 @@
 
 static const NSUInteger kMaxLogCount = 2000;
 
+// 日志文件写入队列(串行)，避免阻塞主线程
+static dispatch_queue_t LogFileQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.trollautotouch.logfile", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
 @implementation TSLogStore {
     NSMutableArray<NSString *> *_logs;
 }
@@ -71,8 +81,11 @@ static const NSUInteger kMaxLogCount = 2000;
         if (_logs.count > kMaxLogCount) {
             [_logs removeObjectsInRange:NSMakeRange(0, _logs.count - kMaxLogCount)];
         }
-        [self _appendToFile:line];
     }
+    // 文件写入放到后台串行队列，避免主线程被磁盘 I/O 阻塞
+    dispatch_async(LogFileQueue(), ^{
+        [self _appendToFile:line];
+    });
 }
 
 - (void)clear {

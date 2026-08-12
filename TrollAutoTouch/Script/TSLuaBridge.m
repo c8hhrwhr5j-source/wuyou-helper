@@ -148,9 +148,19 @@ static int l_global_toast(lua_State *L) {
 
 static int l_global_mSleep(lua_State *L) {
     double ms = luaL_checknumber(L, 1);
-    if (ms > 0) usleep((useconds_t)(ms * 1000));
-    if (_stopRequested) {
-        luaL_error(L, "脚本已被停止");
+    if (ms > 0) {
+        // 分段睡眠，最多 50ms 检查一次停止标志，保证停止响应迅速
+        double remaining = ms / 1000.0;
+        while (remaining > 0) {
+            double chunk = MIN(remaining, 0.05);
+            usleep((useconds_t)(chunk * 1000000));
+            remaining -= chunk;
+            if (_stopRequested) {
+                return luaL_error(L, "脚本已被停止");
+            }
+        }
+    } else if (_stopRequested) {
+        return luaL_error(L, "脚本已被停止");
     }
     return 0;
 }
@@ -158,9 +168,18 @@ static int l_global_mSleep(lua_State *L) {
 // sleep 是全局延时，供 findColor 等待画面出现用
 static int l_global_sleep(lua_State *L) {
     double sec = luaL_checknumber(L, 1);
-    if (sec > 0) usleep((useconds_t)(sec * 1000000));
-    if (_stopRequested) {
-        luaL_error(L, "脚本已被停止");
+    if (sec > 0) {
+        double remaining = sec;
+        while (remaining > 0) {
+            double chunk = MIN(remaining, 0.05);
+            usleep((useconds_t)(chunk * 1000000));
+            remaining -= chunk;
+            if (_stopRequested) {
+                return luaL_error(L, "脚本已被停止");
+            }
+        }
+    } else if (_stopRequested) {
+        return luaL_error(L, "脚本已被停止");
     }
     return 0;
 }
@@ -454,7 +473,11 @@ static int l_touch_stroke(lua_State *L) {
                                     from.y + (to.y - from.y) * tRatio);
             [t touchMoveAtPoint:p index:0];
             usleep((useconds_t)((total / count / stepsPerSeg) * 1000000));
-            if (_stopRequested) { luaL_error(L, "脚本已被停止"); }
+            if (_stopRequested) {
+                // 先抬手再中断，避免留下按住的触摸导致屏幕无响应
+                [t touchUpAtPoint:p index:0];
+                luaL_error(L, "脚本已被停止");
+            }
         }
     }
     [t touchUpAtPoint:CGPointMake(pts[(count - 1) * 2], pts[(count - 1) * 2 + 1]) index:0];
@@ -1056,6 +1079,8 @@ static void lua_register_all(lua_State *L) {
     @synchronized (self) {
         _stopRequested = YES;
     }
+    // 立即补发所有未抬起的触摸，避免脚本被中断后留下"幽灵手指"导致屏幕点击无响应
+    [[TSHIDEventTouch shared] releaseAllTouches];
     dispatch_async(_luaQueue, ^{
         // 等待当前脚本循环退出后重置标志
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1111,6 +1136,9 @@ static void lua_register_all(lua_State *L) {
         lua_pop(L, 1);
     }
     lua_close(L);
+
+    // 兜底：无论脚本如何结束(正常/停止/报错)，都释放所有残留触摸
+    [[TSHIDEventTouch shared] releaseAllTouches];
 
     @synchronized (self) {
         _stopRequested = NO;

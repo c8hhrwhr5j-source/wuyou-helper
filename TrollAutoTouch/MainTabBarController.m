@@ -101,7 +101,10 @@
 
 - (void)_handleLuaStateNotification:(NSNotification *)note {
     BOOL running = [note.userInfo[@"running"] boolValue];
-    [[TSHUDWindow shared] setScriptRunning:running];
+    // 通知可能来自 Lua 后台线程，派回主线程再更新 UI
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[TSHUDWindow shared] setScriptRunning:running];
+    });
 }
 
 @end
