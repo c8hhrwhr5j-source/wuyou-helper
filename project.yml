@@ -19,7 +19,11 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     ENABLE_BITCODE: NO
     # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications
+    # -Wl,-no_fixup_chains: 禁用 chained fixups（与 ENABLE_CHAINED_FIXUPS=NO 配套），
+    # 兼容 Procursus ldid / TrollStore 注入 entitlements。
+    # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
+    #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -Wl,-no_fixup_chains
 targets:
   TrollAutoTouch:
     type: application

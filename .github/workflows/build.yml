@@ -50,9 +50,12 @@ jobs:
           [ -f "$ICONSET/AppIcon29x29@3x.png" ] || sips -z 87 87 "$SRC" --out "$ICONSET/AppIcon29x29@3x.png" >/dev/null
           echo "[OK] iconset PNG 就绪"
           mkdir -p build
-          # ENABLE_CHAINED_FIXUPS=NO + -no_fixup_chains: 禁用 chained fixups，
-          # 兼容老工具链（双保险，即使 ldid 不是 Procursus 版也能正确处理）
-          xcodebuild -project TrollAutoTouch.xcodeproj \
+          # ENABLE_CHAINED_FIXUPS=NO + -Wl,-no_fixup_chains(已写入 project.yml):
+          # 禁用 chained fixups，兼容 Procursus ldid / TrollStore。
+          # 警告: 不能在这里传 OTHER_LDFLAGS，命令行会整体覆盖 project.yml 中的
+          #       框架链接参数（-framework UIKit ...），导致链接失败！
+          # 日志写入文件，失败时打印完整日志并立即退出（不再被管道吞掉退出码）。
+          if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
             -configuration Release \
             -sdk iphoneos \
@@ -63,9 +66,14 @@ jobs:
             STRIP_INSTALLED_PRODUCT=NO \
             DEAD_CODE_STRIPPING=NO \
             ENABLE_CHAINED_FIXUPS=NO \
-            OTHER_LDFLAGS="-Wl,-no_fixup_chains" \
             -derivedDataPath build/DerivedData \
-            build 2>&1 | tail -20
+            build > /tmp/xcodebuild.log 2>&1; then
+            echo "[x] xcodebuild 编译失败，完整日志:"
+            tail -80 /tmp/xcodebuild.log
+            exit 1
+          fi
+          tail -5 /tmp/xcodebuild.log
+          echo "[OK] xcodebuild 编译成功"
 
       - name: Package IPA
         run: |
@@ -80,6 +88,15 @@ jobs:
           APP_DST="build/Payload/TrollAutoTouch.app"
           BIN="$APP_DST/TrollAutoTouch"
           ENT="$PWD/TrollAutoTouch/TrollAutoTouch.entitlements"
+
+          # 防御: 主二进制必须存在，否则说明 xcodebuild 产物不完整
+          if [ ! -f "$BIN" ]; then
+            echo "[x] 主二进制不存在: $BIN"
+            echo "[*] .app 目录内容:"
+            ls -la "$APP_DST" 2>/dev/null || echo "    (.app 目录都不存在!)"
+            echo "[*] 请查看 Build 步骤日志确认编译是否成功"
+            exit 1
+          fi
 
           echo ""
           echo "=== 架构 ==="
