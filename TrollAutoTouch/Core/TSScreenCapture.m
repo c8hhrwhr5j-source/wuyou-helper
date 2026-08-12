@@ -4,21 +4,23 @@
 //
 //  屏幕截图 —— 对齐原版 TrollAutoScript 的截屏能力。
 //
-//  原版逆向结论(HUDServices 符号级确认):
+//  原版逆向结论(HUDServices + luaLib 符号级确认):
 //   - 完全不用 IOMobileFramebuffer(GetMainDisplay/GetLayerDefaultSurface/GetSurface 均不存在)
+//   - 完全不用 CARenderServerRenderDisplay(该符号在原版中不存在)
 //   - 跨应用截屏链路为:
-//       +[UIWindow windowWithContextId:]  → 绑定系统窗口 context 的远程窗口代理
-//       IOSurfaceCreate(kIOSurface* 键)   → 自建目标 BGRA surface
-//       IOSurfaceAcceleratorCreate + IOSurfaceAcceleratorTransferSurface(accel, src, dst)
-//                                       → 经 WindowServer 侧 GPU 加速器转储屏幕内容
-//       UICreateCGImageFromIOSurface / CVPixelBufferCreateWithIOSurface → CGImage
-//       或 IOSurfaceLock/GetBaseAddress → 直接读像素(找色用)
+//       +[UIWindow windowWithContextId:](部分版本为 _windowWithContextId:)
+//                                       → 绑定主屏 context 的远程窗口代理
+//       [remoteWindow createScreenIOSurface](UIWindow 私有实例方法)
+//                                       → 直接拿到该 context 的渲染输出 IOSurface
+//                                         (无需自行 IOSurfaceCreate, 规避权限问题)
+//       IOSurfaceLock / IOSurfaceGetBaseAddress / IOSurfaceGetBytesPerRow → 直接读像素(找色用)
+//       (HUD 另备 IOSurfaceCreate + IOSurfaceAcceleratorTransferSurface 转储链路)
 //   - 该链路走 WindowServer 渲染管线(依赖 global-capture entitlement), 与 App 自身
 //     前后台状态无关, 因此切换到其他 App 后仍能取到真实屏幕像素。
 //
 //  本类提供四级截屏路径(自动回退):
-//   0. CARenderServerRenderDisplay(主): WindowServer 直接渲染主屏到 IOSurface(TrollShot 验证)
-//   1. 系统窗口路径: [UIWindow windowWithContextId:] + IOSurfaceAccelerator 链路
+//   0. 系统窗口(原版链路首选): windowWithContextId: + createScreenIOSurface
+//   1. CARenderServerRenderDisplay: TrollShot 方案, 保留回退(依赖 IOSurfaceCreate, 可能受限)
 //   2. IOMFB 帧缓冲(回退): 前台场景可用, 后台/其他 App 前台时会拿到空 surface
 //   3. 应用内截屏(兜底): 仅本 App 窗口
 
@@ -427,20 +429,40 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 
 #pragma mark - 跨应用截屏: windowWithContextId 链路(对齐原版 HUD)
 
-/// 动态调用 +[UIWindow windowWithContextId:] 创建绑定系统窗口 context 的远程窗口代理。
+/// 动态调用 windowWithContextId: 系列私有 API 创建绑定主屏/系统 context 的远程窗口代理。
+/// 逆向原版: selector 名因 iOS 版本而异(`windowWithContextId:` / `_windowWithContextId:`),
+/// 所在类也因版本而异(UIWindow 类方法 / UIApplication / UIScreen 实例方法), 全部尝试。
 - (UIWindow *)_remoteWindowWithContextId:(unsigned int)contextId {
-    SEL sel = NSSelectorFromString(@"windowWithContextId:");
-    if (!sel || ![UIWindow respondsToSelector:sel]) { return nil; }
-    NSMethodSignature *sig = [UIWindow methodSignatureForSelector:sel];
-    if (!sig) { return nil; }
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    inv.target = [UIWindow class];
-    inv.selector = sel;
-    [inv setArgument:&contextId atIndex:2];
-    [inv invoke];
-    __unsafe_unretained UIWindow *window = nil;
-    [inv getReturnValue:&window];
-    return window;
+    NSArray<NSString *> *selNames = @[@"windowWithContextId:", @"_windowWithContextId:"];
+    NSArray *targets = @[ [UIWindow class], [UIApplication sharedApplication], [UIScreen mainScreen] ];
+    for (NSString *selName in selNames) {
+        SEL sel = NSSelectorFromString(selName);
+        if (!sel) { continue; }
+        for (id target in targets) {
+            if (!target) { continue; }
+            // respondsToSelector 对类对象检查类方法、实例对象检查实例方法, 语义正确
+            if (![target respondsToSelector:sel]) { continue; }
+            NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+            if (!sig || sig.methodReturnLength < sizeof(void *)) { continue; }
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            inv.target = target;
+            inv.selector = sel;
+            [inv setArgument:&contextId atIndex:2];
+            @try {
+                [inv invoke];
+                __unsafe_unretained UIWindow *window = nil;
+                [inv getReturnValue:&window];
+                if (window) {
+                    NSLog(@"[TSScreenCapture] 远程窗口创建成功 sel=%@ target=%@ contextId=%u",
+                          selName, NSStringFromClass([target class]), contextId);
+                    return window;
+                }
+            } @catch (NSException *e) {
+                NSLog(@"[TSScreenCapture] %@ 调用异常: %@", selName, e);
+            }
+        }
+    }
+    return nil;
 }
 
 /// 获取主屏(contextId=0 表示主屏; 个别版本可从 UIScreen._contextId 读到)。
@@ -456,15 +478,39 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     return 0;
 }
 
-/// 从远程窗口的 layer 多级尝试提取 source IOSurface。
-/// 原版截屏核心: 窗口/合成 context 的 IOSurface 经 global-capture entitlement
-/// 在 WindowServer 侧读取, 不依赖 App 自身前后台状态, 因此其他 App 前台时也能取到。
+/// 从远程窗口提取 source IOSurface。
+/// 原版截屏核心(luaLib 符号确认): [window createScreenIOSurface] 返回窗口/绑定 context
+/// 的渲染输出 IOSurface, 无需自行 IOSurfaceCreate; 后续 layer.contents/CAContext._surface
+/// 仅为不同 iOS 版本的兜底。
 - (IOSurfaceRef)_sourceSurfaceFromWindow:(UIWindow *)window {
     if (!window || !_iosurfaceHandle) { return NULL; }
-    CALayer *layer = window.layer;
-    if (!layer) { return NULL; }
     IOSurfaceGetTypeIDFunc typeIdFn = (IOSurfaceGetTypeIDFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetTypeID");
     if (!typeIdFn) { return NULL; }
+
+    // 尝试 0: [window createScreenIOSurface](原版调用, 返回渲染输出 IOSurface)
+    SEL csis = NSSelectorFromString(@"createScreenIOSurface");
+    if (csis && [window respondsToSelector:csis]) {
+        NSMethodSignature *sig = [window methodSignatureForSelector:csis];
+        if (sig && sig.methodReturnLength >= sizeof(void *)) {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            inv.target = window;
+            inv.selector = csis;
+            @try {
+                [inv invoke];
+                __unsafe_unretained IOSurfaceRef ios = NULL;
+                [inv getReturnValue:&ios];
+                if (ios && CFGetTypeID(ios) == typeIdFn()) {
+                    NSLog(@"[TSScreenCapture] createScreenIOSurface 获取 IOSurface 成功");
+                    return ios;
+                }
+            } @catch (NSException *e) {
+                NSLog(@"[TSScreenCapture] createScreenIOSurface 异常: %@", e);
+            }
+        }
+    }
+
+    CALayer *layer = window.layer;
+    if (!layer) { return NULL; }
 
     // 尝试 1: layer.contents 直接是 IOSurface(远程 layer 部分版本直接暴露)
     @try {
@@ -566,8 +612,8 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     unsigned int contextId = [self _mainScreenContextId];
     UIWindow *remoteWindow = [self _remoteWindowWithContextId:contextId];
     if (!remoteWindow) {
-        TSSetLastError(@"路径1 系统窗口: windowWithContextId: 不可用(当前 iOS 版本不支持)");
-        NSLog(@"[TSScreenCapture] windowWithContextId: 不可用(当前 iOS 版本不支持)");
+        TSSetLastError(@"路径1 系统窗口: windowWithContextId: 系列均不可用(contextId=%u)");
+        NSLog(@"[TSScreenCapture] windowWithContextId: 系列均不可用 contextId=%u", contextId);
         return NO;
     }
     // 对齐原版 HUD 窗口属性: 标记为系统窗口 + WindowServer 托管
@@ -716,13 +762,13 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
-    // 0. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 验证, 后台/跨应用首选)
-    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 0. 系统窗口截屏(原版链路首选: windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
+    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err0 = [self.lastError copy];
-    // 1. 系统窗口截屏(对齐原版: 可截任意 App, 含其他 App 前台/后台场景)
-    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 1. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 方案, 保留回退)
+    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err1 = [self.lastError copy];
