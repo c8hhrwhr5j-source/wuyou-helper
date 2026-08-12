@@ -34,9 +34,18 @@ targets:
         excludes:
           - "SceneDelegate.*"
           - "Resources/demo.script"
+          - "Resources/demo.lua"
           - "Resources/lua/**"
+      - path: TrollAutoTouch/vendor/lua
+        excludes:
+          - "lua.c"    # 独立解释器程序, 不需要编译进 App
+          - "luac.c"   # 独立编译器程序, 不需要编译进 App
+        # 头文件搜索路径: 使 TSLuaBridge.m 能 #import "lua.h"
+        headerVisibility: public
+        createIntermediateGroups: true
     resources:
       - path: TrollAutoTouch/Resources/demo.script
+      - path: TrollAutoTouch/Resources/demo.lua
       - path: TrollAutoTouch/Assets.xcassets
         optional: true
       - path: TrollAutoTouch/Resources/lua
@@ -72,3 +81,7 @@ targets:
         PRODUCT_NAME: TrollAutoTouch
         # 让 dyld 在主二进制内解析私有框架符号
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"
+        # Lua 5.4 头文件搜索路径
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/TrollAutoTouch/vendor/lua"
+        # Lua 编译为标准 C99，禁用自动 ARC(纯 C 无影响但更稳)
+        GCC_C_LANGUAGE_STANDARD: gnu99

@@ -20,6 +20,7 @@
 #import "TSDaemonManager.h"
 #import "TSColorFinder.h"
 #import "TSToolExecutor.h"
+#import "TSLuaBridge.h"
 
 @interface ViewController () <TSLogDelegate, TSWebControlDelegate>
 @property (nonatomic, strong) UITextView *logView;
@@ -60,6 +61,7 @@
         @"OCR 识别",      @"OCR 点击",
         @"设备信息",      @"磁盘信息",
         @"运行 demo",    @"停止脚本",
+        @"运行 Lua",     @"停止 Lua",
         @"显示 HUD",     @"隐藏 HUD",
         @"启动守护",     @"Shell 执行",
     ];
@@ -115,10 +117,12 @@
         case 9:  [self _showDiskInfo]; break;
         case 10: [self _runScript]; break;
         case 11: [self _stopScript]; break;
-        case 12: [[TSHUDWindow shared] show]; break;
-        case 13: [[TSHUDWindow shared] hide]; break;
-        case 14: [self _startDaemon]; break;
-        case 15: [self _testShell]; break;
+        case 12: [self _runLuaScript]; break;
+        case 13: [self _stopLuaScript]; break;
+        case 14: [[TSHUDWindow shared] show]; break;
+        case 15: [[TSHUDWindow shared] hide]; break;
+        case 16: [self _startDaemon]; break;
+        case 17: [self _testShell]; break;
     }
 }
 
@@ -270,6 +274,36 @@
     [[TSScriptEngine shared] stop];
     [[TSHUDWindow shared] setScriptRunning:NO];
     [self _log:@"已停止脚本"];
+}
+
+#pragma mark - Lua 脚本
+
+- (void)_runLuaScript {
+    __weak typeof(self) ws = self;
+    [TSLuaBridge shared].logHandler = ^(NSString *msg) {
+        [ws _log:msg];
+    };
+
+    // 优先运行 Documents/demo.lua(用户可编辑)，否则用 Bundle 内置 demo.lua
+    NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
+                         stringByAppendingPathComponent:@"demo.lua"];
+    NSString *path = nil;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:docPath]) {
+        path = docPath;
+    } else {
+        path = [[NSBundle mainBundle] pathForResource:@"demo" ofType:@"lua"];
+    }
+    if (path) {
+        [[TSLuaBridge shared] runFile:path];
+        [self _log:[NSString stringWithFormat:@"[Lua] 启动脚本: %@", path]];
+    } else {
+        [self _log:@"[Lua] 未找到 demo.lua，请先添加脚本"];
+    }
+}
+
+- (void)_stopLuaScript {
+    [[TSLuaBridge shared] stop];
+    [self _log:@"[Lua] 已请求停止"];
 }
 
 - (void)_startServer {
