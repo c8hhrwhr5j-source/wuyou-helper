@@ -94,7 +94,7 @@ jobs:
               git config user.email "ci-bot@users.noreply.github.com"
               cp /tmp/xcodebuild.log ./ci-error.log
               git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
-              git add ci-error.log
+              git add -f ci-error.log
               git commit -m "ci: save xcodebuild log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
               git push origin ci-debug --force
             } >/dev/null 2>&1 && echo "[i] 完整日志已推送到 ci-debug 分支" || echo "[i] 日志推送失败(忽略)"
