@@ -349,7 +349,8 @@ static int l_screen_getColor(lua_State *L) {
     if (!grabScreen(&px, &w, &h)) {
         // 截屏失败时不返回 nil，否则脚本里 string.format("0x%06X", c) 会因 nil 崩溃。
         // 返回 0(黑色) 并记录日志，让脚本能继续跑、用户能看到取色异常。
-        // 常见原因: 切到别的 App 后帧缓冲截屏不可用(见设置页日志中 [TSScreenCapture] 条目)。
+        // 常见原因: 三级截屏路径(windowWithContextId / IOMFB / 应用内)均失败，
+        // 见设置页日志中的 [TSScreenCapture] 条目定位具体原因。
         lua_log(@"getColor 截屏失败，返回 0x000000(查看设置页日志中的 [TSScreenCapture] 定位原因)");
         lua_pushinteger(L, 0);
         return 1;

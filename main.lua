@@ -46,6 +46,7 @@ function appsl()
     if bid ~= APP then
         log("前台应用非热血传奇，切换到热血传奇")
         app.open(APP)
+        sleep(2000)
     end
 end
 
