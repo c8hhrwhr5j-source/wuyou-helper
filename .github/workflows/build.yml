@@ -118,12 +118,17 @@ jobs:
           echo "=== 注入 entitlements ==="
           echo "[*] ldid 版本: $(ldid -V 2>&1 | head -1 || echo unknown)"
           echo "[*] entitlements 文件: $ENT"
-          test -f "$ENT" || { echo "[x] entitlements 文件不存在!"; exit 1; }
 
-          # 1) 规范化: 消除 BOM/CRLF/编码问题, 统一为标准 LF XML plist
-          plutil -convert xml1 -o /tmp/ent.xml "$ENT" || { echo "[x] plutil 转换失败, 停止打包"; exit 1; }
-          plutil -lint /tmp/ent.xml >/dev/null || { echo "[x] 规范化后的 plist 非法, 停止打包"; exit 1; }
-          echo "[OK] entitlements 已规范化为 /tmp/ent.xml ($(wc -c < /tmp/ent.xml) bytes)"
+          # 1) 防御: CI 上 checkout 出来的 entitlements 文件曾多次被破坏
+          #    (内容变为 181 字节的空 dict plist, 注入后验证为 0 键)。
+          #    因此不从工作区文件读取, 而是直接从 git 对象库强制恢复原始字节,
+          #    完全绕过 checkout/文件系统可能引入的任何问题。
+          echo "[*] checkout 后 $ENT 大小: $(wc -c < "$ENT" 2>/dev/null || echo 缺失)"
+          shasum -a 256 "$ENT" 2>/dev/null || true
+          git show HEAD:TrollAutoTouch/TrollAutoTouch.entitlements > /tmp/ent.xml 2>/tmp/gitshow.log || { echo "[x] git show 恢复失败:"; cat /tmp/gitshow.log; exit 1; }
+          echo "[*] git 对象恢复大小: $(wc -c < /tmp/ent.xml) bytes"
+          plutil -lint /tmp/ent.xml >/dev/null || { echo "[x] git 中的 entitlements 非法, 停止打包"; exit 1; }
+          echo "[OK] entitlements 已从 git 对象恢复并通过 plutil 校验"
 
           # 2) 诊断: 二进制是否带 chained fixups load command
           echo "[*] 二进制签名结构:"
