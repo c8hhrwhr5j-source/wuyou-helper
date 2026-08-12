@@ -359,7 +359,7 @@ static const char *_gsSurfaceKeys[] = {
     }
 
     for (int i = 0; _gsServiceNames[i]; i++) {
-        io_service_t service = IOServiceGetMatchingService(kIOMasterPortDefault,
+        io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault,
                                                            IOServiceMatching(_gsServiceNames[i]));
         if (service == MACH_PORT_NULL) { continue; }
 
@@ -744,7 +744,7 @@ static const char *_gsSurfaceKeys[] = {
     unsigned int contextId = [self _mainScreenContextId];
     UIWindow *remoteWindow = [self _remoteWindowWithContextId:contextId];
     if (!remoteWindow) {
-        TSSetLastError(@"路径1 系统窗口: windowWithContextId: 系列均不可用(contextId=%u)");
+        TSSetLastError(@"路径1 系统窗口: windowWithContextId: 系列均不可用(contextId=%u)", contextId);
         NSLog(@"[TSScreenCapture] windowWithContextId: 系列均不可用 contextId=%u", contextId);
         return NO;
     }
