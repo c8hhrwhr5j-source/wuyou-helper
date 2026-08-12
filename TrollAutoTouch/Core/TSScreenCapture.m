@@ -128,11 +128,15 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
             size_t (*alignPropFn)(CFStringRef, size_t) = dlsym(_iosurfaceHandle, "IOSurfaceAlignProperty");
             size_t bytesPerRow = alignPropFn ? alignPropFn(CFSTR("BytesPerRow"), srcW * 4) : srcW * 4;
             size_t allocSize = bytesPerRow * srcH;
-            CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &srcW);
-            CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &srcH);
+            // 数值统一 32 位 SInt32(与 TrollShot @(int) 一致):
+            // IOSurfaceCreate 对 CFNumber 字节宽度敏感, 用 64 位 long 会导致属性解析失败返回 NULL
+            int wl = (int)srcW, hl = (int)srcH;
+            int bprl = (int)bytesPerRow, allocl = (int)allocSize;
+            CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &wl);
+            CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &hl);
             CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
-            CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &bytesPerRow);
-            CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &allocSize);
+            CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bprl);
+            CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &allocl);
             // 键名与原版 kIOSurface* 常量对应的字符串字面值一致
             CFDictionarySetValue(props, CFSTR("Width"), wNum);
             CFDictionarySetValue(props, CFSTR("Height"), hNum);
@@ -313,12 +317,14 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     if (!props) { return NULL; }
-    long wl = w, hl = h, bprl = (long)bytesPerRow, allocl = (long)allocSize;
-    CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &wl);
-    CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &hl);
+    // 数值统一 32 位 SInt32(与 TrollShot @(int) 一致):
+    // IOSurfaceCreate 对 CFNumber 字节宽度敏感, 用 64 位 long 会导致属性解析失败返回 NULL
+    int wl = w, hl = h, bprl = (int)bytesPerRow, allocl = (int)allocSize;
+    CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &wl);
+    CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &hl);
     CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
-    CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &bprl);
-    CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &allocl);
+    CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bprl);
+    CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &allocl);
     CFDictionarySetValue(props, CFSTR("Width"), wNum);
     CFDictionarySetValue(props, CFSTR("Height"), hNum);
     CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
