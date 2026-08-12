@@ -345,27 +345,66 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         return NO;
     }
 
-    // createScreenIOSurface 必须在主线程调用(UIScreen 相关操作), 非主线程时异步派发 + 超时
+    // createScreenIOSurface 必须在主线程调用(UIScreen/UIWindow 相关操作), 非主线程时异步派发 + 超时
     __block IOSurfaceRef surf = NULL;
+    __block NSString *lastTry = @"未尝试";
     void (^getSurfaceBlock)(void) = ^{
         @autoreleasepool {
-            UIScreen *screen = [UIScreen mainScreen];
             SEL sel = NSSelectorFromString(@"createScreenIOSurface");
-            if (!sel || ![screen respondsToSelector:sel]) { return; }
-            NSMethodSignature *sig = [screen methodSignatureForSelector:sel];
-            if (!sig || sig.methodReturnLength < sizeof(void *)) { return; }
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            inv.target = screen;
-            inv.selector = sel;
+            if (!sel) { lastTry = @"selector 创建失败"; return; }
+
+            // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
+            // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
+            // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
+            // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
+            NSMutableArray *candidates = [NSMutableArray array];
+            [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](逆向+社区首选)
+            [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](个别版本)
+            [candidates addObject:[UIScreen mainScreen]];                 // -[UIScreen createScreenIOSurface](旧版代码路径)
             @try {
-                [inv invoke];
-                __unsafe_unretained id result = nil;
-                [inv getReturnValue:&result];
-                if (result && CFGetTypeID((__bridge CFTypeRef)result) == typeIdFn()) {
-                    surf = (__bridge IOSurfaceRef)result;
+                UIApplication *app = [UIApplication sharedApplication];
+                if (app) {
+                    UIWindow *kw = [app valueForKey:@"keyWindow"];
+                    if (kw) { [candidates addObject:kw]; }                // -[keyWindow createScreenIOSurface]
+                    NSArray *wins = [app valueForKey:@"windows"];
+                    for (UIWindow *w in wins) {
+                        if (w && w != kw) { [candidates addObject:w]; }
+                    }
                 }
             } @catch (NSException *e) {
-                NSLog(@"[TSScreenCapture] createScreenIOSurface 异常: %@", e);
+                NSLog(@"[TSScreenCapture] 枚举窗口候选异常: %@", e);
+            }
+
+            for (id target in candidates) {
+                NSString *targetDesc = NSStringFromClass([target class]);
+                if (!target) { continue; }
+                @try {
+                    if (![target respondsToSelector:sel]) {
+                        NSLog(@"[TSScreenCapture] 候选 %@ 无 createScreenIOSurface", targetDesc);
+                        continue;
+                    }
+                    NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+                    if (!sig || sig.methodReturnLength < sizeof(void *)) {
+                        NSLog(@"[TSScreenCapture] 候选 %@ 签名异常", targetDesc);
+                        continue;
+                    }
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    inv.target = target;
+                    inv.selector = sel;
+                    [inv invoke];
+                    __unsafe_unretained IOSurfaceRef ios = NULL;
+                    [inv getReturnValue:&ios];
+                    if (ios && CFGetTypeID(ios) == typeIdFn()) {
+                        lastTry = targetDesc;
+                        surf = ios;
+                        NSLog(@"[TSScreenCapture] 候选 %@ createScreenIOSurface 返回 IOSurface %p", targetDesc, ios);
+                        break;
+                    } else {
+                        NSLog(@"[TSScreenCapture] 候选 %@ 返回空/非 IOSurface(%p)", targetDesc, ios);
+                    }
+                } @catch (NSException *e) {
+                    NSLog(@"[TSScreenCapture] 候选 %@ createScreenIOSurface 异常: %@", targetDesc, e);
+                }
             }
         }
     };
@@ -383,8 +422,8 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         }
     }
     if (!surf) {
-        TSSetLastError(@"路径0 UIScreenSurface: createScreenIOSurface 未返回 IOSurface(需 iOS12+ 且 TrollStore 全权限环境)");
-        NSLog(@"[TSScreenCapture] UIScreen createScreenIOSurface 不可用或未返回 surface");
+        TSSetLastError(@"路径0 UIScreenSurface: 全部候选均未返回 IOSurface(最后: %@, 需 iOS12+ 且 TrollStore 全权限环境)", lastTry);
+        NSLog(@"[TSScreenCapture] 全部候选均未返回 IOSurface (最后尝试: %@)", lastTry);
         return NO;
     }
 
@@ -395,11 +434,11 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     }
     if ([self _isAllZeroPixels:px width:w height:h]) {
         TSSetLastError(@"路径0 UIScreenSurface: 截到空内容(全 0)");
-        NSLog(@"[TSScreenCapture] UIScreen createScreenIOSurface 截到空内容");
+        NSLog(@"[TSScreenCapture] createScreenIOSurface(候选 %@) 截到空内容", lastTry);
         free(px);
         return NO;
     }
-    NSLog(@"[TSScreenCapture] UIScreen createScreenIOSurface 截屏成功 %dx%d", w, h);
+    NSLog(@"[TSScreenCapture] createScreenIOSurface(候选 %@) 截屏成功 %dx%d", lastTry, w, h);
     self.lastError = nil;
     *pixelsOut = px; *widthOut = w; *heightOut = h;
     return YES;
