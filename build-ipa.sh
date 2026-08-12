@@ -19,6 +19,40 @@ PAYLOAD="$BUILD_DIR/Payload"
 mkdir -p "$PAYLOAD"
 MODE="${1:-help}"
 
+# 验证注入结果中的关键权限键是否齐全
+# 缺失任何一个都说明注入失败，直接报错退出（避免产出"阉割版" IPA）
+verify_entitlements() {
+  local app="$1"
+  local bin="$app/TrollAutoTouch"
+  echo "[*] 验证注入结果..."
+  if ! command -v ldid >/dev/null 2>&1; then
+    echo "[x] 找不到 ldid，无法验证。请先安装: brew install ldid"
+    exit 1
+  fi
+  local extracted
+  extracted="$(ldid -e "$bin" 2>/dev/null || true)"
+  local required=(
+    "com.apple.private.security.no-sandbox"
+    "platform-application"
+    "com.apple.private.tcc.allow"
+    "keychain-access-groups"
+    "com.apple.private.security.container-manager"
+  )
+  local missing=()
+  for k in "${required[@]}"; do
+    if ! printf '%s' "$extracted" | grep -q "$k"; then
+      missing+=("$k")
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "[x] entitlements 注入失败，缺失以下关键权限:"
+    printf '    - %s\n' "${missing[@]}"
+    echo "    请检查: 1) ldid 是否可用 (brew install ldid)  2) TrollAutoTouch.entitlements 文件内容"
+    exit 1
+  fi
+  echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container 全部就位)"
+}
+
 sign_copy_entitlements() {
   local app="$1"
   echo "[*] 注入 entitlements 到 $app"
@@ -26,8 +60,11 @@ sign_copy_entitlements() {
   if command -v ldid >/dev/null 2>&1; then
     ldid -S"$ROOT/TrollAutoTouch/TrollAutoTouch.entitlements" "$app/TrollAutoTouch"
   else
-    echo "[!] 未找到 ldid，跳过权限注入。请用 TrollStore 的 ldid 或在 macOS 上 brew install ldid 后重试。"
+    echo "[x] 未找到 ldid，无法注入 entitlements！"
+    echo "    请安装: brew install ldid  (或从 TrollStore 官方仓库获取 ldid)"
+    exit 1
   fi
+  verify_entitlements "$app"
 }
 
 # ── 图标生成：把缺失的 PNG 同步补到 Assets.xcassets 并放到 .app 根目录 ──
