@@ -32,16 +32,28 @@ typedef NS_ENUM(NSInteger, TSTouchPhase) {
 
 + (instancetype)shared;
 
-/// 在 (x,y) 处按下第 index 个手指 (index 从 0 起)
-- (void)touchDownAtPoint:(CGPoint)point index:(NSInteger)index;
+/// 在 (x,y) 处按下第 index 个手指 (index 从 0 起)。
+/// pressure=压力(0~1 通常, 可大于 1 模拟重按), radius=触摸半径(毫米, 0 用默认 4.5)。
+- (void)touchDownAtPoint:(CGPoint)point index:(NSInteger)index
+                pressure:(CGFloat)pressure radius:(CGFloat)radius;
 /// 移动第 index 个手指到 (x,y)
-- (void)touchMoveAtPoint:(CGPoint)point index:(NSInteger)index;
+- (void)touchMoveAtPoint:(CGPoint)point index:(NSInteger)index
+                pressure:(CGFloat)pressure radius:(CGFloat)radius;
 /// 抬起第 index 个手指
 - (void)touchUpAtPoint:(CGPoint)point index:(NSInteger)index;
 
-/// 高层: 在 (x,y) 点击。pressDuration=按下到抬起的时长(秒)。
-- (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration;
+/// 高层: 在 (x,y) 点击。pressDuration=按下到抬起的时长(秒), pressure/radius 同上。
+- (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration
+          pressure:(CGFloat)pressure radius:(CGFloat)radius;
 /// 高层: 从 from 滑动到 to，duration=总时长，steps=中间采样点数。
+- (void)swipeFromPoint:(CGPoint)from toPoint:(CGPoint)to
+              duration:(NSTimeInterval)duration steps:(NSInteger)steps
+              pressure:(CGFloat)pressure radius:(CGFloat)radius;
+
+// ---- 便捷封装(默认压力 1.0 / 半径自动) ----
+- (void)touchDownAtPoint:(CGPoint)point index:(NSInteger)index;
+- (void)touchMoveAtPoint:(CGPoint)point index:(NSInteger)index;
+- (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration;
 - (void)swipeFromPoint:(CGPoint)from toPoint:(CGPoint)to
               duration:(NSTimeInterval)duration steps:(NSInteger)steps;
 

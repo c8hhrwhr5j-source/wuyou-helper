@@ -439,9 +439,15 @@ static int l_screen_keepScreen(lua_State *L) {
 static int l_touch_tap(lua_State *L) {
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
-    NSTimeInterval dur = (NSTimeInterval)luaL_optnumber(L, 3, 0.05);
+    // 第 3 参: 抬起时间(毫秒), 与文档 touch.tap(x,y,抬起ms) 一致; 默认 50ms
+    NSTimeInterval dur = (NSTimeInterval)luaL_optnumber(L, 3, 50) / 1000.0;
+    // 第 4 参: 压力 (默认 1); 第 5 参: 触摸半径等级/毫米 (默认 0=自动 4.5)
+    CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
+    CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    [[TSHIDEventTouch shared] tapAtPoint:CGPointMake(x / sc, y / sc) duration:dur];
+    [[TSHIDEventTouch shared] tapAtPoint:CGPointMake(x / sc, y / sc)
+                                 duration:dur
+                                 pressure:pressure radius:radius];
     return 0;
 }
 
@@ -449,8 +455,11 @@ static int l_touch_down(lua_State *L) {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
+    CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
+    CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    [[TSHIDEventTouch shared] touchDownAtPoint:CGPointMake(x / sc, y / sc) index:index];
+    [[TSHIDEventTouch shared] touchDownAtPoint:CGPointMake(x / sc, y / sc) index:index
+                                      pressure:pressure radius:radius];
     return 0;
 }
 
@@ -458,8 +467,11 @@ static int l_touch_move(lua_State *L) {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
+    CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
+    CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    [[TSHIDEventTouch shared] touchMoveAtPoint:CGPointMake(x / sc, y / sc) index:index];
+    [[TSHIDEventTouch shared] touchMoveAtPoint:CGPointMake(x / sc, y / sc) index:index
+                                      pressure:pressure radius:radius];
     return 0;
 }
 
@@ -479,10 +491,13 @@ static int l_touch_swipe(lua_State *L) {
     CGFloat y2 = (CGFloat)luaL_checknumber(L, 4);
     NSTimeInterval dur = (NSTimeInterval)luaL_optnumber(L, 5, 0.3);
     NSInteger steps = (NSInteger)luaL_optinteger(L, 6, 20);
+    CGFloat pressure = (CGFloat)luaL_optnumber(L, 7, 1.0);
+    CGFloat radius   = (CGFloat)luaL_optnumber(L, 8, 0);
     CGFloat sc = touchScale();
     [[TSHIDEventTouch shared] swipeFromPoint:CGPointMake(x1 / sc, y1 / sc)
                                      toPoint:CGPointMake(x2 / sc, y2 / sc)
-                                    duration:dur steps:steps];
+                                    duration:dur steps:steps
+                                    pressure:pressure radius:radius];
     return 0;
 }
 
@@ -506,7 +521,9 @@ static int l_touch_stroke(lua_State *L) {
     }
 
     TSHIDEventTouch *t = [TSHIDEventTouch shared];
-    [t touchDownAtPoint:CGPointMake(pts[0], pts[1]) index:0];
+    CGFloat pressure = (CGFloat)luaL_optnumber(L, 3, 1.0);
+    CGFloat radius   = (CGFloat)luaL_optnumber(L, 4, 0);
+    [t touchDownAtPoint:CGPointMake(pts[0], pts[1]) index:0 pressure:pressure radius:radius];
     int stepsPerSeg = 10;
     for (int i = 1; i < count; i++) {
         CGPoint from = CGPointMake(pts[(i - 1) * 2], pts[(i - 1) * 2 + 1]);
@@ -515,7 +532,7 @@ static int l_touch_stroke(lua_State *L) {
             CGFloat tRatio = (CGFloat)s / stepsPerSeg;
             CGPoint p = CGPointMake(from.x + (to.x - from.x) * tRatio,
                                     from.y + (to.y - from.y) * tRatio);
-            [t touchMoveAtPoint:p index:0];
+            [t touchMoveAtPoint:p index:0 pressure:pressure radius:radius];
             usleep((useconds_t)((total / count / stepsPerSeg) * 1000000));
             if (_stopRequested) {
                 // 先抬手再中断，避免留下按住的触摸导致屏幕无响应

@@ -4,7 +4,7 @@
 //
 //  IOHIDEvent 系统级触摸注入实现。
 //
-//  逆向依据: 原 TrollAutoScript 的 HUDServices 二进制中提取到如下符号:
+//  逆向依据: 原 TrollAutoScript 的 luaLib 二进制中提取到如下触摸注入符号:
 //    _IOHIDEventSystemClientCreate
 //    _IOHIDEventSystemClientDispatchEvent
 //    _IOHIDEventSystemClientScheduleWithRunLoop
@@ -12,7 +12,12 @@
 //    _IOHIDEventCreateDigitizerFingerEventWithQuality
 //    _IOHIDEventAppendEvent
 //    _IOHIDEventSetSenderID
-//  且链接 BackBoardServices / FrontBoard 私有框架。本实现复刻该路径。
+//    _IOHIDEventSetFloatValue              (压力/半径 显式写入)
+//    _IOHIDEventSetFloatValueWithOptions
+//    _IOHIDEventSetIntegerValueWithOptions (eventMask/range/touch 显式写入)
+//  原版触摸方法: luaTouch - touchWithFingerPosX:posY:finger:pressure:
+//    + initWithPoint:press:radius: / setPressure: (压力、触摸半径必设)。
+//  本实现复刻该路径, 且坐标按 HID digitizer 要求归一化到 0.0~1.0。
 //
 //  注意: 这些是 IOKit 私有/未公开 C 接口，其参数签名随 iOS 版本略有差异。
 //  下面采用的声明是 ZXTouch / SimulateTouch 等开源项目长期验证过的版本，
@@ -63,6 +68,37 @@ extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
 extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, IOHIDEventOptionBits options);
 extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
+// 原版 luaLib 额外链接的字段设置接口 —— 压力/质量/密度/半径 必须显式写入，
+// 否则 backboardd 会因缺省字段把事件当作无效触摸丢弃 (逆向结论)。
+extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, IOHIDFloat value);
+extern void IOHIDEventSetFloatValueWithOptions(IOHIDEventRef event, uint32_t field, IOHIDFloat value, IOHIDEventOptionBits options);
+extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t field, int64_t value, IOHIDEventOptionBits options);
+
+// ---------- IOHIDEventField 数字位字段常量 (IOKit 私有头 IOHIDEventTypes.h) ----------
+// 位 20-31: 类别, 低 16 位: 字段序号。digitizer 类别 = 0x000b。
+#define kIOHIDEventFieldDigitizerX             0x000b0001
+#define kIOHIDEventFieldDigitizerY             0x000b0002
+#define kIOHIDEventFieldDigitizerZ             0x000b0003
+#define kIOHIDEventFieldDigitizerButtonMask    0x000b0003
+#define kIOHIDEventFieldDigitizerType          0x000b0004
+#define kIOHIDEventFieldDigitizerIndex         0x000b0005
+#define kIOHIDEventFieldDigitizerIdentity      0x000b0006
+#define kIOHIDEventFieldDigitizerEventMask     0x000b0007
+#define kIOHIDEventFieldDigitizerRange         0x000b0008
+#define kIOHIDEventFieldDigitizerTouch         0x000b0009
+#define kIOHIDEventFieldDigitizerPressure      0x000b000a
+#define kIOHIDEventFieldDigitizerAuxiliaryPressure 0x000b000b
+#define kIOHIDEventFieldDigitizerTwist         0x000b000c
+#define kIOHIDEventFieldDigitizerTiltX         0x000b000d
+#define kIOHIDEventFieldDigitizerTiltY         0x000b000e
+#define kIOHIDEventFieldDigitizerAltitude      0x000b000f
+#define kIOHIDEventFieldDigitizerAzimuth       0x000b0010
+#define kIOHIDEventFieldDigitizerQuality       0x000b0011
+#define kIOHIDEventFieldDigitizerDensity       0x000b0012
+#define kIOHIDEventFieldDigitizerIrregularity  0x000b0013
+#define kIOHIDEventFieldDigitizerMajorRadius   0x000b0014
+#define kIOHIDEventFieldDigitizerMinorRadius   0x000b0015
+
 // ---------- 实现 ----------
 
 @interface TSHIDEventTouch ()
@@ -110,10 +146,13 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     return [UIScreen mainScreen].bounds.size;
 }
 
-/// 构造并发送一次手指 HID 事件
+/// 构造并发送一次手指 HID 事件。
+/// pressure=压力(0~1 通常), radius=触摸半径(毫米, 0 用默认 4.5)。
 - (void)_sendFingerEventAtPoint:(CGPoint)point
                           index:(uint32_t)index
-                          phase:(TSTouchPhase)phase {
+                          phase:(TSTouchPhase)phase
+                       pressure:(CGFloat)pressure
+                         radius:(CGFloat)radius {
     if (!_client) { return; }
 
     // 同步按压状态，供 releaseAllTouches 清理残留触摸
@@ -127,10 +166,11 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
         }
     }
 
-    // 坐标：使用屏幕逻辑点(左上为原点)。
-    // 部分机型需按屏幕宽高归一化；此处先按绝对点处理(与 ZXTouch 默认一致)。
-    IOHIDFloat x = (IOHIDFloat)point.x;
-    IOHIDFloat y = (IOHIDFloat)point.y;
+    // 坐标：HID digitizer 事件使用 0.0~1.0 归一化坐标 (逆向 iosre/SimulateTouch 确认)，
+    // 逻辑点必须先除以屏幕 bounds 宽高，否则 backboardd 会把事件丢弃/坐标溢出。
+    CGSize screenBounds = [UIScreen mainScreen].bounds.size;
+    IOHIDFloat x = (screenBounds.width  > 0) ? (IOHIDFloat)(point.x / screenBounds.width)  : 0;
+    IOHIDFloat y = (screenBounds.height > 0) ? (IOHIDFloat)(point.y / screenBounds.height) : 0;
 
     Boolean range, touch;
     uint32_t mask;
@@ -148,11 +188,12 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     }
 
     uint64_t timeStamp = mach_absolute_time();
-    float pressure = (phase == TSTouchPhaseEnded) ? 0.0f : 1.0f;
-    float quality  = 1.0f;
-    float density  = 1.0f;
-    float twist    = 0.0f;
-    float z        = 0.0f;
+    float p = (phase == TSTouchPhaseEnded) ? 0.0f : (float)pressure;
+    float q = 1.0f;                       // quality
+    float d = 1.0f;                       // density
+    float r = (radius > 0) ? (float)radius : 4.5f;  // major/minor radius (mm)
+    float twist = 0.0f;
+    float z = 0.0f;
 
     // 1) 父事件: 数位板(digitizer)事件
     IOHIDEventRef digitizer = IOHIDEventCreateDigitizerEvent(
@@ -162,7 +203,7 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
         /*index*/    index,
         /*identity*/ index,
         /*mask*/     mask,
-        x, y, z, pressure,
+        x, y, z, p,
         range, touch, 0);
     if (!digitizer) { return; }
 
@@ -170,34 +211,75 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault, timeStamp,
         index, index, mask,
-        x, y, z, pressure, twist,
-        quality, density,
+        x, y, z, p, twist,
+        q, d,
         range, touch);
+
+    // 3) 显式写入关键字段 (逆向原版 luaLib 确认的缺失环节):
+    //    backboardd 根据这些字段判定触摸有效性，缺省时事件会被丢弃。
     if (finger) {
+        IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerPressure,  p, 0);
+        IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerQuality,     q, 0);
+        IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerDensity,     d, 0);
+        IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerMajorRadius, r, 0);
+        IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerMinorRadius, r, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerIndex,    index, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerIdentity, index, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerEventMask, mask, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerRange, range ? 1 : 0, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerTouch, touch ? 1 : 0, 0);
         IOHIDEventAppendEvent(digitizer, finger, 0);
         CFRelease(finger);
     }
 
-    // 3) 标记发送者为触摸屏，避免被丢弃
+    // 父事件同样显式设置关键字段 (ZXTouch / SimulateTouch 均如此)
+    IOHIDEventSetIntegerValueWithOptions(digitizer, kIOHIDEventFieldDigitizerEventMask, mask, 0);
+    IOHIDEventSetIntegerValueWithOptions(digitizer, kIOHIDEventFieldDigitizerRange, range ? 1 : 0, 0);
+    IOHIDEventSetIntegerValueWithOptions(digitizer, kIOHIDEventFieldDigitizerTouch, touch ? 1 : 0, 0);
+
+    // 4) 标记发送者为触摸屏，避免被丢弃
     IOHIDEventSetSenderID(digitizer, kTouchSenderID);
 
-    // 4) 投递
+    // 5) 投递
     IOHIDEventSystemClientDispatchEvent(_client, digitizer);
     CFRelease(digitizer);
 }
 
 #pragma mark - 公共 API
 
-- (void)touchDownAtPoint:(CGPoint)point index:(NSInteger)index {
-    [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseBegan];
+- (void)touchDownAtPoint:(CGPoint)point index:(NSInteger)index
+                pressure:(CGFloat)pressure radius:(CGFloat)radius {
+    [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseBegan
+                         pressure:pressure radius:radius];
 }
 
-- (void)touchMoveAtPoint:(CGPoint)point index:(NSInteger)index {
-    [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseMoved];
+- (void)touchMoveAtPoint:(CGPoint)point index:(NSInteger)index
+                pressure:(CGFloat)pressure radius:(CGFloat)radius {
+    [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseMoved
+                         pressure:pressure radius:radius];
 }
 
 - (void)touchUpAtPoint:(CGPoint)point index:(NSInteger)index {
-    [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseEnded];
+    [self _sendFingerEventAtPoint:point index:(uint32_t)index phase:TSTouchPhaseEnded
+                         pressure:0 radius:0];
+}
+
+// 便捷封装
+- (void)touchDownAtPoint:(CGPoint)point index:(NSInteger)index {
+    [self touchDownAtPoint:point index:index pressure:1.0 radius:0];
+}
+
+- (void)touchMoveAtPoint:(CGPoint)point index:(NSInteger)index {
+    [self touchMoveAtPoint:point index:index pressure:1.0 radius:0];
+}
+
+- (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration {
+    [self tapAtPoint:point duration:pressDuration pressure:1.0 radius:0];
+}
+
+- (void)swipeFromPoint:(CGPoint)from toPoint:(CGPoint)to
+              duration:(NSTimeInterval)duration steps:(NSInteger)steps {
+    [self swipeFromPoint:from toPoint:to duration:duration steps:steps pressure:1.0 radius:0];
 }
 
 - (void)releaseAllTouches {
@@ -220,12 +302,14 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
         NSValue *pv = item[@"point"];
         [self _sendFingerEventAtPoint:pv.CGPointValue
                                 index:idx.unsignedIntValue
-                                phase:TSTouchPhaseEnded];
+                                phase:TSTouchPhaseEnded
+                             pressure:0 radius:0];
     }
 }
 
-- (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration {
-    [self touchDownAtPoint:point index:0];
+- (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration
+          pressure:(CGFloat)pressure radius:(CGFloat)radius {
+    [self touchDownAtPoint:point index:0 pressure:pressure radius:radius];
     // 让出 RunLoop 让 backboardd 处理 down，再 up
     [NSThread sleepForTimeInterval:MAX(pressDuration, 0.02)];
     [self _yieldRunLoopForSeconds:MAX(pressDuration, 0.02)];
@@ -233,21 +317,22 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 }
 
 - (void)swipeFromPoint:(CGPoint)from toPoint:(CGPoint)to
-              duration:(NSTimeInterval)duration steps:(NSInteger)steps {
+              duration:(NSTimeInterval)duration steps:(NSInteger)steps
+              pressure:(CGFloat)pressure radius:(CGFloat)radius {
     if (steps < 2) { steps = 2; }
     NSTimeInterval dt = duration / (NSTimeInterval)steps;
 
-    [self touchDownAtPoint:from index:0];
+    [self touchDownAtPoint:from index:0 pressure:pressure radius:radius];
     [self _yieldRunLoopForSeconds:dt];
 
     for (NSInteger i = 1; i < steps; i++) {
         CGFloat t = (CGFloat)i / (CGFloat)steps;
         CGPoint p = CGPointMake(from.x + (to.x - from.x) * t,
                                 from.y + (to.y - from.y) * t);
-        [self touchMoveAtPoint:p index:0];
+        [self touchMoveAtPoint:p index:0 pressure:pressure radius:radius];
         [self _yieldRunLoopForSeconds:dt];
     }
-    [self touchMoveAtPoint:to index:0];
+    [self touchMoveAtPoint:to index:0 pressure:pressure radius:radius];
     [self _yieldRunLoopForSeconds:dt];
     [self touchUpAtPoint:to index:0];
 }
