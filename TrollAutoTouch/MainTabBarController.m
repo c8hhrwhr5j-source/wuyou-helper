@@ -53,19 +53,6 @@
     self.tabBar.tintColor    = [TSColors tint];
     self.tabBar.unselectedItemTintColor = [TSColors tertiaryLabel];
 
-    // 接收脚本列表页"执行"通知，交给 Lua 引擎运行
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(_handleRunScriptNotification:)
-                                                 name:@"TSRunScript"
-                                               object:nil];
-}
-
-- (void)_handleRunScriptNotification:(NSNotification *)note {
-    NSString *path = note.userInfo[@"path"];
-    if (!path.length) return;
-    [[TSLuaBridge shared] runFile:path];
-}
-
     // ── 浅色 NavigationBar ──
     if (@available(iOS 13.0, *)) {
         UINavigationBarAppearance *navApp = [[UINavigationBarAppearance alloc] init];
@@ -77,6 +64,18 @@
         [UINavigationBar appearance].standardAppearance = navApp;
         [UINavigationBar appearance].scrollEdgeAppearance = navApp;
     }
+
+    // 接收脚本列表页"执行"通知，交给 Lua 引擎运行
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_handleRunScriptNotification:)
+                                                 name:@"TSRunScript"
+                                               object:nil];
+}
+
+- (void)_handleRunScriptNotification:(NSNotification *)note {
+    NSString *path = note.userInfo[@"path"];
+    if (!path.length) return;
+    [[TSLuaBridge shared] runFile:path];
 }
 
 @end
