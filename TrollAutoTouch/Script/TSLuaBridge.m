@@ -197,7 +197,16 @@ static int l_screen_getSize(lua_State *L) {
 
 /// 取整屏 RGBA 像素，返回给调用方(需 free)
 static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
-    return [[TSScreenCapture shared] captureScreenToRGBA:pxOut width:wOut height:hOut] && *pxOut;
+    // 截屏偶尔会失败(帧缓冲 surface 未就绪/主线程忙/动画中)，重试最多 3 次
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if ([[TSScreenCapture shared] captureScreenToRGBA:pxOut width:wOut height:hOut] && *pxOut) {
+            return YES;
+        }
+        if (attempt < 2) {
+            usleep(50 * 1000);
+        }
+    }
+    return NO;
 }
 
 /// 解析可选区域参数: (x, y, w, h) 或 table {x=,y=,width=,height=} 或空(全屏)
@@ -322,7 +331,13 @@ static int l_screen_getColor(lua_State *L) {
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (!grabScreen(&px, &w, &h)) { lua_pushnil(L); return 1; }
+    if (!grabScreen(&px, &w, &h)) {
+        // 截屏失败时不返回 nil，否则脚本里 string.format("0x%06X", c) 会因 nil 崩溃。
+        // 返回 0(黑色) 并记录日志，让脚本能继续跑、用户能看到取色异常。
+        lua_log(@"getColor 截屏失败，返回 0x000000");
+        lua_pushinteger(L, 0);
+        return 1;
+    }
     CGSize ss = screenPixelSize();
     int color = [TSColorFinder getColorAtPoint:CGPointMake(x, y) pixels:px width:w height:h screenSize:ss];
     free(px);

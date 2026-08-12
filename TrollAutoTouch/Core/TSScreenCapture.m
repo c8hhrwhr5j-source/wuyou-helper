@@ -56,8 +56,13 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     if (!_iomfbHandle || !_iosurfaceHandle) { return NO; }
 
     // IOMobileFramebufferGetMainDisplay
-    IOMFBCreateFunc create = dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay");
-    IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
+    IOMFBCreateFunc create = (IOMFBCreateFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay");
+    // iOS 15+ 使用 IOMobileFramebufferGetLayerDefaultSurface，iOS 14 及更早用 GetSurface。
+    // 旧代码只 dlsym GetSurface，在 iOS 15+ 上返回 NULL 导致截屏永远失败(getColor 返回 nil)。
+    IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
+    if (!getSurface) {
+        getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
+    }
     if (!create || !getSurface) { return NO; }
 
     void *fb = create(kCFAllocatorDefault);
@@ -82,10 +87,14 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     if (!lockFn || !unlockFn || !baseAddr || !widthFn || !heightFn || !bytesPerRowFn) { return NO; }
 
     lockFn(surface, 0, NULL);
-    size_t w = widthFn(surface);
-    size_t h = heightFn(surface);
-    size_t bpr = bytesPerRowFn(surface);
-    void *base = baseAddr(surface);
+    size_t w = widthFn ? widthFn(surface) : 0;
+    size_t h = heightFn ? heightFn(surface) : 0;
+    size_t bpr = bytesPerRowFn ? bytesPerRowFn(surface) : 0;
+    void *base = baseAddr ? baseAddr(surface) : NULL;
+    if (w == 0 || h == 0 || bpr == 0 || !base) {
+        unlockFn(surface, 0, NULL);
+        return NO;
+    }
 
     // 帧缓冲通常是 BGRA 'BGRA'(0x41524742)。统一转成 RGBA。
     uint8_t *out = malloc(w * h * 4);
@@ -126,22 +135,30 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
     __block UIImage *img = nil;
     void (^captureBlock)(void) = ^{
         UIWindow *keyWindow = nil;
+        NSArray<UIWindow *> *candidateWindows = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                        if (w.isKeyWindow) { keyWindow = w; break; }
-                    }
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                candidateWindows = ws.windows;
+                for (UIWindow *w in ws.windows) {
+                    if (w.isKeyWindow) { keyWindow = w; break; }
                 }
+                if (keyWindow) { break; }
+            }
+        }
+        // 找不到 keyWindow 时(例如悬浮窗抢占了 keyWindow)，回退到任一可见窗口
+        if (!keyWindow) {
+            for (UIWindow *w in candidateWindows) {
+                if (!w.hidden && w.rootViewController) { keyWindow = w; break; }
             }
         }
         if (!keyWindow) { return; }
 
         UIView *view = keyWindow;
         UIGraphicsBeginImageContextWithOptions(view.bounds.size, YES, [UIScreen mainScreen].scale);
-        // afterScreenUpdates:NO —— 用当前已渲染的内容，不强制等待下一帧，
-        // 避免在屏幕有动画/主线程繁忙时长时间阻塞。
-        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:NO];
+        // afterScreenUpdates:YES —— 确保拿到当前完整渲染内容(恢复原版行为)。
+        // 之前改成 NO 会让首帧/动画中的画面缺失或变空白。
+        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:YES];
         img = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
     };
