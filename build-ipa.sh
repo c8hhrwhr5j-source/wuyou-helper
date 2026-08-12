@@ -30,7 +30,8 @@ sign_copy_entitlements() {
   fi
 }
 
-# ── 准备 App 图标（参考 TrollServer：从源 PNG 生成正确尺寸，放到 .app 根目录）──
+# ── 图标生成：把缺失的 PNG 同步补到 Assets.xcassets 并放到 .app 根目录 ──
+# 同时保证 App Switcher 顶部图标（走 Assets.car 路径）也能渲染
 prepare_icons() {
   local app="$1"
   local src="$ROOT/TrollAutoTouch_icon.png"
@@ -38,21 +39,28 @@ prepare_icons() {
 
   echo "[*] 准备 App 图标..."
 
-  # 用 sips 从源图生成正确尺寸
   if command -v sips >/dev/null 2>&1; then
-    # 桌面图标 (60x60pt)
+    # 1) 在 Assets.xcassets 里补齐缺尺寸 (40x40/29x29) — 否则 xcodebuild 编译出的
+    #    Assets.car 不含这些图标，App Switcher 顶部图标就显示空。
+    sips -z  80  80 "$src" --out "$iconset/AppIcon40x40@2x.png" >/dev/null 2>&1
+    sips -z 120 120 "$src" --out "$iconset/AppIcon40x40@3x.png" >/dev/null 2>&1
+    sips -z  58  58 "$src" --out "$iconset/AppIcon29x29@2x.png" >/dev/null 2>&1
+    sips -z  87  87 "$src" --out "$iconset/AppIcon29x29@3x.png" >/dev/null 2>&1
+
+    # 2) 在 .app 根目录生成所有 PNG (CFBundleIconFiles 路径也能找到)
+    # 桌面图标 60x60pt
     sips -z 120 120 "$src" --out "$app/AppIcon60x60@2x.png" >/dev/null 2>&1
     sips -z 180 180 "$src" --out "$app/AppIcon60x60@3x.png" >/dev/null 2>&1
-    # App Switcher / Spotlight (40x40pt) — 这就是后台卡片顶部图标
+    # App Switcher / Spotlight 40x40pt
     sips -z  80  80 "$src" --out "$app/AppIcon40x40@2x.png" >/dev/null 2>&1
     sips -z 120 120 "$src" --out "$app/AppIcon40x40@3x.png" >/dev/null 2>&1
-    # 设置 / 搜索小图标 (29x29pt)
+    # 设置 / 搜索 29x29pt
     sips -z  58  58 "$src" --out "$app/AppIcon29x29@2x.png" >/dev/null 2>&1
     sips -z  87  87 "$src" --out "$app/AppIcon29x29@3x.png" >/dev/null 2>&1
-    # iPad (76x76pt)
+    # iPad 76x76pt
     sips -z  76  76 "$src" --out "$app/AppIcon76x76~ipad.png"    >/dev/null 2>&1
     sips -z 152 152 "$src" --out "$app/AppIcon76x76@2x~ipad.png" >/dev/null 2>&1
-    # App Store (1024x1024)
+    # App Store 1024
     sips -z 1024 1024 "$src" --out "$app/icon-1024.png"          >/dev/null 2>&1
     echo "[*] 图标生成完成（sips）"
   else
@@ -66,6 +74,21 @@ prepare_icons() {
   fi
 }
 
+# ── 在 xcodebuild 之前先补齐 Assets.xcassets 里缺失的 PNG ──
+# 必须在 xcodebuild 之前调用，否则 Assets.car 不会包含小尺寸图标
+prepare_assets_xcassets() {
+  local src="$ROOT/TrollAutoTouch_icon.png"
+  local iconset="$ROOT/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
+  echo "[*] 准备 Assets.xcassets..."
+  if command -v sips >/dev/null 2>&1; then
+    [ -f "$iconset/AppIcon40x40@2x.png" ] || sips -z  80  80 "$src" --out "$iconset/AppIcon40x40@2x.png" >/dev/null 2>&1
+    [ -f "$iconset/AppIcon40x40@3x.png" ] || sips -z 120 120 "$src" --out "$iconset/AppIcon40x40@3x.png" >/dev/null 2>&1
+    [ -f "$iconset/AppIcon29x29@2x.png" ] || sips -z  58  58 "$src" --out "$iconset/AppIcon29x29@2x.png" >/dev/null 2>&1
+    [ -f "$iconset/AppIcon29x29@3x.png" ] || sips -z  87  87 "$src" --out "$iconset/AppIcon29x29@3x.png" >/dev/null 2>&1
+    echo "[*] Assets.xcassets PNG 补齐完成"
+  fi
+}
+
 case "$MODE" in
   xcode)
     echo "[*] 用 xcodebuild 编译 (Release, 不签名)"
@@ -74,6 +97,7 @@ case "$MODE" in
       command -v xcodegen >/dev/null 2>&1 || { echo "[x] 请先安装 xcodegen: brew install xcodegen"; exit 1; }
       (cd "$ROOT" && xcodegen generate)
     fi
+    prepare_assets_xcassets
     xcodebuild -project "$ROOT/TrollAutoTouch.xcodeproj" \
       -scheme TrollAutoTouch \
       -configuration Release \
