@@ -9,6 +9,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write   # 允许在构建失败时把 xcodebuild 日志推送到 ci-debug 分支
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -86,6 +88,16 @@ jobs:
               tail -120 /tmp/xcodebuild.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 把完整日志推送到 ci-debug 分支，便于在仓库里直接读取（不触发 CI）
+            {
+              git config user.name "ci-bot"
+              git config user.email "ci-bot@users.noreply.github.com"
+              cp /tmp/xcodebuild.log ./ci-error.log
+              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
+              git add ci-error.log
+              git commit -m "ci: save xcodebuild log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+              git push origin ci-debug --force
+            } >/dev/null 2>&1 && echo "[i] 完整日志已推送到 ci-debug 分支" || echo "[i] 日志推送失败(忽略)"
             exit 1
           fi
           tail -5 /tmp/xcodebuild.log
