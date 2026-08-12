@@ -107,10 +107,12 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _tasServiceOn    = NO;
+        // TAS 服务默认开启: 安装即处于运行保活状态(AppDelegate 已无条件 startAll)
+        _tasServiceOn    = YES;
         _remoteAccessOn  = NO;
         _touchDisplayOn  = NO;
-        _floatWindowOn   = YES;
+        // 悬浮窗口默认关闭: 用户需要时手动开启
+        _floatWindowOn   = NO;
     }
     return self;
 }
@@ -210,7 +212,8 @@
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return _tasServiceOn ? 5 : 1;
+    // TAS 服务关闭时列表不收缩: 远程访问/触摸显示/悬浮窗等开关始终可见
+    if (section == 0) return 5;
     return 1; // 通用: 查看日志
 }
 

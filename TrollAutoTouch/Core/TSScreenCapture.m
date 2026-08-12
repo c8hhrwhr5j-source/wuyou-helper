@@ -118,26 +118,37 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
 }
 
 /// 应用内截屏回退(仅本 App 窗口)
+/// 注意: UIGraphics/drawViewHierarchyInRect 等 UIKit 绘制必须在主线程,
+/// 而 Lua 取色在后台队列执行, 若在此直接调用会在非主线程崩溃闪退。
 - (BOOL)_captureAppWindowToRGBA:(uint8_t **)pixelsOut
                          width:(int *)widthOut
                         height:(int *)heightOut {
-    UIWindow *keyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (w.isKeyWindow) { keyWindow = w; break; }
+    __block UIImage *img = nil;
+    void (^captureBlock)(void) = ^{
+        UIWindow *keyWindow = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                        if (w.isKeyWindow) { keyWindow = w; break; }
+                    }
                 }
             }
         }
-    }
-    if (!keyWindow) { return NO; }
+        if (!keyWindow) { return; }
 
-    UIView *view = keyWindow;
-    UIGraphicsBeginImageContextWithOptions(view.bounds.size, YES, [UIScreen mainScreen].scale);
-    [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:YES];
-    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
+        UIView *view = keyWindow;
+        UIGraphicsBeginImageContextWithOptions(view.bounds.size, YES, [UIScreen mainScreen].scale);
+        [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:YES];
+        img = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    };
+
+    if ([NSThread isMainThread]) {
+        captureBlock();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), captureBlock);
+    }
     if (!img) { return NO; }
 
     return [self _extractRGBAFromImage:img pixelsOut:pixelsOut width:widthOut height:heightOut];
