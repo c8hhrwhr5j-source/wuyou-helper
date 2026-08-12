@@ -16,14 +16,16 @@
 //   - 该链路走 WindowServer 渲染管线(依赖 global-capture entitlement), 与 App 自身
 //     前后台状态无关, 因此切换到其他 App 后仍能取到真实屏幕像素。
 //
-//  本类提供三级截屏路径(自动回退):
-//   1. 系统窗口路径(主): [UIWindow windowWithContextId:] + IOSurfaceAccelerator 链路
+//  本类提供四级截屏路径(自动回退):
+//   0. CARenderServerRenderDisplay(主): WindowServer 直接渲染主屏到 IOSurface(TrollShot 验证)
+//   1. 系统窗口路径: [UIWindow windowWithContextId:] + IOSurfaceAccelerator 链路
 //   2. IOMFB 帧缓冲(回退): 前台场景可用, 后台/其他 App 前台时会拿到空 surface
 //   3. 应用内截屏(兜底): 仅本 App 窗口
 
 #import "TSScreenCapture.h"
 #import <dlfcn.h>
 #import <mach/mach.h>
+#import <unistd.h>
 
 // ---------- IOSurface / IOMobileFramebuffer 私有接口 ----------
 typedef struct __IOSurface *IOSurfaceRef;
@@ -36,10 +38,14 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurface
 
 // IOSurfaceAccelerator 私有接口(对齐原版 HUD 截屏链路)
 typedef kern_return_t (*IOSurfaceAccelCreateFunc)(CFAllocatorRef allocator, uint32_t type, void **acceleratorOut);
+// 真实签名 7 参数(参考 TrollShot/TrollVNC: accel, src, dst, NULL, NULL, NULL, NULL)
 typedef kern_return_t (*IOSurfaceAccelTransferFunc)(void *accelerator, IOSurfaceRef sourceSurface,
-                                                    IOSurfaceRef destSurface, CFDictionaryRef dict,
-                                                    void **errorOut);
+                                                    IOSurfaceRef destSurface, void *p1, void *p2,
+                                                    void *p3, void *p4);
 typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
+// CARenderServerRenderDisplay: 把主屏渲染到 IOSurface(TrollShot/TrollVNC 验证的 TrollStore 截屏方案)
+typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef display, IOSurfaceRef surface,
+                                                int options, int a2);
 
 @interface TSScreenCapture () {
     void *_iomfbHandle;
@@ -113,8 +119,10 @@ typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         if (props) {
             uint32_t bgra = 0x42475241; // 'BGRA'
-            size_t bytesPerRow = srcW * 4;
-            size_t allocSize = srcW * srcH * 4;
+            // BytesPerRow 需按 IOSurfaceAlignProperty 对齐(TrollShot 做法), 否则 IOSurfaceCreate 可能失败
+            size_t (*alignPropFn)(CFStringRef, size_t) = dlsym(_iosurfaceHandle, "IOSurfaceAlignProperty");
+            size_t bytesPerRow = alignPropFn ? alignPropFn(CFSTR("BytesPerRow"), srcW * 4) : srcW * 4;
+            size_t allocSize = bytesPerRow * srcH;
             CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &srcW);
             CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &srcH);
             CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
@@ -126,6 +134,22 @@ typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
             CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
             CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
             CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
+            // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace
+            int bpe = 4;
+            CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
+            if (bpeNum) {
+                CFDictionarySetValue(props, CFSTR("BytesPerElement"), bpeNum);
+                CFRelease(bpeNum);
+            }
+            CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            if (cs) {
+                CFPropertyListRef csProps = CGColorSpaceCopyPropertyList(cs);
+                CGColorSpaceRelease(cs);
+                if (csProps) {
+                    CFDictionarySetValue(props, CFSTR("ColorSpace"), csProps);
+                    CFRelease(csProps);
+                }
+            }
             CFRelease(wNum); CFRelease(hNum); CFRelease(fmtNum);
             CFRelease(bprNum); CFRelease(allocNum);
 
@@ -133,7 +157,8 @@ typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
             CFRelease(props);
         }
         if (dstSurface) {
-            kern_return_t tr = accelTransferFn(accel, sourceSurface, dstSurface, NULL, NULL);
+            // 真实签名 7 参数(对齐 TrollShot/TrollVNC)
+            kern_return_t tr = accelTransferFn(accel, sourceSurface, dstSurface, NULL, NULL, NULL, NULL);
             if (tr == KERN_SUCCESS) {
                 readSurface = dstSurface;
             } else {
@@ -237,7 +262,144 @@ typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
         return NO;
     }
 
-    return [self _dumpIOSurface:surface pixelsOut:pixelsOut width:widthOut height:heightOut];
+    // IOMFB 帧缓冲在后台/其他 App 前台时可能返回空 surface(IOSurfaceLock 读到全 0),
+    // 加全 0 检测, 避免静默返回黑屏让 getColor 误判成 0x000000。
+    uint8_t *px = NULL; int w = 0, h = 0;
+    if (![self _dumpIOSurface:surface pixelsOut:&px width:&w height:&h] || !px) { return NO; }
+    if ([self _isAllZeroPixels:px width:w height:h]) {
+        NSLog(@"[TSScreenCapture] IOMFB 帧缓冲截到空内容(全 0)，后台帧缓冲不可读");
+        free(px);
+        return NO;
+    }
+    *pixelsOut = px; *widthOut = w; *heightOut = h;
+    return YES;
+}
+
+#pragma mark - 跨应用截屏: CARenderServerRenderDisplay(TrollShot/TrollVNC 验证的 TrollStore 方案)
+
+/// 屏幕物理像素尺寸(截屏目标尺寸)。
+- (CGSize)_screenPixelSize {
+    // 优先私有 API _unjailedReferenceBoundsInPixels(TrollShot 使用), 得到未裁剪的真实像素尺寸
+    @try {
+        id v = [[UIScreen mainScreen] valueForKey:@"_unjailedReferenceBoundsInPixels"];
+        if ([v isKindOfClass:[NSValue class]]) {
+            CGRect r;
+            [v getValue:&r];
+            if (r.size.width > 0 && r.size.height > 0) { return r.size; }
+        }
+    } @catch (NSException *e) {}
+    CGSize n = [UIScreen mainScreen].nativeBounds.size;
+    if (n.width > 0 && n.height > 0) { return n; }
+    CGSize b = [UIScreen mainScreen].bounds.size;
+    CGFloat s = [UIScreen mainScreen].scale;
+    return CGSizeMake(b.width * s, b.height * s);
+}
+
+/// 创建 BGRA IOSurface(参数键与 TrollShot 一致; BytesPerRow 经 IOSurfaceAlignProperty 对齐)。
+- (IOSurfaceRef)_createIOSurfaceWithWidth:(int)w height:(int)h {
+    if (!_iosurfaceHandle || w <= 0 || h <= 0) { return NULL; }
+    IOSurfaceRef (*createFn)(CFDictionaryRef) = dlsym(_iosurfaceHandle, "IOSurfaceCreate");
+    if (!createFn) { return NULL; }
+    size_t (*alignPropFn)(CFStringRef, size_t) = dlsym(_iosurfaceHandle, "IOSurfaceAlignProperty");
+    uint32_t bgra = 0x42475241; // 'BGRA'
+    size_t bytesPerRow = alignPropFn ? alignPropFn(CFSTR("BytesPerRow"), (size_t)w * 4) : (size_t)w * 4;
+    size_t allocSize = bytesPerRow * h;
+    CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (!props) { return NULL; }
+    long wl = w, hl = h, bprl = (long)bytesPerRow, allocl = (long)allocSize;
+    CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &wl);
+    CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &hl);
+    CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
+    CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &bprl);
+    CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &allocl);
+    CFDictionarySetValue(props, CFSTR("Width"), wNum);
+    CFDictionarySetValue(props, CFSTR("Height"), hNum);
+    CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
+    CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
+    CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
+    // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace(WindowServer 渲染与 accel 转换需要)
+    int bpe = 4;
+    CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
+    if (bpeNum) {
+        CFDictionarySetValue(props, CFSTR("BytesPerElement"), bpeNum);
+        CFRelease(bpeNum);
+    }
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (cs) {
+        CFPropertyListRef csProps = CGColorSpaceCopyPropertyList(cs);
+        CGColorSpaceRelease(cs);
+        if (csProps) {
+            CFDictionarySetValue(props, CFSTR("ColorSpace"), csProps);
+            CFRelease(csProps);
+        }
+    }
+    CFRelease(wNum); CFRelease(hNum); CFRelease(fmtNum);
+    CFRelease(bprNum); CFRelease(allocNum);
+    IOSurfaceRef surf = createFn(props);
+    CFRelease(props);
+    return surf;
+}
+
+/// 直接把主屏渲染到 IOSurface 后读取像素。
+/// CARenderServerRenderDisplay 是 QuartzCore 私有函数, 请求 WindowServer 把当前屏幕
+/// 渲染到指定 surface; 走系统渲染管线, 与 App 自身前后台无关(TrollShot 后台 daemon 验证)。
+- (BOOL)_captureRenderServerToRGBA:(uint8_t **)pixelsOut
+                             width:(int *)widthOut
+                            height:(int *)heightOut {
+    if (!_iosurfaceHandle) { return NO; }
+    static CARenderServerRenderDisplayFunc renderFn = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // 对齐 TrollShot: CARenderServerRenderDisplay(0, "LCD", surface, 0, 0)
+        renderFn = (CARenderServerRenderDisplayFunc)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
+    });
+    if (!renderFn) {
+        NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 不可用(私有符号缺失)");
+        return NO;
+    }
+
+    CGSize sz = [self _screenPixelSize];
+    int w = (int)sz.width, h = (int)sz.height;
+    if (w <= 0 || h <= 0) { return NO; }
+    NSLog(@"[TSScreenCapture] 尝试 CARenderServerRenderDisplay 截屏 %dx%d", w, h);
+
+    IOSurfaceRef src = [self _createIOSurfaceWithWidth:w height:h];
+    if (!src) {
+        NSLog(@"[TSScreenCapture] CARenderServer 方案创建 IOSurface 失败 %dx%d", w, h);
+        return NO;
+    }
+
+    // 与 TrollShot 完全一致: 首参传 0, 显示名 "LCD"; "Main" 作为个别版本回退
+    const char *displayNames[2] = { "LCD", "Main" };
+    for (int attempt = 0; attempt < 2; attempt++) {
+        CFStringRef display = CFStringCreateWithCString(kCFAllocatorDefault,
+                                                        displayNames[attempt],
+                                                        kCFStringEncodingUTF8);
+        renderFn(0, display, src, 0, 0);
+        CFRelease(display);
+        // 等 WindowServer 完成异步渲染再读
+        usleep(100 * 1000);
+
+        uint8_t *px = NULL; int rw = 0, rh = 0;
+        if ([self _dumpIOSurface:src pixelsOut:&px width:&rw height:&rh] && px) {
+            if (![self _isAllZeroPixels:px width:rw height:rh]) {
+                NSLog(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
+                      rw, rh, displayNames[attempt]);
+                *pixelsOut = px; *widthOut = rw; *heightOut = rh;
+                CFRelease(src);
+                return YES;
+            }
+            NSLog(@"[TSScreenCapture] CARenderServer display=%s 取到空内容", displayNames[attempt]);
+            free(px);
+        } else {
+            NSLog(@"[TSScreenCapture] CARenderServer display=%s 读 surface 失败", displayNames[attempt]);
+        }
+    }
+
+    NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 两次渲染均取到空内容");
+    CFRelease(src);
+    return NO;
 }
 
 #pragma mark - 跨应用截屏: windowWithContextId 链路(对齐原版 HUD)
@@ -516,6 +678,10 @@ typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
+    // 0. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 验证, 后台/跨应用首选)
+    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
     // 1. 系统窗口截屏(对齐原版: 可截任意 App, 含其他 App 前台/后台场景)
     if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;

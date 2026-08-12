@@ -248,6 +248,10 @@
 	<true/>
 	<key>com.apple.QuartzCore.secure-mode</key>
 	<true/>
+	<key>com.apple.QuartzCore.system-layers</key>
+	<true/>
+	<key>com.apple.private.IOSurface.protected-access</key>
+	<true/>
 	<key>com.apple.SystemConfiguration.SCDynamicStore-write-access</key>
 	<true/>
 	<key>com.apple.SystemConfiguration.SCPreferences-write-access</key>

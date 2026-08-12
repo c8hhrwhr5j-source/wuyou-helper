@@ -10,8 +10,9 @@
 //   → UICreateCGImageFromIOSurface / 直接读像素。该链路不依赖 App 自身前后台状态,
 //   因此切到其他 App 后仍能取到真实屏幕像素(依赖 global-capture entitlement)。
 //
-//  本类提供三级截屏路径(自动回退):
-//   1. 系统窗口(默认尝试): [UIWindow windowWithContextId:] + IOSurfaceAccelerator 链路，可截任意 App。
+//  本类提供四级截屏路径(自动回退):
+//   0. CARenderServerRenderDisplay: WindowServer 直接渲染主屏到 IOSurface(TrollShot 验证)。
+//   1. 系统窗口: [UIWindow windowWithContextId:] + IOSurfaceAccelerator 链路，可截任意 App。
 //   2. IOMFB 帧缓冲: 前台场景可用，后台/其他 App 前台时会拿到空 surface(已对齐原版移除主用地位)。
 //   3. 应用内回退: UIGraphicsImageRenderer 截取本 App 窗口(用于自测/无权限时)。
 //
