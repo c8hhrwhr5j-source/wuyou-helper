@@ -37,16 +37,31 @@
     return YES;
 }
 
-// 把打包进 App 的内置脚本(bundle 的 lua/ 目录)首次同步到 /var/mobile/touch/lua/
+// 把打包进 App 的内置脚本(bundle 的 lua/ 目录)同步到 /var/mobile/touch/lua/
+// 策略: 若目标已存在且内容与内置版本不一致，也用内置版本覆盖——
+// 因为内置 main.lua 是随包发布的既定脚本，旧的手动上传/损坏版本必须被纠正。
 - (void)_syncBuiltinScripts {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *src = [[NSBundle mainBundle] pathForResource:@"main" ofType:@"lua" inDirectory:@"lua"];
     if (!src) return;
 
     NSString *dst = [TSPaths pathForLua:@"main.lua"];
-    if ([fm fileExistsAtPath:dst]) return; // 用户已有则保留用户版本
-
     NSError *err = nil;
+
+    if ([fm fileExistsAtPath:dst]) {
+        NSData *srcData = [NSData dataWithContentsOfFile:src];
+        NSData *dstData = [NSData dataWithContentsOfFile:dst];
+        if (srcData && dstData && [srcData isEqualToData:dstData]) {
+            return; // 已是最新，无需同步
+        }
+        // 内容不一致: 删除旧文件后重新复制
+        if (![fm removeItemAtPath:dst error:&err]) {
+            NSLog(@"[TrollAutoTouch] 删除旧脚本失败: %@", err);
+            return;
+        }
+        NSLog(@"[TrollAutoTouch] 旧脚本与内置版本不一致，已删除待更新: %@", dst);
+    }
+
     if ([fm copyItemAtPath:src toPath:dst error:&err]) {
         NSLog(@"[TrollAutoTouch] 已同步内置脚本: %@", dst);
     } else {

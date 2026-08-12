@@ -1055,7 +1055,10 @@ static void lua_register_all(lua_State *L) {
         lua_setglobal(L, "_SCRIPT_PATH_");
     }
 
-    int ret = luaL_loadbuffer(L, code.UTF8String, code.length,
+    // 注意: 长度必须用 UTF-8 字节数(strlen)，不能用 code.length(NSString 字符数)。
+    // 否则含中文的脚本会被截断, 报 ")` expected near <eof>" 之类的假语法错误。
+    const char *utf8Code = code.UTF8String;
+    int ret = luaL_loadbuffer(L, utf8Code, strlen(utf8Code),
                               path ? path.lastPathComponent.UTF8String : "=(string)");
     if (ret != LUA_OK) {
         lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %s", lua_tostring(L, -1)]);
