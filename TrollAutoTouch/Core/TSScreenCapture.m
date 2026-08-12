@@ -28,9 +28,13 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <unistd.h>
+#import <IOKit/IOKitLib.h>
 
 // ---------- IOSurface / IOMobileFramebuffer 私有接口 ----------
 typedef struct __IOSurface *IOSurfaceRef;
+
+// IOSurfaceLookup: 通过 surface ID 映射到已存在的全局 IOSurface(不创建, 跨进程)
+typedef IOSurfaceRef (*IOSurfaceLookupFunc)(uint32_t surfaceID);
 
 // IOMobileFramebuffer 私有函数指针
 typedef kern_return_t (*IOMFBGetMainDisplayFunc)(void **fb);                    // IOMobileFramebufferGetMainDisplay(&fb)
@@ -239,21 +243,40 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 - (BOOL)_captureFramebufferToRGBA:(uint8_t **)pixelsOut
                            width:(int *)widthOut
                           height:(int *)heightOut {
-    if (!_iomfbHandle || !_iosurfaceHandle) { return NO; }
-
-    IOMFBGetMainDisplayFunc getMain = (IOMFBGetMainDisplayFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay");
-    if (!getMain) { return NO; }
+    if (!_iosurfaceHandle) {
+        TSSetLastError(@"路径3 IOMFB: IOSurface 框架加载失败");
+        return NO;
+    }
+    // 符号查找: 句柄内优先, RTLD_DEFAULT 全局符号表兜底(对齐无忧辅助 dlsym(RTLD_DEFAULT,...))
+    IOMFBGetMainDisplayFunc getMain = _iomfbHandle
+        ? (IOMFBGetMainDisplayFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay")
+        : NULL;
+    if (!getMain) {
+        getMain = (IOMFBGetMainDisplayFunc)dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetMainDisplay");
+    }
+    if (!getMain) {
+        TSSetLastError(@"路径3 IOMFB: IOMobileFramebufferGetMainDisplay 符号不可用(框架未加载)");
+        return NO;
+    }
 
     void *fb = NULL;
     kern_return_t krMain = getMain(&fb);
-    if (krMain != KERN_SUCCESS || !fb) { return NO; }
+    if (krMain != KERN_SUCCESS || !fb) {
+        TSSetLastError(@"路径3 IOMFB: GetMainDisplay 失败 kr=%d", (int)krMain);
+        return NO;
+    }
 
     IOSurfaceRef surface = NULL;
     kern_return_t kr = KERN_FAILURE;
 
     // 优先 iOS 15+ 的 IOMobileFramebufferGetLayerDefaultSurface(fb, layer, &surface),
     // 个别机型/版本主屏不在 layer 0, 逐个尝试直到拿到 surface。
-    IOMFBGetLayerSurfaceFunc getLayerSurface = (IOMFBGetLayerSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
+    IOMFBGetLayerSurfaceFunc getLayerSurface = _iomfbHandle
+        ? (IOMFBGetLayerSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface")
+        : NULL;
+    if (!getLayerSurface) {
+        getLayerSurface = (IOMFBGetLayerSurfaceFunc)dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetLayerDefaultSurface");
+    }
     if (getLayerSurface) {
         for (int layer = 0; layer < 4; layer++) {
             surface = NULL;
@@ -262,14 +285,22 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         }
     } else {
         // iOS 14 及更早: IOMobileFramebufferGetSurface(fb, 0, &surface) —— 3 个参数!
-        IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
+        IOMFBGetSurfaceFunc getSurface = _iomfbHandle
+            ? (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface")
+            : NULL;
+        if (!getSurface) {
+            getSurface = (IOMFBGetSurfaceFunc)dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetSurface");
+        }
         if (getSurface) {
             surface = NULL;
             kr = getSurface(fb, 0, &surface);
+        } else {
+            TSSetLastError(@"路径3 IOMFB: GetSurface/GetLayerDefaultSurface 符号均不可用");
+            return NO;
         }
     }
     if (kr != KERN_SUCCESS || !surface) {
-        TSSetLastError(@"路径2 IOMFB: 获取帧缓冲 surface 失败 kr=%d", (int)kr);
+        TSSetLastError(@"路径3 IOMFB: 获取帧缓冲 surface 失败 kr=%d", (int)kr);
         NSLog(@"[TSScreenCapture] 获取帧缓冲 surface 失败 kr=%d", (int)kr);
         return NO;
     }
@@ -285,6 +316,107 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     }
     *pixelsOut = px; *widthOut = w; *heightOut = h;
     return YES;
+}
+
+#pragma mark - 跨应用截屏: 全局显示截取(最优先, 参考"无忧辅助" IORegistry 方案)
+
+// 核心思路: 去 IORegistry 里找 IOMobileFramebuffer / AppleDCP 等系统显示服务的
+// DisplaySurface / CurrentSurface 属性, 拿到 surface ID 后用 IOSurfaceLookup 直接映射
+// WindowServer 维护的**全局显示缓冲**。不创建 IOSurface、不依赖 CARenderServer、
+// 不依赖前台, 是真正跨 App 找色的路径, 只需 com.apple.private.screen-capture 权限。
+static const char *_gsServiceNames[] = {
+    "IOMobileFramebuffer",
+    "AppleDCP",
+    "AppleDCPExpert",
+    "AppleCLCD",
+    "AppleMipiDSI",
+    "AppleH10CLCD", "AppleH11CLCD", "AppleH12CLCD", "AppleH13CLCD",
+    "AppleM2ScalerCSC",
+    NULL
+};
+
+// 候选属性名(各机型/版本存放全局 surface 的键不同)
+static const char *_gsSurfaceKeys[] = {
+    "DisplaySurface", "CurrentSurface", "FramebufferSurface", "MainSurface",
+    "IOSurface", "Surface", "surface",
+    "IOSurfaceID", "SurfaceID", "surface-id", "display-surface-id",
+    "DisplaySurfaceID", "FBSystemSurfaceID", "ioSurfaceID", "CoreSurfaceID",
+    NULL
+};
+
+- (BOOL)_captureGlobalDisplayToRGBA:(uint8_t **)pixelsOut
+                              width:(int *)widthOut
+                             height:(int *)heightOut {
+    if (!_iosurfaceHandle) {
+        TSSetLastError(@"路径0 全局显示: IOSurface 框架加载失败");
+        return NO;
+    }
+    IOSurfaceGetTypeIDFunc typeIdFn = (IOSurfaceGetTypeIDFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetTypeID");
+    IOSurfaceLookupFunc lookupFn = (IOSurfaceLookupFunc)dlsym(_iosurfaceHandle, "IOSurfaceLookup");
+    if (!typeIdFn || !lookupFn) {
+        TSSetLastError(@"路径0 全局显示: IOSurfaceGetTypeID/IOSurfaceLookup 符号不可用");
+        return NO;
+    }
+
+    for (int i = 0; _gsServiceNames[i]; i++) {
+        io_service_t service = IOServiceGetMatchingService(kIOMasterPortDefault,
+                                                           IOServiceMatching(_gsServiceNames[i]));
+        if (service == MACH_PORT_NULL) { continue; }
+
+        CFMutableDictionaryRef props = NULL;
+        kern_return_t kr = IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0);
+        IOObjectRelease(service);
+        if (kr != KERN_SUCCESS || !props) { continue; }
+
+        NSString *foundVia = nil;
+        IOSurfaceRef found = NULL;
+        NSDictionary *dict = (__bridge NSDictionary *)props;
+        NSLog(@"[TSScreenCapture] 全局显示: 服务 %s 属性数=%lu", _gsServiceNames[i], (unsigned long)dict.count);
+        for (int k = 0; _gsSurfaceKeys[k]; k++) {
+            id value = dict[@(_gsSurfaceKeys[k])];
+            if (!value) { continue; }
+            // 值本身直接是 IOSurface 对象
+            if (CFGetTypeID((__bridge CFTypeRef)value) == typeIdFn()) {
+                found = (__bridge IOSurfaceRef)value;
+                CFRetain(found);
+                foundVia = [NSString stringWithFormat:@"%s->%s(对象)", _gsServiceNames[i], _gsSurfaceKeys[k]];
+                break;
+            }
+            // 值是 surface ID 数字: IOSurfaceLookup 映射
+            if ([value isKindOfClass:[NSNumber class]]) {
+                uint32_t sid = [value unsignedIntValue];
+                if (sid > 0) {
+                    IOSurfaceRef s = lookupFn(sid);
+                    if (s) {
+                        found = s;
+                        foundVia = [NSString stringWithFormat:@"%s->%s ID=%u", _gsServiceNames[i], _gsSurfaceKeys[k], sid];
+                        break;
+                    }
+                }
+            }
+        }
+        CFRelease(props);
+
+        if (!found) { continue; }
+
+        uint8_t *px = NULL; int w = 0, h = 0;
+        if ([self _dumpIOSurface:found pixelsOut:&px width:&w height:&h] && px) {
+            if (![self _isAllZeroPixels:px width:w height:h]) {
+                NSLog(@"[TSScreenCapture] 全局显示截屏成功 %dx%d (%@)", w, h, foundVia);
+                CFRelease(found);
+                self.lastError = nil;
+                *pixelsOut = px; *widthOut = w; *heightOut = h;
+                return YES;
+            }
+            NSLog(@"[TSScreenCapture] 全局显示 %@ 取到空内容", foundVia);
+            free(px);
+        } else {
+            NSLog(@"[TSScreenCapture] 全局显示 %@ dump 失败", foundVia);
+        }
+        CFRelease(found);
+    }
+    TSSetLastError(@"路径0 全局显示: 服务列表未找到可读的 DisplaySurface");
+    return NO;
 }
 
 #pragma mark - 跨应用截屏: CARenderServerRenderDisplay(TrollShot/TrollVNC 验证的 TrollStore 方案)
@@ -362,7 +494,7 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
                              width:(int *)widthOut
                             height:(int *)heightOut {
     if (!_iosurfaceHandle) {
-        TSSetLastError(@"路径0 CARenderServer: IOSurface 框架加载失败");
+        TSSetLastError(@"路径2 CARenderServer: IOSurface 框架加载失败");
         return NO;
     }
     static CARenderServerRenderDisplayFunc renderFn = NULL;
@@ -372,7 +504,7 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         renderFn = (CARenderServerRenderDisplayFunc)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
     });
     if (!renderFn) {
-        TSSetLastError(@"路径0 CARenderServer: CARenderServerRenderDisplay 符号不可用(该 iOS 无此私有 API)");
+        TSSetLastError(@"路径2 CARenderServer: CARenderServerRenderDisplay 符号不可用(该 iOS 无此私有 API)");
         NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 不可用(私有符号缺失)");
         return NO;
     }
@@ -380,14 +512,14 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     CGSize sz = [self _screenPixelSize];
     int w = (int)sz.width, h = (int)sz.height;
     if (w <= 0 || h <= 0) {
-        TSSetLastError(@"路径0 CARenderServer: 屏幕尺寸无效 %dx%d", w, h);
+        TSSetLastError(@"路径2 CARenderServer: 屏幕尺寸无效 %dx%d", w, h);
         return NO;
     }
     NSLog(@"[TSScreenCapture] 尝试 CARenderServerRenderDisplay 截屏 %dx%d", w, h);
 
     IOSurfaceRef src = [self _createIOSurfaceWithWidth:w height:h];
     if (!src) {
-        TSSetLastError(@"路径0 CARenderServer: 创建 IOSurface 失败 %dx%d", w, h);
+        TSSetLastError(@"路径2 CARenderServer: 创建 IOSurface 失败 %dx%d", w, h);
         NSLog(@"[TSScreenCapture] CARenderServer 方案创建 IOSurface 失败 %dx%d", w, h);
         return NO;
     }
@@ -413,11 +545,11 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
                 CFRelease(src);
                 return YES;
             }
-            TSSetLastError(@"路径0 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
+            TSSetLastError(@"路径2 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
             NSLog(@"[TSScreenCapture] CARenderServer display=%s 取到空内容", displayNames[attempt]);
             free(px);
         } else {
-            TSSetLastError(@"路径0 CARenderServer: display=%s 读 surface 失败", displayNames[attempt]);
+            TSSetLastError(@"路径2 CARenderServer: display=%s 读 surface 失败", displayNames[attempt]);
             NSLog(@"[TSScreenCapture] CARenderServer display=%s 读 surface 失败", displayNames[attempt]);
         }
     }
@@ -687,7 +819,7 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     // App 进入后台后自身窗口会被系统挂起/清空, 应用内截屏必然返回全黑,
     // 直接失败, 避免返回黑屏让 getColor 误判成"识别到黑色 0x000000"。
     if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
-        TSSetLastError(@"路径3 应用内: App 在后台, 应用内截屏会全黑已跳过");
+        TSSetLastError(@"路径4 应用内: App 在后台, 应用内截屏会全黑已跳过");
         return NO;
     }
     __block UIImage *img = nil;
@@ -762,30 +894,36 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
-    // 0. 系统窗口截屏(原版链路首选: windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
-    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 0. 全局显示截取(最优先: IORegistry DisplaySurface + IOSurfaceLookup, 拿现成 surface, 跨 App)
+    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err0 = [self.lastError copy];
-    // 1. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 方案, 保留回退)
-    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 1. 系统窗口截屏(原版链路: windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
+    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err1 = [self.lastError copy];
-    // 2. IOMFB 帧缓冲(前台场景回退)
-    if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 2. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 方案, 保留回退)
+    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err2 = [self.lastError copy];
-    // 3. 应用内截屏(兜底)
+    // 3. IOMFB 帧缓冲(前台场景回退)
+    if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
+    NSString *err3 = [self.lastError copy];
+    // 4. 应用内截屏(兜底)
     UIApplicationState appState = [UIApplication sharedApplication].applicationState;
     NSLog(@"[TSScreenCapture] 跨应用截屏失败(appState=%ld: 0前台/1后台/2挂起)，回退应用内截屏",
           (long)appState);
     BOOL ok = [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
     if (ok) { return YES; }
     // 汇总全部路径失败原因, 供 Lua 层展示(NSLog 普通用户看不到)
-    self.lastError = [NSString stringWithFormat:@"系统窗口: %@; CARenderServer: %@; IOMFB: %@; 应用内: %@",
-                      err0 ?: @"未尝试", err1 ?: @"未尝试", err2 ?: @"未尝试", self.lastError ?: @"未尝试"];
+    self.lastError = [NSString stringWithFormat:@"全局显示: %@; 系统窗口: %@; CARenderServer: %@; IOMFB: %@; 应用内: %@",
+                      err0 ?: @"未尝试", err1 ?: @"未尝试", err2 ?: @"未尝试", err3 ?: @"未尝试",
+                      self.lastError ?: @"未尝试"];
     return NO;
 }
 
