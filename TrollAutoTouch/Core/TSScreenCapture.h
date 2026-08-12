@@ -6,19 +6,21 @@
 //
 //  原版逆向(HUDServices + luaLib 符号级确认):
 //   完全不用 IOMobileFramebuffer、不用 CARenderServerRenderDisplay。
-//   跨应用截屏走 WindowServer 渲染管线:
-//   +[UIWindow windowWithContextId:](部分版本为 _windowWithContextId:) → 远程窗口代理
-//   → [remoteWindow createScreenIOSurface](UIWindow 私有实例方法) → 直接拿到绑定 context 的
-//     渲染输出 IOSurface(无需自行 IOSurfaceCreate)
+//   核心截屏链路(反汇编确认)是直接向 UIScreen 索取全屏渲染 surface:
+//   [UIScreen mainScreen] createScreenIOSurface (iOS12+ 私有 API, performSelector 动态调用)
+//     → 返回绑定主屏渲染管线的全屏 IOSurface(系统级创建, 无需自行 IOSurfaceCreate,
+//       后台/跨 App 可用, 这是与所有自建 surface 方案的关键差异)
 //   → IOSurfaceLock / IOSurfaceGetBaseAddress 直接读像素
-//   (HUD 另备 IOSurfaceCreate + IOSurfaceAcceleratorTransferSurface 转储链路)。
+//   → 可选 _UICreateCGImageFromIOSurface / IOSurfaceAcceleratorTransferSurface 转储链路
 //   该链路不依赖 App 自身前后台状态, 切到其他 App 后仍能取到真实屏幕像素(依赖 global-capture entitlement)。
 //
-//  本类提供四级截屏路径(自动回退):
-//   0. 系统窗口(原版链路首选): windowWithContextId: + createScreenIOSurface, 可截任意 App。
-//   1. CARenderServerRenderDisplay: WindowServer 直接渲染主屏到 IOSurface(TrollShot 方案, 保留回退)。
-//   2. IOMFB 帧缓冲: 前台场景可用，后台/其他 App 前台时会拿到空 surface(已对齐原版移除主用地位)。
-//   3. 应用内回退: UIGraphicsImageRenderer 截取本 App 窗口(用于自测/无权限时)。
+//  本类提供多级截屏路径(自动回退):
+//   0. UIScreen createScreenIOSurface(原版核心链路首选, iOS12+ 私有 API)。
+//   1. 系统窗口: windowWithContextId: + createScreenIOSurface, 可截任意 App。
+//   2. 全局显示: IORegistry DisplaySurface + IOSurfaceLookup(拿现成 surface)。
+//   3. CARenderServerRenderDisplay: WindowServer 直接渲染主屏到 IOSurface(TrollShot 方案, 保留回退)。
+//   4. IOMFB 帧缓冲: 前台场景可用，后台/其他 App 前台时会拿到空 surface(已对齐原版移除主用地位)。
+//   5. 应用内回退: UIGraphicsImageRenderer 截取本 App 窗口(用于自测/无权限时)。
 //
 
 #import <Foundation/Foundation.h>

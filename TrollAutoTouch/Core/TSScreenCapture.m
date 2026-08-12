@@ -4,25 +4,27 @@
 //
 //  屏幕截图 —— 对齐原版 TrollAutoScript 的截屏能力。
 //
-//  原版逆向结论(HUDServices + luaLib 符号级确认):
+//  原版逆向结论(HUDServices 反汇编 + luaLib 符号级确认):
 //   - 完全不用 IOMobileFramebuffer(GetMainDisplay/GetLayerDefaultSurface/GetSurface 均不存在)
 //   - 完全不用 CARenderServerRenderDisplay(该符号在原版中不存在)
-//   - 跨应用截屏链路为:
-//       +[UIWindow windowWithContextId:](部分版本为 _windowWithContextId:)
-//                                       → 绑定主屏 context 的远程窗口代理
-//       [remoteWindow createScreenIOSurface](UIWindow 私有实例方法)
-//                                       → 直接拿到该 context 的渲染输出 IOSurface
-//                                         (无需自行 IOSurfaceCreate, 规避权限问题)
+//   - 跨应用截屏核心链路为(反汇编 0x100056464 确认):
+//       receiver = [UIScreen mainScreen]
+//       [receiver performSelector:@selector(createScreenIOSurface)]   ← UIScreen 实例私有方法
+//                                       → 返回绑定主屏渲染管线的**全屏 IOSurface**
+//                                         (系统级创建, 无需 IOSurfaceCreate,
+//                                          后台/跨 App 可用 —— 与所有自建 surface 方案的关键差异)
 //       IOSurfaceLock / IOSurfaceGetBaseAddress / IOSurfaceGetBytesPerRow → 直接读像素(找色用)
 //       (HUD 另备 IOSurfaceCreate + IOSurfaceAcceleratorTransferSurface 转储链路)
 //   - 该链路走 WindowServer 渲染管线(依赖 global-capture entitlement), 与 App 自身
 //     前后台状态无关, 因此切换到其他 App 后仍能取到真实屏幕像素。
 //
-//  本类提供四级截屏路径(自动回退):
-//   0. 系统窗口(原版链路首选): windowWithContextId: + createScreenIOSurface
-//   1. CARenderServerRenderDisplay: TrollShot 方案, 保留回退(依赖 IOSurfaceCreate, 可能受限)
-//   2. IOMFB 帧缓冲(回退): 前台场景可用, 后台/其他 App 前台时会拿到空 surface
-//   3. 应用内截屏(兜底): 仅本 App 窗口
+//  本类提供多级截屏路径(自动回退):
+//   0. UIScreen createScreenIOSurface(原版核心链路首选, iOS12+ 私有 API)
+//   1. 系统窗口: windowWithContextId: + createScreenIOSurface
+//   2. 全局显示: IORegistry DisplaySurface + IOSurfaceLookup(拿现成 surface)
+//   3. CARenderServerRenderDisplay: TrollShot 方案, 保留回退(依赖 IOSurfaceCreate, 可能受限)
+//   4. IOMFB 帧缓冲(回退): 前台场景可用, 后台/其他 App 前台时会拿到空 surface
+//   5. 应用内截屏(兜底): 仅本 App 窗口
 
 #import "TSScreenCapture.h"
 #import <dlfcn.h>
@@ -318,7 +320,89 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     return YES;
 }
 
-#pragma mark - 跨应用截屏: 全局显示截取(最优先, 参考"无忧辅助" IORegistry 方案)
+#pragma mark - 跨应用截屏: UIScreen createScreenIOSurface(最优先, 原版 HUD 核心链路)
+
+// 逆向反汇编确认(HUDServices 0x100056464):
+//   receiver = [UIScreen mainScreen]
+//   [receiver performSelector:@selector(createScreenIOSurface)]
+// createScreenIOSurface 是 UIScreen 实例私有方法(iOS 12+), 返回绑定主屏渲染管线的
+// **全屏 IOSurface**, 由系统在 WindowServer 侧创建/维护 —— 无需自行 IOSurfaceCreate,
+// 不依赖 contextId/CARenderServer, 后台/切到其他 App 后仍能取到真实屏幕像素。
+// 拿到 surface 后复用 _dumpIOSurface: 转储链路(优先加速器, 失败直读)读 RGBA。
+- (BOOL)_captureUIScreenIOSurfaceToRGBA:(uint8_t **)pixelsOut
+                                  width:(int *)widthOut
+                                 height:(int *)heightOut {
+    if (!_iosurfaceHandle) {
+        TSSetLastError(@"路径0 UIScreenSurface: IOSurface 框架加载失败");
+        return NO;
+    }
+    IOSurfaceGetTypeIDFunc typeIdFn = (IOSurfaceGetTypeIDFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetTypeID");
+    if (!typeIdFn) {
+        TSSetLastError(@"路径0 UIScreenSurface: IOSurfaceGetTypeID 符号不可用");
+        return NO;
+    }
+
+    // createScreenIOSurface 必须在主线程调用(UIScreen 相关操作), 非主线程时异步派发 + 超时
+    __block IOSurfaceRef surf = NULL;
+    void (^getSurfaceBlock)(void) = ^{
+        @autoreleasepool {
+            UIScreen *screen = [UIScreen mainScreen];
+            SEL sel = NSSelectorFromString(@"createScreenIOSurface");
+            if (!sel || ![screen respondsToSelector:sel]) { return; }
+            NSMethodSignature *sig = [screen methodSignatureForSelector:sel];
+            if (!sig || sig.methodReturnLength < sizeof(void *)) { return; }
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            inv.target = screen;
+            inv.selector = sel;
+            @try {
+                [inv invoke];
+                __unsafe_unretained id result = nil;
+                [inv getReturnValue:&result];
+                if (result && CFGetTypeID((__bridge CFTypeRef)result) == typeIdFn()) {
+                    surf = (__bridge IOSurfaceRef)result;
+                }
+            } @catch (NSException *e) {
+                NSLog(@"[TSScreenCapture] createScreenIOSurface 异常: %@", e);
+            }
+        }
+    };
+    if ([NSThread isMainThread]) {
+        getSurfaceBlock();
+    } else {
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            getSurfaceBlock();
+            dispatch_semaphore_signal(sema);
+        });
+        if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC)) != 0) {
+            TSSetLastError(@"路径0 UIScreenSurface: 主线程调用超时");
+            return NO;
+        }
+    }
+    if (!surf) {
+        TSSetLastError(@"路径0 UIScreenSurface: createScreenIOSurface 未返回 IOSurface(需 iOS12+ 且 TrollStore 全权限环境)");
+        NSLog(@"[TSScreenCapture] UIScreen createScreenIOSurface 不可用或未返回 surface");
+        return NO;
+    }
+
+    uint8_t *px = NULL; int w = 0, h = 0;
+    if (![self _dumpIOSurface:surf pixelsOut:&px width:&w height:&h] || !px) {
+        TSSetLastError(@"路径0 UIScreenSurface: surface 读取失败");
+        return NO;
+    }
+    if ([self _isAllZeroPixels:px width:w height:h]) {
+        TSSetLastError(@"路径0 UIScreenSurface: 截到空内容(全 0)");
+        NSLog(@"[TSScreenCapture] UIScreen createScreenIOSurface 截到空内容");
+        free(px);
+        return NO;
+    }
+    NSLog(@"[TSScreenCapture] UIScreen createScreenIOSurface 截屏成功 %dx%d", w, h);
+    self.lastError = nil;
+    *pixelsOut = px; *widthOut = w; *heightOut = h;
+    return YES;
+}
+
+#pragma mark - 跨应用截屏: 全局显示截取(参考"无忧辅助" IORegistry 方案)
 
 // 核心思路: 去 IORegistry 里找 IOMobileFramebuffer / AppleDCP 等系统显示服务的
 // DisplaySurface / CurrentSurface 属性, 拿到 surface ID 后用 IOSurfaceLookup 直接映射
@@ -894,36 +978,41 @@ static const char *_gsSurfaceKeys[] = {
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
-    // 0. 全局显示截取(最优先: IORegistry DisplaySurface + IOSurfaceLookup, 拿现成 surface, 跨 App)
-    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 后台/跨 App 可用)
+    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err0 = [self.lastError copy];
-    // 1. 系统窗口截屏(原版链路: windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
-    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 1. 全局显示截取(IORegistry DisplaySurface + IOSurfaceLookup, 拿现成 surface, 跨 App)
+    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err1 = [self.lastError copy];
-    // 2. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 方案, 保留回退)
-    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 2. 系统窗口截屏(windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
+    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err2 = [self.lastError copy];
-    // 3. IOMFB 帧缓冲(前台场景回退)
-    if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 3. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 方案, 保留回退)
+    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err3 = [self.lastError copy];
-    // 4. 应用内截屏(兜底)
+    // 4. IOMFB 帧缓冲(前台场景回退)
+    if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
+    NSString *err4 = [self.lastError copy];
+    // 5. 应用内截屏(兜底)
     UIApplicationState appState = [UIApplication sharedApplication].applicationState;
     NSLog(@"[TSScreenCapture] 跨应用截屏失败(appState=%ld: 0前台/1后台/2挂起)，回退应用内截屏",
           (long)appState);
     BOOL ok = [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
     if (ok) { return YES; }
     // 汇总全部路径失败原因, 供 Lua 层展示(NSLog 普通用户看不到)
-    self.lastError = [NSString stringWithFormat:@"全局显示: %@; 系统窗口: %@; CARenderServer: %@; IOMFB: %@; 应用内: %@",
+    self.lastError = [NSString stringWithFormat:@"UIScreenSurface: %@; 全局显示: %@; 系统窗口: %@; CARenderServer: %@; IOMFB: %@; 应用内: %@",
                       err0 ?: @"未尝试", err1 ?: @"未尝试", err2 ?: @"未尝试", err3 ?: @"未尝试",
-                      self.lastError ?: @"未尝试"];
+                      err4 ?: @"未尝试", self.lastError ?: @"未尝试"];
     return NO;
 }
 
