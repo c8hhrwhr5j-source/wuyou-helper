@@ -44,6 +44,10 @@ targets:
         excludes:
           - "lua.c"    # 独立解释器程序, 不需要编译进 App
           - "luac.c"   # 独立编译器程序, 不需要编译进 App
+        # LUA_USE_IOS: Lua 官方 iOS 构建宏（等价官方 Makefile 的 ios target）。
+        # 使 loslib.c 不调用 iOS SDK 标记为 unavailable 的 system()，
+        # 并在 luaconf.h 中启用 LUA_USE_POSIX/LUA_USE_DLOPEN（iOS 均支持）。
+        compilerFlags: "-DLUA_USE_IOS"
         # 头文件搜索路径: 使 TSLuaBridge.m 能 #import "lua.h"
         headerVisibility: public
         createIntermediateGroups: true
