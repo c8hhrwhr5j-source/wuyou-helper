@@ -115,21 +115,45 @@ jobs:
           ls "$ICONSET"/*.png 1>/dev/null 2>&1 && cp "$ICONSET"/*.png "$APP_DST/" && echo "[OK]" || echo "[!] no icons"
 
           echo ""
-          echo "=== 注入 entitlements (ldid) ==="
+          echo "=== 注入 entitlements ==="
           echo "[*] ldid 版本: $(ldid -V 2>&1 | head -1 || echo unknown)"
           echo "[*] entitlements 文件: $ENT"
           test -f "$ENT" || { echo "[x] entitlements 文件不存在!"; exit 1; }
-          # 先用 plutil 验证 plist 是否合法
-          plutil -lint "$ENT" || { echo "[x] entitlements plist 非法, 停止打包"; exit 1; }
-          echo "[>] ldid -S$ENT $BIN"
-          ldid -S"$ENT" "$BIN" 2>&1 || { echo "[x] ldid 注入失败, 停止打包"; exit 1; }
-          echo "[ldid 返回: $?]"
+
+          # 1) 规范化: 消除 BOM/CRLF/编码问题, 统一为标准 LF XML plist
+          plutil -convert xml1 -o /tmp/ent.xml "$ENT" || { echo "[x] plutil 转换失败, 停止打包"; exit 1; }
+          plutil -lint /tmp/ent.xml >/dev/null || { echo "[x] 规范化后的 plist 非法, 停止打包"; exit 1; }
+          echo "[OK] entitlements 已规范化为 /tmp/ent.xml ($(wc -c < /tmp/ent.xml) bytes)"
+
+          # 2) 诊断: 二进制是否带 chained fixups load command
+          echo "[*] 二进制签名结构:"
+          otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
+
+          # 3) 注入: 优先 Apple 原生 codesign (adhoc 签名 + entitlements)。
+          #    codesign 与 Xcode 产物完全兼容, 不存在 ldid 的 plist parser / DER 格式错位问题;
+          #    且用同一工具验证不会出现"写入 DER 读不出 XML"的假阴性。
+          #    TrollStore 安装时会重新签名, 但保留二进制内已嵌入的 entitlements。
+          if codesign --force --sign - --entitlements /tmp/ent.xml "$BIN" 2>/tmp/codesign.log; then
+            echo "[OK] codesign 注入成功 (adhoc)"
+            SIGN_TOOL=codesign
+          else
+            echo "[!] codesign 失败, 回退 ldid:"
+            echo "    $(cat /tmp/codesign.log)"
+            ldid -S/tmp/ent.xml "$BIN" 2>&1 || { echo "[x] ldid 注入失败, 停止打包"; exit 1; }
+            echo "[OK] ldid 注入成功"
+            SIGN_TOOL=ldid
+          fi
 
           echo ""
           echo "=== 验证注入结果 ==="
-          EXTRACTED=$(ldid -e "$BIN" 2>/dev/null || true)
+          # codesign 优先提取 (支持 DER), ldid -e 兜底
+          if [ "$SIGN_TOOL" = "codesign" ]; then
+            EXTRACTED=$(codesign -d --entitlements - "$BIN" 2>/dev/null || ldid -e "$BIN" 2>/dev/null || true)
+          else
+            EXTRACTED=$(ldid -e "$BIN" 2>/dev/null || codesign -d --entitlements - "$BIN" 2>/dev/null || true)
+          fi
           echo "$EXTRACTED" > /tmp/ent_check.xml
-          echo "[*] ldid -e 输出: $(wc -c < /tmp/ent_check.xml) bytes"
+          echo "[*] 注入工具: ${SIGN_TOOL}, 提取 entitlements: $(wc -c < /tmp/ent_check.xml) bytes"
           MISSING=0
           for KEY in "com.apple.private.security.no-sandbox" "platform-application" "com.apple.private.tcc.allow" "keychain-access-groups" "com.apple.private.security.container-manager"; do
             if grep -q "$KEY" /tmp/ent_check.xml; then
@@ -142,8 +166,10 @@ jobs:
           if [ "$MISSING" = "1" ]; then
             echo ""
             echo "[x] entitlements 注入验证失败, 停止打包"
-            echo "[debug] ldid -e 前 60 行:"
+            echo "[debug] 提取的 entitlements 前 60 行:"
             head -60 /tmp/ent_check.xml
+            echo "[debug] codesign 完整校验:"
+            codesign --verify --deep --strict "$APP_DST" 2>&1 || true
             exit 1
           fi
           echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container 全部就位)"
