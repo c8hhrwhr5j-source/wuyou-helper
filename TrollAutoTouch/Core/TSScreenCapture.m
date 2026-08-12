@@ -310,7 +310,10 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     // IOMFB 帧缓冲在后台/其他 App 前台时可能返回空 surface(IOSurfaceLock 读到全 0),
     // 加全 0 检测, 避免静默返回黑屏让 getColor 误判成 0x000000。
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (![self _dumpIOSurface:surface pixelsOut:&px width:&w height:&h] || !px) { return NO; }
+    if (![self _dumpIOSurface:surface pixelsOut:&px width:&w height:&h] || !px) {
+        TSSetLastError(@"路径3 IOMFB: 转储帧缓冲 surface 失败");
+        return NO;
+    }
     if ([self _isAllZeroPixels:px width:w height:h]) {
         NSLog(@"[TSScreenCapture] IOMFB 帧缓冲截到空内容(全 0)，后台帧缓冲不可读");
         free(px);
