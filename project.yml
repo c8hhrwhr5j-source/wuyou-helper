@@ -36,6 +36,10 @@ targets:
           - "Resources/demo.script"
           - "Resources/demo.lua"
           - "Resources/lua/**"
+          # vendor/lua 由下方独立条目管理（需排除 lua.c/luac.c 两个含 main 的程序源）。
+          # 若不排除，本递归条目会把它们一并收录，与 AppDelegate 的 main 冲突
+          # 导致链接期 duplicate symbol '_main'。
+          - "vendor/lua/**"
       - path: TrollAutoTouch/vendor/lua
         excludes:
           - "lua.c"    # 独立解释器程序, 不需要编译进 App
