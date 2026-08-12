@@ -12,6 +12,9 @@ build/
 _tmp.zip
 _tmp_extracted/
 
+# 逆向分析归档（脚本与结果，供以后排查问题参考）
+_analysis/
+
 # 日志与本地脚本
 *.log
 *.local

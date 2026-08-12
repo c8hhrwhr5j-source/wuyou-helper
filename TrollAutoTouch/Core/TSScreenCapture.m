@@ -18,8 +18,16 @@ typedef struct __IOSurface *IOSurfaceRef;
 // 注意: 这些函数是"输入参数 + 返回 kern_return_t"，不是"返回指针"。
 // 错误签名会把结果写到垃圾地址，是 getColor 闪退的根因(与原版逆向结果一致)。
 typedef kern_return_t (*IOMFBGetMainDisplayFunc)(void **fb);                    // IOMobileFramebufferGetMainDisplay(&fb)
-typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);  // iOS 14 及更早, 2 参数
+// 注意: IOMobileFramebufferGetSurface 真实签名是 (fb, surfaceIndex, out) 3 个参数,
+// 绝不能按 2 参调用, 否则第 3 个参数取到寄存器垃圾值, 写入垃圾地址拿不到 surface。
+typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, int surfaceIndex, IOSurfaceRef *surface);
 typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurfaceRef *surface); // iOS 15+, 3 参数
+
+// IOSurfaceAccelerator 私有接口(对齐原版 HUD 的截屏链路: 硬件 surface -> 加速器转储 -> 自建 surface)
+typedef kern_return_t (*IOSurfaceAccelCreateFunc)(CFAllocatorRef allocator, uint32_t type, void **acceleratorOut);
+typedef kern_return_t (*IOSurfaceAccelTransferFunc)(void *accelerator, IOSurfaceRef sourceSurface,
+                                                    IOSurfaceRef destSurface, CFDictionaryRef dict,
+                                                    void **errorOut);
 
 @interface TSScreenCapture () {
     void *_iomfbHandle;
@@ -70,54 +78,109 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurface
     IOSurfaceRef surface = NULL;
     kern_return_t kr = KERN_FAILURE;
 
-    // 优先 iOS 14 及更早的 2 参数接口; 找不到(系统较新)再用 iOS 15+ 的 3 参数接口。
-    IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
-    if (getSurface) {
-        kr = getSurface(fb, &surface);
+    // 优先 iOS 15+ 的 IOMobileFramebufferGetLayerDefaultSurface(fb, layer, &surface),
+    // 个别机型/版本主屏不在 layer 0, 逐个尝试直到拿到 surface。
+    IOMFBGetLayerSurfaceFunc getLayerSurface = (IOMFBGetLayerSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
+    if (getLayerSurface) {
+        for (int layer = 0; layer < 4; layer++) {
+            surface = NULL;
+            kr = getLayerSurface(fb, layer, &surface);
+            if (kr == KERN_SUCCESS && surface) { break; }
+        }
     } else {
-        IOMFBGetLayerSurfaceFunc getLayerSurface = (IOMFBGetLayerSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
-        if (getLayerSurface) {
-            // iOS 15+ 第 2 参数是 layer 索引，个别机型/版本主屏不在 0，逐个尝试直到拿到 surface。
-            for (int layer = 0; layer < 4; layer++) {
-                surface = NULL;
-                kr = getLayerSurface(fb, layer, &surface);
-                if (kr == KERN_SUCCESS && surface) { break; }
-            }
+        // iOS 14 及更早: IOMobileFramebufferGetSurface(fb, 0, &surface) —— 3 个参数!
+        IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
+        if (getSurface) {
+            surface = NULL;
+            kr = getSurface(fb, 0, &surface);
         }
     }
-    if (kr != KERN_SUCCESS || !surface) { return NO; }
+    if (kr != KERN_SUCCESS || !surface) {
+        NSLog(@"[TSScreenCapture] 获取帧缓冲 surface 失败 kr=%d", (int)kr);
+        return NO;
+    }
 
-    // 从 IOSurface 拷贝像素。这些函数来自 IOSurface.framework，通过 dlopen/dlsym 动态加载。
+    // ---- 加载 IOSurface 函数 ----
     kern_return_t (*lockFn)(IOSurfaceRef, uint32_t, uint32_t *) =
         dlsym(_iosurfaceHandle, "IOSurfaceLock");
     kern_return_t (*unlockFn)(IOSurfaceRef, uint32_t, uint32_t *) =
         dlsym(_iosurfaceHandle, "IOSurfaceUnlock");
-    void *(*baseAddr)(IOSurfaceRef) =
+    void *(*baseAddrFn)(IOSurfaceRef) =
         dlsym(_iosurfaceHandle, "IOSurfaceGetBaseAddress");
     size_t (*widthFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
     size_t (*heightFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
     size_t (*bytesPerRowFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetBytesPerRow");
     uint32_t (*pixelFormatFn)(IOSurfaceRef) = dlsym(_iosurfaceHandle, "IOSurfaceGetPixelFormat");
+    IOSurfaceRef (*createFn)(CFDictionaryRef) = dlsym(_iosurfaceHandle, "IOSurfaceCreate");
+    IOSurfaceAccelCreateFunc accelCreateFn = (IOSurfaceAccelCreateFunc)dlsym(_iosurfaceHandle, "IOSurfaceAcceleratorCreate");
+    IOSurfaceAccelTransferFunc accelTransferFn = (IOSurfaceAccelTransferFunc)dlsym(_iosurfaceHandle, "IOSurfaceAcceleratorTransferSurface");
 
-    if (!lockFn || !unlockFn || !baseAddr || !widthFn || !heightFn || !bytesPerRowFn) { return NO; }
+    if (!lockFn || !unlockFn || !baseAddrFn || !widthFn || !heightFn || !bytesPerRowFn) { return NO; }
 
-    // 加锁失败说明 surface 当前不可读，直接放弃，避免读到无效内存
-    kern_return_t lk = lockFn(surface, 0, NULL);
-    if (lk != KERN_SUCCESS) { return NO; }
-    size_t w = widthFn ? widthFn(surface) : 0;
-    size_t h = heightFn ? heightFn(surface) : 0;
-    size_t bpr = bytesPerRowFn ? bytesPerRowFn(surface) : 0;
-    void *base = baseAddr ? baseAddr(surface) : NULL;
+    size_t srcW = widthFn(surface);
+    size_t srcH = heightFn(surface);
+    if (srcW == 0 || srcH == 0) { return NO; }
+
+    // ---- 对齐原版: 用 IOSurfaceAccelerator 把硬件输出 surface 转储到自建 BGRA surface ----
+    // 直接 IOSurfaceLock 读硬件输出 surface 在 iOS 15+/后台/部分机型不可靠(返回空或失败),
+    // 经 GPU 加速器转储后能得到稳定的全屏像素(原版 HUD 就是这么做的)。
+    IOSurfaceRef readSurface = surface;
+    IOSurfaceRef dstSurface = NULL;
+    void *accel = NULL;
+    if (accelCreateFn && accelTransferFn && createFn &&
+        accelCreateFn(kCFAllocatorDefault, 0, &accel) == KERN_SUCCESS && accel) {
+        CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (props) {
+            // kIOSurface* 常量在 IOSurface.framework, 用其字符串字面值即可
+            uint32_t bgra = 0x42475241; // 'BGRA'
+            CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &srcW);
+            CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberLongType, &srcH);
+            CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
+            CFDictionarySetValue(props, CFSTR("Width"), wNum);
+            CFDictionarySetValue(props, CFSTR("Height"), hNum);
+            CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
+            CFDictionarySetValue(props, CFSTR("BytesPerRow"), (__bridge CFNumberRef)@(srcW * 4));
+            CFDictionarySetValue(props, CFSTR("AllocSize"), (__bridge CFNumberRef)@(srcW * srcH * 4));
+            CFRelease(wNum); CFRelease(hNum); CFRelease(fmtNum);
+
+            dstSurface = createFn(props);
+            CFRelease(props);
+        }
+        if (dstSurface) {
+            kern_return_t tr = accelTransferFn(accel, surface, dstSurface, NULL, NULL);
+            if (tr == KERN_SUCCESS) {
+                readSurface = dstSurface;
+            } else {
+                NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d, 回退直接读", (int)tr);
+            }
+        }
+    }
+
+    // ---- 加锁读取 ----
+    kern_return_t lk = lockFn(readSurface, 1 /*kIOSurfaceLockReadOnly*/, NULL);
+    if (lk != KERN_SUCCESS) {
+        NSLog(@"[TSScreenCapture] IOSurfaceLock 失败 kr=%d", (int)lk);
+        if (dstSurface) { CFRelease(dstSurface); }
+        if (accel) { CFRelease(accel); }
+        return NO;
+    }
+    size_t w = widthFn(readSurface);
+    size_t h = heightFn(readSurface);
+    size_t bpr = bytesPerRowFn(readSurface);
+    void *base = baseAddrFn(readSurface);
     if (w == 0 || h == 0 || bpr < w * 4 || !base) {
-        unlockFn(surface, 0, NULL);
+        unlockFn(readSurface, 0, NULL);
+        if (dstSurface) { CFRelease(dstSurface); }
+        if (accel) { CFRelease(accel); }
         return NO;
     }
 
-    // 帧缓冲通常是 BGRA 'BGRA'(0x41524742)。统一转成 RGBA。
+    // 帧缓冲通常是 BGRA 'BGRA'(0x42475241)。统一转成 RGBA。
     uint8_t *out = malloc(w * h * 4);
-    if (!out) { unlockFn(surface, 0, NULL); return NO; }
+    if (!out) { unlockFn(readSurface, 0, NULL); if (dstSurface) { CFRelease(dstSurface); } if (accel) { CFRelease(accel); } return NO; }
 
-    uint32_t fmt = pixelFormatFn ? pixelFormatFn(surface) : 0x42475241; // 默认假设 BGRA
+    uint32_t fmt = pixelFormatFn ? pixelFormatFn(readSurface) : 0x42475241; // 默认假设 BGRA
     for (size_t y = 0; y < h; y++) {
         uint8_t *src = (uint8_t *)base + y * bpr;
         uint8_t *dst = out + y * w * 4;
@@ -135,7 +198,9 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurface
             }
         }
     }
-    unlockFn(surface, 0, NULL);
+    unlockFn(readSurface, 0, NULL);
+    if (dstSurface) { CFRelease(dstSurface); }
+    if (accel) { CFRelease(accel); }
 
     *pixelsOut = out;
     *widthOut = (int)w;
@@ -149,6 +214,11 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurface
 - (BOOL)_captureAppWindowToRGBA:(uint8_t **)pixelsOut
                          width:(int *)widthOut
                         height:(int *)heightOut {
+    // App 进入后台后自身窗口会被系统挂起/清空, 应用内截屏必然返回全黑,
+    // 直接失败, 避免返回黑屏让 getColor 误判成"识别到黑色 0x000000"。
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        return NO;
+    }
     __block UIImage *img = nil;
     void (^captureBlock)(void) = ^{
         UIWindow *keyWindow = nil;
@@ -183,7 +253,17 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurface
     if ([NSThread isMainThread]) {
         captureBlock();
     } else {
-        dispatch_sync(dispatch_get_main_queue(), captureBlock);
+        // 绝不能用 dispatch_sync 无限等待主线程: 若主线程正忙于渲染/UI 事件会互相等待,
+        // 导致整个 App 卡死无响应(只能双击 HOME 强退)。异步派发 + 300ms 超时,
+        // 超时则放弃本次截屏, 保证 Lua 线程永远不被挂起。
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @autoreleasepool { captureBlock(); }
+            dispatch_semaphore_signal(sema);
+        });
+        if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC)) != 0) {
+            return NO;
+        }
     }
     if (!img) { return NO; }
 
@@ -219,7 +299,9 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurface
     if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
-    NSLog(@"[TSScreenCapture] 帧缓冲截屏失败，回退到应用内截屏。系统级截屏需 TrollStore 权限。");
+    UIApplicationState appState = [UIApplication sharedApplication].applicationState;
+    NSLog(@"[TSScreenCapture] 帧缓冲截屏失败(appState=%ld: 0前台/1后台/2挂起)，回退应用内截屏",
+          (long)appState);
     return [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
 }
 
