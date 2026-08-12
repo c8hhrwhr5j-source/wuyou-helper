@@ -33,7 +33,13 @@
                                                                 target:self
                                                                 action:@selector(_clear)];
     clearBtn.tintColor = [TSColors danger];
-    self.navigationItem.rightBarButtonItem = clearBtn;
+
+    UIBarButtonItem *copyBtn = [[UIBarButtonItem alloc] initWithTitle:@"复制"
+                                                                style:UIBarButtonItemStylePlain
+                                                               target:self
+                                                               action:@selector(_copy)];
+    copyBtn.tintColor = [TSColors tint];
+    self.navigationItem.rightBarButtonItems = @[copyBtn, clearBtn];
 
     _textView = [[UITextView alloc] initWithFrame:self.view.bounds];
     _textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -78,6 +84,22 @@
 - (void)_clear {
     [[TSLogStore shared] clear];
     [self _refresh];
+}
+
+- (void)_copy {
+    // 复制全部日志内容到剪贴板(不含文件路径头)
+    NSString *logs = [[[TSLogStore shared].logs componentsJoinedByString:@"\n"]
+                      stringByAppendingString:@"\n"];
+    UIPasteboard.generalPasteboard.string = logs;
+
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:nil
+                                                               message:@"已复制全部日志"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:ac animated:YES completion:^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [ac dismissViewControllerAnimated:YES completion:nil];
+        });
+    }];
 }
 
 @end
