@@ -57,69 +57,65 @@ jobs:
           BIN="$APP_DST/TrollAutoTouch"
           ENT="$PWD/TrollAutoTouch/TrollAutoTouch.entitlements"
 
-          # ======== 架构诊断 ========
           echo ""
           echo "=== 架构 ==="
           lipo -info "$BIN"
           file "$BIN"
 
-          # ======== 清理旧签名 ========
           echo ""
-          echo "=== 清理签名 ==="
+          echo "=== 清理旧签名 ==="
           rm -rf "$APP_DST/_CodeSignature"
           codesign --remove-signature "$BIN" 2>/dev/null && echo "[OK] 签名已移除" || echo "[*] 二进制无签名"
 
-          # ======== 图标 ========
           echo ""
           echo "=== 图标 ==="
           rm -f "$APP_DST/AppIcon.png" "$APP_DST/icon-1024.ico"
           ICONSET="$PWD/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
           ls "$ICONSET"/*.png 1>/dev/null 2>&1 && cp "$ICONSET"/*.png "$APP_DST/" && echo "[OK]" || echo "[!] no icons"
 
-          # ======== 策略 A: codesign 嵌入 entitlements + ldid 假签 ========
           echo ""
-          echo "=== 策略A: codesign(嵌入entitlements) -> ldid(假签) ==="
-          codesign -s - -f --entitlements "$ENT" "$BIN" 2>&1
-          echo "[codesign 返回: $?]"
-          
-          echo ""
-          echo "[验证] codesign --entitlements:"
-          codesign -d --entitlements - "$BIN" 2>&1 | grep -A5 "<?xml" || echo "(无)"
-
-          echo ""
-          echo "[>] ldid -S (假签覆盖, 应该保留 entitlements)"
-          ldid -S "$BIN"
+          echo "=== 注入 entitlements (ldid) ==="
+          echo "[*] entitlements 文件: $ENT"
+          test -f "$ENT" || { echo "[x] entitlements 文件不存在!"; exit 1; }
+          # 先用 plutil 验证 plist 是否合法
+          plutil -lint "$ENT" || { echo "[x] entitlements plist 非法, 停止打包"; exit 1; }
+          echo "[>] ldid -S$ENT $BIN"
+          ldid -S"$ENT" "$BIN" 2>&1 || { echo "[x] ldid 注入失败, 停止打包"; exit 1; }
           echo "[ldid 返回: $?]"
 
           echo ""
-          echo "[验证] ldid -e (假签后):"
-          ldid -e "$BIN"
-          
-          echo ""
-          echo "[验证] codesign --entitlements (假签后):"
-          codesign -d --entitlements - "$BIN" 2>&1 | grep -A5 "<?xml" || echo "(无)"
+          echo "=== 验证注入结果 ==="
+          EXTRACTED=$(ldid -e "$BIN" 2>/dev/null || true)
+          echo "$EXTRACTED" > /tmp/ent_check.xml
+          echo "[*] ldid -e 输出: $(wc -c < /tmp/ent_check.xml) bytes"
+          MISSING=0
+          for KEY in "com.apple.private.security.no-sandbox" "platform-application" "com.apple.private.tcc.allow" "keychain-access-groups" "com.apple.private.security.container-manager"; do
+            if grep -q "$KEY" /tmp/ent_check.xml; then
+              echo "[OK] $KEY"
+            else
+              echo "[x] 缺少: $KEY"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo ""
+            echo "[x] entitlements 注入验证失败, 停止打包"
+            echo "[debug] ldid -e 前 60 行:"
+            head -60 /tmp/ent_check.xml
+            exit 1
+          fi
+          echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container 全部就位)"
 
-          # ======== 策略 B: 直接 ldid 两步（如果 A 不行） ========
-          echo ""
-          echo "=== 策略B: ldid两步 (先空签, 再注entitlements) ==="
-          codesign --remove-signature "$BIN" 2>/dev/null || true
-          echo "[>] ldid -S (空签)"
-          ldid -S "$BIN"
-          echo "[>] ldid -S(entitlements)"
-          ldid -S"$ENT" "$BIN"
-          echo "[验证] ldid -e:"
-          ldid -e "$BIN"
-
-          # ======== Info.plist ========
           echo ""
           echo "=== Info.plist ==="
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$APP_DST/Info.plist" 2>/dev/null || echo "(无 CFBundleIcons)"
-          
+
           echo ""
           echo "=== .app PNG ==="
           find "$APP_DST" -maxdepth 1 -name "*.png" | while read f; do echo "  $(basename $f) ($(stat -f%z "$f") bytes)"; done
 
-          # ======== 打包 ========
+          echo ""
+          echo "=== 打包 ==="
           cd build && zip -qry TrollAutoTouch.ipa Payload
           echo "[OK] build/TrollAutoTouch.ipa"
 
