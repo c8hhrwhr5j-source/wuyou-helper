@@ -94,6 +94,28 @@ static void lua_log(NSString *msg) {
     });
 }
 
+/// 把 Lua 字符串(UTF-8 字节)安全转为 NSString。
+/// 显式按 UTF-8 解码，避免 %s 依赖系统默认编码导致中文乱码；
+/// 非 UTF-8 输入时回退 Latin-1，保证所有字节都能显示。
+static NSString *luaToNSString(const char *s, size_t len) {
+    if (!s || len == 0) return @"";
+    NSString *str = [[NSString alloc] initWithBytes:s length:len encoding:NSUTF8StringEncoding];
+    if (str) return str;
+    return [[NSString alloc] initWithBytes:s length:len encoding:NSISOLatin1StringEncoding];
+}
+
+/// 屏幕物理像素尺寸(逻辑点 × scale)，Lua 脚本统一使用物理像素坐标
+static CGSize screenPixelSize(void) {
+    CGSize s = [UIScreen mainScreen].bounds.size;
+    CGFloat scale = [UIScreen mainScreen].scale;
+    return CGSizeMake(s.width * scale, s.height * scale);
+}
+
+/// 触摸注入用的缩放系数（TSHIDEventTouch 使用逻辑点坐标，Lua 层是物理像素）
+static CGFloat touchScale(void) {
+    return [UIScreen mainScreen].scale;
+}
+
 #pragma mark - Lua 工具
 
 static int l_global_print(lua_State *L) {
@@ -101,8 +123,9 @@ static int l_global_print(lua_State *L) {
     NSMutableString *s = [NSMutableString string];
     for (int i = 1; i <= n; i++) {
         if (i > 1) [s appendString:@"\t"];
-        const char *str = luaL_tolstring(L, i, NULL);
-        [s appendString:@(str ?: "")];
+        size_t len = 0;
+        const char *str = luaL_tolstring(L, i, &len);
+        [s appendString:luaToNSString(str, len)];
         lua_pop(L, 1);
     }
     lua_log([NSString stringWithFormat:@"[Lua] %@", s]);
@@ -110,14 +133,16 @@ static int l_global_print(lua_State *L) {
 }
 
 static int l_global_logStr(lua_State *L) {
-    const char *s = luaL_checkstring(L, 1);
-    lua_log([NSString stringWithFormat:@"[Lua] %s", s ?: ""]);
+    size_t len = 0;
+    const char *s = luaL_checklstring(L, 1, &len);
+    lua_log([NSString stringWithFormat:@"[Lua] %@", luaToNSString(s, len)]);
     return 0;
 }
 
 static int l_global_toast(lua_State *L) {
-    const char *s = luaL_checkstring(L, 1);
-    lua_log([NSString stringWithFormat:@"[toast] %s", s ?: ""]);
+    size_t len = 0;
+    const char *s = luaL_checklstring(L, 1, &len);
+    lua_log([NSString stringWithFormat:@"[toast] %@", luaToNSString(s, len)]);
     return 0;
 }
 
@@ -143,7 +168,7 @@ static int l_global_sleep(lua_State *L) {
 #pragma mark - 屏幕尺寸
 
 static int l_screen_getSize(lua_State *L) {
-    CGSize s = [UIScreen mainScreen].bounds.size;
+    CGSize s = screenPixelSize();
     lua_pushnumber(L, s.width);
     lua_pushnumber(L, s.height);
     return 2;
@@ -241,7 +266,7 @@ static int l_screen_findColor(lua_State *L) {
 
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) { lua_pushnil(L); return 1; }
-    CGSize ss = [UIScreen mainScreen].bounds.size;
+    CGSize ss = screenPixelSize();
     TSColorResult *res = [TSColorFinder findColor:color rect:rect sim:sim
                                           pixels:px width:w height:h screenSize:ss];
     free(px);
@@ -262,7 +287,7 @@ static int l_screen_findColors(lua_State *L) {
 
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) { lua_pushnil(L); return 1; }
-    CGSize ss = [UIScreen mainScreen].bounds.size;
+    CGSize ss = screenPixelSize();
     TSColorResult *res = [TSColorFinder findMultiColor:mainColor rect:rect mainColorSim:sim
                                               offsets:offsets offsetSim:offSim
                                               pixels:px width:w height:h screenSize:ss];
@@ -279,7 +304,7 @@ static int l_screen_getColor(lua_State *L) {
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) { lua_pushnil(L); return 1; }
-    CGSize ss = [UIScreen mainScreen].bounds.size;
+    CGSize ss = screenPixelSize();
     int color = [TSColorFinder getColorAtPoint:CGPointMake(x, y) pixels:px width:w height:h screenSize:ss];
     free(px);
     lua_pushinteger(L, color);
@@ -352,7 +377,8 @@ static int l_touch_tap(lua_State *L) {
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
     NSTimeInterval dur = (NSTimeInterval)luaL_optnumber(L, 3, 0.05);
-    [[TSHIDEventTouch shared] tapAtPoint:CGPointMake(x, y) duration:dur];
+    CGFloat sc = touchScale();
+    [[TSHIDEventTouch shared] tapAtPoint:CGPointMake(x / sc, y / sc) duration:dur];
     return 0;
 }
 
@@ -360,7 +386,8 @@ static int l_touch_down(lua_State *L) {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
-    [[TSHIDEventTouch shared] touchDownAtPoint:CGPointMake(x, y) index:index];
+    CGFloat sc = touchScale();
+    [[TSHIDEventTouch shared] touchDownAtPoint:CGPointMake(x / sc, y / sc) index:index];
     return 0;
 }
 
@@ -368,7 +395,8 @@ static int l_touch_move(lua_State *L) {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
-    [[TSHIDEventTouch shared] touchMoveAtPoint:CGPointMake(x, y) index:index];
+    CGFloat sc = touchScale();
+    [[TSHIDEventTouch shared] touchMoveAtPoint:CGPointMake(x / sc, y / sc) index:index];
     return 0;
 }
 
@@ -376,7 +404,8 @@ static int l_touch_up(lua_State *L) {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
-    [[TSHIDEventTouch shared] touchUpAtPoint:CGPointMake(x, y) index:index];
+    CGFloat sc = touchScale();
+    [[TSHIDEventTouch shared] touchUpAtPoint:CGPointMake(x / sc, y / sc) index:index];
     return 0;
 }
 
@@ -387,7 +416,9 @@ static int l_touch_swipe(lua_State *L) {
     CGFloat y2 = (CGFloat)luaL_checknumber(L, 4);
     NSTimeInterval dur = (NSTimeInterval)luaL_optnumber(L, 5, 0.3);
     NSInteger steps = (NSInteger)luaL_optinteger(L, 6, 20);
-    [[TSHIDEventTouch shared] swipeFromPoint:CGPointMake(x1, y1) toPoint:CGPointMake(x2, y2)
+    CGFloat sc = touchScale();
+    [[TSHIDEventTouch shared] swipeFromPoint:CGPointMake(x1 / sc, y1 / sc)
+                                     toPoint:CGPointMake(x2 / sc, y2 / sc)
                                     duration:dur steps:steps];
     return 0;
 }
@@ -402,12 +433,13 @@ static int l_touch_stroke(lua_State *L) {
     if (n < 2 || (n % 2) != 0) { luaL_error(L, "stroke 点表长度必须是偶数 (x1,y1,x2,y2,...)"); return 0; }
 
     int count = n / 2;
-    // 读取所有点
+    // 读取所有点（Lua 层为物理像素，注入前统一除以 scale 转逻辑点）
+    CGFloat sc = touchScale();
     CGFloat pts[256 * 2];
     if (count > 256) count = 256;
     for (int i = 0; i < count; i++) {
-        lua_rawgeti(L, 1, i * 2 + 1); pts[i * 2]     = (CGFloat)luaL_checknumber(L, -1); lua_pop(L, 1);
-        lua_rawgeti(L, 1, i * 2 + 2); pts[i * 2 + 1] = (CGFloat)luaL_checknumber(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, 1, i * 2 + 1); pts[i * 2]     = (CGFloat)luaL_checknumber(L, -1) / sc; lua_pop(L, 1);
+        lua_rawgeti(L, 1, i * 2 + 2); pts[i * 2 + 1] = (CGFloat)luaL_checknumber(L, -1) / sc; lua_pop(L, 1);
     }
 
     TSHIDEventTouch *t = [TSHIDEventTouch shared];
@@ -510,6 +542,7 @@ static int l_appNode_info(lua_State *L) {
 static int l_appNode_findByText(lua_State *L) {
     const char *text = luaL_checkstring(L, 1);
     NSArray<TSAppNode *> *nodes = [[TSAppNodeInfo shared] findByText:@(text)];
+    CGFloat sc = touchScale();
     lua_newtable(L);
     for (NSUInteger i = 0; i < nodes.count; i++) {
         TSAppNode *node = nodes[i];
@@ -517,12 +550,12 @@ static int l_appNode_findByText(lua_State *L) {
         lua_newtable(L);
         lua_pushstring(L, "class");       lua_pushstring(L, node.className.UTF8String);      lua_settable(L, -3);
         lua_pushstring(L, "text");        lua_pushstring(L, (node.text ?: @"").UTF8String);  lua_settable(L, -3);
-        lua_pushstring(L, "x");           lua_pushnumber(L, node.frame.origin.x);            lua_settable(L, -3);
-        lua_pushstring(L, "y");           lua_pushnumber(L, node.frame.origin.y);            lua_settable(L, -3);
-        lua_pushstring(L, "width");       lua_pushnumber(L, node.frame.size.width);          lua_settable(L, -3);
-        lua_pushstring(L, "height");      lua_pushnumber(L, node.frame.size.height);         lua_settable(L, -3);
-        lua_pushstring(L, "centerX");     lua_pushnumber(L, node.centerPoint.x);             lua_settable(L, -3);
-        lua_pushstring(L, "centerY");     lua_pushnumber(L, node.centerPoint.y);             lua_settable(L, -3);
+        lua_pushstring(L, "x");           lua_pushnumber(L, node.frame.origin.x * sc);       lua_settable(L, -3);
+        lua_pushstring(L, "y");           lua_pushnumber(L, node.frame.origin.y * sc);       lua_settable(L, -3);
+        lua_pushstring(L, "width");       lua_pushnumber(L, node.frame.size.width * sc);     lua_settable(L, -3);
+        lua_pushstring(L, "height");      lua_pushnumber(L, node.frame.size.height * sc);    lua_settable(L, -3);
+        lua_pushstring(L, "centerX");     lua_pushnumber(L, node.centerPoint.x * sc);        lua_settable(L, -3);
+        lua_pushstring(L, "centerY");     lua_pushnumber(L, node.centerPoint.y * sc);        lua_settable(L, -3);
         lua_settable(L, -3);
     }
     return 1;
@@ -1061,7 +1094,9 @@ static void lua_register_all(lua_State *L) {
     int ret = luaL_loadbuffer(L, utf8Code, strlen(utf8Code),
                               path ? path.lastPathComponent.UTF8String : "=(string)");
     if (ret != LUA_OK) {
-        lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %s", lua_tostring(L, -1)]);
+        size_t errLen = 0;
+        const char *errMsg = lua_tolstring(L, -1, &errLen);
+        lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %@", luaToNSString(errMsg, errLen)]);
         lua_close(L);
         self.runningPath = nil;
         self.isRunning = NO;
@@ -1070,8 +1105,9 @@ static void lua_register_all(lua_State *L) {
 
     int pcallRet = lua_pcall(L, 0, 0, 0);
     if (pcallRet != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %s", err ?: "未知"]);
+        size_t errLen = 0;
+        const char *err = lua_tolstring(L, -1, &errLen);
+        lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %@", luaToNSString(err, errLen)]);
         lua_pop(L, 1);
     }
     lua_close(L);

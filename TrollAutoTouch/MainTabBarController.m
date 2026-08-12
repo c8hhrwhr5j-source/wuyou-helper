@@ -11,6 +11,7 @@
 #import "Settings/TSSettingsViewController.h"
 #import "Common/TSPaths.h"
 #import "Script/TSLuaBridge.h"
+#import "HUD/TSHUDWindow.h"
 
 @implementation MainTabBarController
 
@@ -70,12 +71,37 @@
                                              selector:@selector(_handleRunScriptNotification:)
                                                  name:@"TSRunScript"
                                                object:nil];
+
+    // 监听 Lua 运行状态，同步悬浮窗"启停脚本"按钮文字
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_handleLuaStateNotification:)
+                                                 name:TSLuaRunningStateChangedNotification
+                                               object:nil];
+
+    // 悬浮窗"启停脚本"按钮：Lua 运行中则停止，否则运行内置 main.lua
+    [[TSHUDWindow shared] setActionHandler:^(TSHUDAction action) {
+        if (action != TSHUDActionToggleScript) return;
+        TSLuaBridge *lua = [TSLuaBridge shared];
+        if (lua.isRunning) {
+            [lua stop];
+        } else {
+            NSString *path = [TSPaths pathForLua:@"main.lua"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                [lua runFile:path];
+            }
+        }
+    }];
 }
 
 - (void)_handleRunScriptNotification:(NSNotification *)note {
     NSString *path = note.userInfo[@"path"];
     if (!path.length) return;
     [[TSLuaBridge shared] runFile:path];
+}
+
+- (void)_handleLuaStateNotification:(NSNotification *)note {
+    BOOL running = [note.userInfo[@"running"] boolValue];
+    [[TSHUDWindow shared] setScriptRunning:running];
 }
 
 @end

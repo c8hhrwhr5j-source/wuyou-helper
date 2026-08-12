@@ -49,7 +49,8 @@
         return nil;
     }
     
-    CGSize ss = [UIScreen mainScreen].bounds.size;
+    // 截屏像素尺寸即屏幕物理像素，Lua 层统一用物理像素坐标，因此按 1:1 换算
+    CGSize ss = CGSizeMake(w, h);
     TSTemplateMatchResult *res = [self findImage:templateImage accuracy:accuracy rect:rect
                                          pixels:pixels width:w height:h screenSize:ss];
     free(pixels);

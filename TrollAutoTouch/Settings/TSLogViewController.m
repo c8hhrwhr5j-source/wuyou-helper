@@ -62,8 +62,12 @@
 }
 
 - (void)_refresh {
-    NSString *content = [[[TSLogStore shared].logs componentsJoinedByString:@"\n"]
-                         stringByAppendingString:@"\n"];
+    // 顶部显示日志文件路径，便于用户在本地找到历史日志
+    NSString *path = [TSPaths pathForLog:@"touch.log"];
+    NSMutableString *content = [NSMutableString string];
+    [content appendString:[NSString stringWithFormat:@"日志文件: %@\n%@\n", path, @"────────────────────────"]];
+    [content appendString:[[[TSLogStore shared].logs componentsJoinedByString:@"\n"]
+                           stringByAppendingString:@"\n"]];
     _textView.text = content;
 
     if (content.length > 0) {

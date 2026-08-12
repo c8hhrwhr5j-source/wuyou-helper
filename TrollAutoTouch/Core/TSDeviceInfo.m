@@ -22,6 +22,7 @@
 - (NSDictionary *)fullInfo {
     UIDevice *d = [UIDevice currentDevice];
     CGSize ss = [UIScreen mainScreen].bounds.size;
+    CGFloat scale = [UIScreen mainScreen].scale;
     
     [UIDevice currentDevice].batteryMonitoringEnabled = YES;
     
@@ -33,11 +34,12 @@
         @"systemVersion":   d.systemVersion ?: @"",
         @"identifier":      d.identifierForVendor.UUIDString ?: @"",
         @"modelIdentifier": [self modelIdentifier],
-        @"screenWidth":     @(ss.width),
-        @"screenHeight":    @(ss.height),
-        @"screenScale":     @([UIScreen mainScreen].scale),
-        @"screenNativeWidth":   @(ss.width * [UIScreen mainScreen].scale),
-        @"screenNativeHeight":  @(ss.height * [UIScreen mainScreen].scale),
+        // Lua 脚本统一使用物理像素坐标
+        @"screenWidth":     @(ss.width * scale),
+        @"screenHeight":    @(ss.height * scale),
+        @"screenScale":     @(scale),
+        @"screenNativeWidth":   @(ss.width * scale),
+        @"screenNativeHeight":  @(ss.height * scale),
         @"batteryLevel":    @(d.batteryLevel),
         @"batteryState":    @(d.batteryState),
         @"wifiIP":          [self wifiIPAddress] ?: @"",
@@ -46,7 +48,9 @@
 }
 
 - (CGSize)screenSize {
-    return [UIScreen mainScreen].bounds.size;
+    CGSize s = [UIScreen mainScreen].bounds.size;
+    CGFloat scale = [UIScreen mainScreen].scale;
+    return CGSizeMake(s.width * scale, s.height * scale);
 }
 
 - (CGFloat)screenScale {

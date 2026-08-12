@@ -230,9 +230,17 @@
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:e.name
                                                                    message:[NSString stringWithFormat:@"%@\n%lld B", e.modificationDate ?: @"", e.size]
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"▶ 执行" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self _runScript:e];
-    }]];
+    TSLuaBridge *lua = [TSLuaBridge shared];
+    BOOL isThisRunning = lua.isRunning && [lua.runningPath.lastPathComponent isEqualToString:e.name];
+    if (isThisRunning) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"■ 停止" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [lua stop];
+        }]];
+    } else {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"▶ 执行" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self _runScript:e];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"✎ 编辑" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [self _editScript:e];
     }]];
