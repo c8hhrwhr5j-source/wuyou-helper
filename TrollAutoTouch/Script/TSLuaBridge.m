@@ -329,7 +329,15 @@ static int l_screen_findColors(lua_State *L) {
     CGFloat offSim = (CGFloat)luaL_optnumber(L, next + 1, sim);
 
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (!grabScreen(&px, &w, &h)) { lua_pushnil(L); return 1; }
+    if (!grabScreen(&px, &w, &h)) {
+        NSString *err = [TSScreenCapture shared].lastError;
+        if (err.length) {
+            lua_log([NSString stringWithFormat:@"findColor 截屏失败: %@", err]);
+        } else {
+            lua_log(@"findColor 截屏失败(全部路径均失败, 无详细错误)");
+        }
+        lua_pushnil(L); return 1;
+    }
     CGSize ss = screenPixelSize();
     TSColorResult *res = [TSColorFinder findMultiColor:mainColor rect:rect mainColorSim:sim
                                               offsets:offsets offsetSim:offSim
@@ -349,9 +357,13 @@ static int l_screen_getColor(lua_State *L) {
     if (!grabScreen(&px, &w, &h)) {
         // 截屏失败时不返回 nil，否则脚本里 string.format("0x%06X", c) 会因 nil 崩溃。
         // 返回 0(黑色) 并记录日志，让脚本能继续跑、用户能看到取色异常。
-        // 常见原因: 三级截屏路径(windowWithContextId / IOMFB / 应用内)均失败，
-        // 见设置页日志中的 [TSScreenCapture] 条目定位具体原因。
-        lua_log(@"getColor 截屏失败，返回 0x000000(查看设置页日志中的 [TSScreenCapture] 定位原因)");
+        // 失败原因从 TSScreenCapture.lastError 读取(NSLog 用户看不到, 需经这里转发)。
+        NSString *err = [TSScreenCapture shared].lastError;
+        if (err.length) {
+            lua_log([NSString stringWithFormat:@"getColor 截屏失败(全部路径均失败): %@", err]);
+        } else {
+            lua_log(@"getColor 截屏失败(全部路径均失败, 无详细错误)");
+        }
         lua_pushinteger(L, 0);
         return 1;
     }

@@ -59,6 +59,11 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 
 @implementation TSScreenCapture
 
+// 记录失败原因到 lastError(Lua 层可见), 截屏成功路径需手动置 nil
+#define TSSetLastError(...) do { \
+    self.lastError = [NSString stringWithFormat:__VA_ARGS__]; \
+} while (0)
+
 + (instancetype)shared {
     static TSScreenCapture *instance;
     static dispatch_once_t onceToken;
@@ -258,6 +263,7 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         }
     }
     if (kr != KERN_SUCCESS || !surface) {
+        TSSetLastError(@"路径2 IOMFB: 获取帧缓冲 surface 失败 kr=%d", (int)kr);
         NSLog(@"[TSScreenCapture] 获取帧缓冲 surface 失败 kr=%d", (int)kr);
         return NO;
     }
@@ -347,7 +353,10 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 - (BOOL)_captureRenderServerToRGBA:(uint8_t **)pixelsOut
                              width:(int *)widthOut
                             height:(int *)heightOut {
-    if (!_iosurfaceHandle) { return NO; }
+    if (!_iosurfaceHandle) {
+        TSSetLastError(@"路径0 CARenderServer: IOSurface 框架加载失败");
+        return NO;
+    }
     static CARenderServerRenderDisplayFunc renderFn = NULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -355,17 +364,22 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         renderFn = (CARenderServerRenderDisplayFunc)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
     });
     if (!renderFn) {
+        TSSetLastError(@"路径0 CARenderServer: CARenderServerRenderDisplay 符号不可用(该 iOS 无此私有 API)");
         NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 不可用(私有符号缺失)");
         return NO;
     }
 
     CGSize sz = [self _screenPixelSize];
     int w = (int)sz.width, h = (int)sz.height;
-    if (w <= 0 || h <= 0) { return NO; }
+    if (w <= 0 || h <= 0) {
+        TSSetLastError(@"路径0 CARenderServer: 屏幕尺寸无效 %dx%d", w, h);
+        return NO;
+    }
     NSLog(@"[TSScreenCapture] 尝试 CARenderServerRenderDisplay 截屏 %dx%d", w, h);
 
     IOSurfaceRef src = [self _createIOSurfaceWithWidth:w height:h];
     if (!src) {
+        TSSetLastError(@"路径0 CARenderServer: 创建 IOSurface 失败 %dx%d", w, h);
         NSLog(@"[TSScreenCapture] CARenderServer 方案创建 IOSurface 失败 %dx%d", w, h);
         return NO;
     }
@@ -386,13 +400,16 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
             if (![self _isAllZeroPixels:px width:rw height:rh]) {
                 NSLog(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
                       rw, rh, displayNames[attempt]);
+                self.lastError = nil;
                 *pixelsOut = px; *widthOut = rw; *heightOut = rh;
                 CFRelease(src);
                 return YES;
             }
+            TSSetLastError(@"路径0 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
             NSLog(@"[TSScreenCapture] CARenderServer display=%s 取到空内容", displayNames[attempt]);
             free(px);
         } else {
+            TSSetLastError(@"路径0 CARenderServer: display=%s 读 surface 失败", displayNames[attempt]);
             NSLog(@"[TSScreenCapture] CARenderServer display=%s 读 surface 失败", displayNames[attempt]);
         }
     }
@@ -543,6 +560,7 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     unsigned int contextId = [self _mainScreenContextId];
     UIWindow *remoteWindow = [self _remoteWindowWithContextId:contextId];
     if (!remoteWindow) {
+        TSSetLastError(@"路径1 系统窗口: windowWithContextId: 不可用(当前 iOS 版本不支持)");
         NSLog(@"[TSScreenCapture] windowWithContextId: 不可用(当前 iOS 版本不支持)");
         return NO;
     }
@@ -561,13 +579,18 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         if ([self _dumpIOSurface:src pixelsOut:&px width:&w height:&h] && px) {
             if (![self _isAllZeroPixels:px width:w height:h]) {
                 NSLog(@"[TSScreenCapture] 系统窗口截屏成功(路径A/IOSurface) %dx%d contextId=%u", w, h, contextId);
+                self.lastError = nil;
                 *pixelsOut = px; *widthOut = w; *heightOut = h;
                 return YES;
             }
+            TSSetLastError(@"路径1 系统窗口: 路径A(IOSurface)取到空内容");
             NSLog(@"[TSScreenCapture] 路径A(IOSurface)取到空内容, 回退路径B");
             free(px);
+        } else {
+            TSSetLastError(@"路径1 系统窗口: 路径A dump IOSurface 失败");
         }
     } else {
+        TSSetLastError(@"路径1 系统窗口: 未从远程窗口获取到 IOSurface source");
         NSLog(@"[TSScreenCapture] 未从远程窗口获取到 IOSurface source, 走路径B(drawViewHierarchy)");
     }
 
@@ -582,16 +605,24 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     [remoteWindow drawViewHierarchyInRect:r afterScreenUpdates:NO];
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
-    if (!img) { return NO; }
+    if (!img) {
+        TSSetLastError(@"路径1 系统窗口: drawViewHierarchy 未生成图像");
+        return NO;
+    }
 
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (![self _extractRGBAFromImage:img pixelsOut:&px width:&w height:&h] || !px) { return NO; }
+    if (![self _extractRGBAFromImage:img pixelsOut:&px width:&w height:&h] || !px) {
+        TSSetLastError(@"路径1 系统窗口: 快照转 RGBA 失败");
+        return NO;
+    }
     if ([self _isAllZeroPixels:px width:w height:h]) {
+        TSSetLastError(@"路径1 系统窗口: 远程窗口快照全黑(contextId=%u 未绑定实际屏幕)", contextId);
         NSLog(@"[TSScreenCapture] 远程窗口快照为空(全黑), 可能 contextId=%u 未绑定到实际屏幕", contextId);
         free(px);
         return NO;
     }
     NSLog(@"[TSScreenCapture] 系统窗口截屏成功(路径B/drawViewHierarchy) %dx%d contextId=%u", w, h, contextId);
+    self.lastError = nil;
     *pixelsOut = px; *widthOut = w; *heightOut = h;
     return YES;
 }
@@ -604,6 +635,7 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     // App 进入后台后自身窗口会被系统挂起/清空, 应用内截屏必然返回全黑,
     // 直接失败, 避免返回黑屏让 getColor 误判成"识别到黑色 0x000000"。
     if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        TSSetLastError(@"路径3 应用内: App 在后台, 应用内截屏会全黑已跳过");
         return NO;
     }
     __block UIImage *img = nil;
@@ -682,19 +714,27 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
+    NSString *err0 = [self.lastError copy];
     // 1. 系统窗口截屏(对齐原版: 可截任意 App, 含其他 App 前台/后台场景)
     if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
+    NSString *err1 = [self.lastError copy];
     // 2. IOMFB 帧缓冲(前台场景回退)
     if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
+    NSString *err2 = [self.lastError copy];
     // 3. 应用内截屏(兜底)
     UIApplicationState appState = [UIApplication sharedApplication].applicationState;
     NSLog(@"[TSScreenCapture] 跨应用截屏失败(appState=%ld: 0前台/1后台/2挂起)，回退应用内截屏",
           (long)appState);
-    return [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
+    BOOL ok = [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
+    if (ok) { return YES; }
+    // 汇总全部路径失败原因, 供 Lua 层展示(NSLog 普通用户看不到)
+    self.lastError = [NSString stringWithFormat:@"CARenderServer: %@; 系统窗口: %@; IOMFB: %@; 应用内: %@",
+                      err0 ?: @"未尝试", err1 ?: @"未尝试", err2 ?: @"未尝试", self.lastError ?: @"未尝试"];
+    return NO;
 }
 
 - (UIImage *)captureImage {

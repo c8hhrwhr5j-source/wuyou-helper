@@ -26,6 +26,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)shared;
 
+/// 最近一次截屏失败原因(逐路径记录, 便于 Lua 层展示); 截屏成功时为 nil。
+@property (nonatomic, strong, nullable) NSString *lastError;
+
 /// 截取整屏，返回 RGBA 像素缓冲(用于找色)。
 /// @param pixelsOut  输出像素数组(调用者用完需 free)。每像素 4 字节 RGBA。
 /// @param widthOut   输出宽度(像素)
