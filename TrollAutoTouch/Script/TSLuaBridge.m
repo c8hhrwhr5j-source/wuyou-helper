@@ -21,6 +21,8 @@
 #import "TSLuaBridge.h"
 #import "../Common/TSLogStore.h"
 #import <UIKit/UIKit.h>
+
+NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningStateChanged";
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
