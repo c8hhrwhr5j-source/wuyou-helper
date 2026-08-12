@@ -10,6 +10,7 @@
 #import "Script/TSScriptListViewController.h"
 #import "Settings/TSSettingsViewController.h"
 #import "Common/TSPaths.h"
+#import "Script/TSLuaBridge.h"
 
 @implementation MainTabBarController
 
@@ -51,6 +52,19 @@
     self.tabBar.barTintColor = [TSColors card];
     self.tabBar.tintColor    = [TSColors tint];
     self.tabBar.unselectedItemTintColor = [TSColors tertiaryLabel];
+
+    // 接收脚本列表页"执行"通知，交给 Lua 引擎运行
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_handleRunScriptNotification:)
+                                                 name:@"TSRunScript"
+                                               object:nil];
+}
+
+- (void)_handleRunScriptNotification:(NSNotification *)note {
+    NSString *path = note.userInfo[@"path"];
+    if (!path.length) return;
+    [[TSLuaBridge shared] runFile:path];
+}
 
     // ── 浅色 NavigationBar ──
     if (@available(iOS 13.0, *)) {

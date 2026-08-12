@@ -23,6 +23,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// 脚本运行状态变化通知（userInfo: @{@"running": @(BOOL), @"path": NSString?}）
+FOUNDATION_EXPORT NSNotificationName const TSLuaRunningStateChangedNotification;
+
 @interface TSLuaBridge : NSObject
 
 + (instancetype)shared;
@@ -32,6 +35,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 是否正在运行脚本
 @property (nonatomic, assign) BOOL isRunning;
+
+/// 当前正在运行的脚本完整路径(nil 表示未在运行)
+@property (nonatomic, copy, nullable) NSString *runningPath;
 
 /// 在后台线程执行 Lua 脚本文件
 - (void)runFile:(NSString *)path;

@@ -12,6 +12,7 @@
 #import "../Script/TSHTTPServer.h"
 #import "../HUD/TSHUDWindow.h"
 #import "../Common/TSPaths.h"
+#import "TSLogViewController.h"
 
 #pragma mark - Switch Cell
 
@@ -137,6 +138,7 @@
     _tableView.rowHeight  = 44;
     [_tableView registerClass:[TSSwitchCell class] forCellReuseIdentifier:@"switch"];
     [_tableView registerClass:[TSURLInfoCell class] forCellReuseIdentifier:@"url"];
+    [_tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"action"];
     [self.view addSubview:_tableView];
 
     // 性能面板 (浅色背景)
@@ -204,18 +206,32 @@
 #pragma mark - TableView
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
-    return 1;
+    return 2;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    return _tasServiceOn ? 5 : 1;
+    if (section == 0) return _tasServiceOn ? 5 : 1;
+    return 1; // 通用: 查看日志
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    return @"服务";
+    return section == 0 ? @"服务" : @"通用";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 1) {
+        UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"action"];
+        c.backgroundColor = [TSColors card];
+        c.textLabel.text = @"查看日志";
+        c.textLabel.textColor = [TSColors label];
+        c.textLabel.font = [UIFont systemFontOfSize:15];
+        c.imageView.image = [self _icon:@"list.bullet.rectangle"];
+        c.imageView.tintColor = [TSColors tint];
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        c.selectionStyle = UITableViewCellSelectionStyleDefault;
+        return c;
+    }
+
     if (ip.row == 0) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
         c.iconView.image = [self _icon:@"bolt.fill"];
@@ -257,6 +273,13 @@
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
+
+    if (ip.section == 1) {
+        TSLogViewController *vc = [[TSLogViewController alloc] init];
+        [self.navigationController pushViewController:vc animated:YES];
+        return;
+    }
+
     if (ip.row == 4) {
         UIPasteboard.generalPasteboard.string = [self _serviceURL];
         UIAlertController *ac = [UIAlertController alertControllerWithTitle:nil

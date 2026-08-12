@@ -10,6 +10,7 @@
 #import "TSScriptListViewController.h"
 #import "../Core/TSToolExecutor.h"
 #import "../Common/TSPaths.h"
+#import "TSLuaBridge.h"
 
 @interface TSScriptListViewController () <UITableViewDelegate, UITableViewDataSource>
 
@@ -47,6 +48,22 @@
     [self.view addSubview:_tableView];
 
     [self _setupNavBar];
+
+    // 脚本运行状态变化时刷新"运行中"标记
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_onLuaStateChanged:)
+                                                 name:TSLuaRunningStateChangedNotification
+                                               object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)_onLuaStateChanged:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self _reload];
+    });
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -185,6 +202,22 @@
 
     if (@available(iOS 13.0, *)) {
         cell.imageView.image = [UIImage systemImageNamed:@"doc.text"];
+    }
+
+    // 当前正在运行的脚本，在名字最右侧显示"运行中"标签
+    TSLuaBridge *lua = [TSLuaBridge shared];
+    if (lua.isRunning && [lua.runningPath.lastPathComponent isEqualToString:e.name]) {
+        UILabel *tag = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 50, 22)];
+        tag.text = @"运行中";
+        tag.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+        tag.textColor = [UIColor whiteColor];
+        tag.textAlignment = NSTextAlignmentCenter;
+        tag.backgroundColor = [TSColors danger];
+        tag.layer.cornerRadius = 4;
+        tag.clipsToBounds = YES;
+        cell.accessoryView = tag;
+    } else {
+        cell.accessoryView = nil;
     }
 
     return cell;

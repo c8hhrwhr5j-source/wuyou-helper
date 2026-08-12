@@ -21,6 +21,9 @@
     // ── 确保目录存在 ──
     [TSPaths ensureDirectoriesExist];
 
+    // ── 同步内置脚本到脚本目录(不覆盖用户已有文件) ──
+    [self _syncBuiltinScripts];
+
     // ── 创建主窗口（旧式 UIWindow，不依赖 UIScene）──
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [TSColors bg];
@@ -32,6 +35,23 @@
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;
+}
+
+// 把打包进 App 的内置脚本(bundle 的 lua/ 目录)首次同步到 /var/mobile/touch/lua/
+- (void)_syncBuiltinScripts {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *src = [[NSBundle mainBundle] pathForResource:@"main" ofType:@"lua" inDirectory:@"lua"];
+    if (!src) return;
+
+    NSString *dst = [TSPaths pathForLua:@"main.lua"];
+    if ([fm fileExistsAtPath:dst]) return; // 用户已有则保留用户版本
+
+    NSError *err = nil;
+    if ([fm copyItemAtPath:src toPath:dst error:&err]) {
+        NSLog(@"[TrollAutoTouch] 已同步内置脚本: %@", dst);
+    } else {
+        NSLog(@"[TrollAutoTouch] 同步内置脚本失败: %@", err);
+    }
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {

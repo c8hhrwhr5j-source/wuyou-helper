@@ -19,6 +19,7 @@
 //    - 日志回调在主线程调用 logHandler。
 
 #import "TSLuaBridge.h"
+#import "../Common/TSLogStore.h"
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
@@ -72,12 +73,19 @@ static BOOL _stopRequested = NO;
     return self;
 }
 
-- (void)setIsRunning:(BOOL)isRunning { _isRunning = isRunning; }
+- (void)setIsRunning:(BOOL)isRunning {
+    _isRunning = isRunning;
+    [[NSNotificationCenter defaultCenter] postNotificationName:TSLuaRunningStateChangedNotification
+                                                        object:self
+                                                      userInfo:@{@"running": @(isRunning)}];
+}
 
 #pragma mark - 日志
 
 static void lua_log(NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 全部日志统一写入全局日志存储(设置页可查看)
+        [[TSLogStore shared] append:msg];
         if ([TSLuaBridge shared].logHandler) {
             [TSLuaBridge shared].logHandler(msg);
         }
@@ -1016,6 +1024,7 @@ static void lua_register_all(lua_State *L) {
     dispatch_async(_luaQueue, ^{
         // 等待当前脚本循环退出后重置标志
         dispatch_async(dispatch_get_main_queue(), ^{
+            self.runningPath = nil;
             self.isRunning = NO;
         });
     });
@@ -1025,11 +1034,13 @@ static void lua_register_all(lua_State *L) {
     @synchronized (self) {
         _stopRequested = NO;
     }
+    self.runningPath = path;
     self.isRunning = YES;
 
     lua_State *L = luaL_newstate();
     if (!L) {
         lua_log(@"[Lua] 创建 Lua 状态失败");
+        self.runningPath = nil;
         self.isRunning = NO;
         return;
     }
@@ -1047,6 +1058,7 @@ static void lua_register_all(lua_State *L) {
     if (ret != LUA_OK) {
         lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %s", lua_tostring(L, -1)]);
         lua_close(L);
+        self.runningPath = nil;
         self.isRunning = NO;
         return;
     }
@@ -1062,6 +1074,7 @@ static void lua_register_all(lua_State *L) {
     @synchronized (self) {
         _stopRequested = NO;
     }
+    self.runningPath = nil;
     self.isRunning = NO;
     lua_log(@"[Lua] 脚本执行结束");
 }
