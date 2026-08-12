@@ -1,0 +1,8 @@
+/* 
+ * 来自 _tmp.zip 反编译的 TrollAutoScript.app 的 entitlements 完整清单。
+ * 这是 iOS Settings 显示「功能」「沙盒」「可访问的容器」「可访问的钥匙串组」
+ * 这些权限条目所必需的 entitlement 列表。
+ *
+ * 我们只挑选了能让 Settings 显示与原版一致文本的最小集，其余维持我们原有的
+ * TrollStore 专用权限（task_for_pid 等）。所有 entitlement 须 TrollStore 签名才生效。
+ */

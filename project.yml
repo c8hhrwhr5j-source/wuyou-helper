@@ -1,0 +1,95 @@
+# XcodeGen 项目定义 —— 生成 TrollAutoTouch.xcodeproj
+# 用法:  安装 xcodegen (brew install xcodegen) 后，在本目录执行 `xcodegen generate`
+name: TrollAutoTouch
+options:
+  bundleIdPrefix: com.trollautotouch
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: ""
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    CLANG_ENABLE_MODULES: NO
+    # 禁用显式模块，避免 iOS SDK 中私有/非模块化头文件导致的编译错误
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    ENABLE_BITCODE: NO
+    # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
+    # -Wl,-no_fixup_chains: 禁用 chained fixups（与 ENABLE_CHAINED_FIXUPS=NO 配套），
+    # 兼容 Procursus ldid / TrollStore 注入 entitlements。
+    # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
+    #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -Wl,-no_fixup_chains
+targets:
+  TrollAutoTouch:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: TrollAutoTouch
+        excludes:
+          - "SceneDelegate.*"
+          - "Resources/demo.script"
+          - "Resources/demo.lua"
+          - "Resources/lua/**"
+          # vendor/lua 由下方独立条目管理（需排除 lua.c/luac.c 两个含 main 的程序源）。
+          # 若不排除，本递归条目会把它们一并收录，与 AppDelegate 的 main 冲突
+          # 导致链接期 duplicate symbol '_main'。
+          - "vendor/lua/**"
+      - path: TrollAutoTouch/vendor/lua
+        excludes:
+          - "lua.c"    # 独立解释器程序, 不需要编译进 App
+          - "luac.c"   # 独立编译器程序, 不需要编译进 App
+        # LUA_USE_IOS: Lua 官方 iOS 构建宏（等价官方 Makefile 的 ios target）。
+        # 使 loslib.c 不调用 iOS SDK 标记为 unavailable 的 system()，
+        # 并在 luaconf.h 中启用 LUA_USE_POSIX/LUA_USE_DLOPEN（iOS 均支持）。
+        compilerFlags: "-DLUA_USE_IOS"
+        # 头文件搜索路径: 使 TSLuaBridge.m 能 #import "lua.h"
+        headerVisibility: public
+        createIntermediateGroups: true
+    resources:
+      - path: TrollAutoTouch/Resources/demo.script
+      - path: TrollAutoTouch/Resources/demo.lua
+      - path: TrollAutoTouch/Assets.xcassets
+        optional: true
+      - path: TrollAutoTouch/Resources/lua
+        optional: true
+      - path: TrollAutoTouch/Resources/www
+        optional: true
+      - path: TrollAutoTouch/Resources/lib
+        optional: true
+      - path: TrollAutoTouch/Resources/res
+        optional: true
+    info:
+      path: TrollAutoTouch/Info.plist
+      properties:
+        CFBundleDisplayName: TrollAutoTouch
+        CFBundleVersion: "9"
+        CFBundleShortVersionString: "9.9.9"
+        CFBundleIcons:
+          CFBundlePrimaryIcon:
+            CFBundleIconFiles:
+              - AppIcon60x60
+            UIPrerenderedIcon: false
+        CFBundleIcons~ipad:
+          CFBundlePrimaryIcon:
+            CFBundleIconFiles:
+              - AppIcon60x60
+              - AppIcon76x76
+            UIPrerenderedIcon: false
+    entitlements:
+      path: TrollAutoTouch/TrollAutoTouch.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.apple
+        PRODUCT_NAME: TrollAutoTouch
+        # 让 dyld 在主二进制内解析私有框架符号
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"
+        # Lua 5.4 头文件搜索路径
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/TrollAutoTouch/vendor/lua"
+        # Lua 编译为标准 C99，禁用自动 ARC(纯 C 无影响但更稳)
+        GCC_C_LANGUAGE_STANDARD: gnu99

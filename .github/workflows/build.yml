@@ -1,0 +1,237 @@
+name: Build TrollAutoTouch IPA
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write   # 允许在构建失败时把 xcodebuild 日志推送到 ci-debug 分支
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew install xcodegen
+          # 用 Procursus ldid（v2.1.5-procursus7）替换 Homebrew 老版 ldid。
+          # Homebrew 的 ldid 是 xerub 老版本，不支持 Xcode 16 编译产物默认的
+          # chained fixups 格式（arm64），会导致 ldid -S 静默失败（返回 0 但
+          # 实际没写入 entitlements，ldid -e 输出空 <dict/>）。
+          ARCH=$(uname -m)
+          echo "[*] runner 架构: $ARCH"
+          curl -sL "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_${ARCH}" -o /tmp/ldid
+          chmod +x /tmp/ldid
+          sudo mv /tmp/ldid /usr/local/bin/ldid
+          echo "[OK] ldid 安装完成: $(which ldid)"
+          ldid -V 2>&1 | head -3 || true
+
+      - name: Sync root main.lua into bundle lua dir
+        run: |
+          set -e
+          SRC="$PWD/main.lua"
+          DST="$PWD/TrollAutoTouch/Resources/lua/Main.lua"
+          [ -f "$SRC" ] || { echo "[x] 根目录 main.lua 不存在: $SRC"; exit 1; }
+          cp "$SRC" "$DST"
+          echo "[OK] main.lua 已同步: 根目录 → Resources/lua/Main.lua ($(wc -c < "$DST") bytes)"
+
+      - name: Generate Xcode project
+        run: |
+          rm -rf TrollAutoTouch.xcodeproj
+          xcodegen generate
+
+      - name: Build
+        run: |
+          set -e
+          # 补齐 Assets.xcassets 缺失的 PNG（App Switcher 顶部图标走 Assets.car，
+          # 需要 40x40/29x29 尺寸）
+          SRC="$PWD/TrollAutoTouch_icon.png"
+          ICONSET="$PWD/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
+          echo "[*] 补齐 iconset PNG..."
+          [ -f "$ICONSET/AppIcon40x40@2x.png" ] || sips -z 80 80 "$SRC" --out "$ICONSET/AppIcon40x40@2x.png" >/dev/null
+          [ -f "$ICONSET/AppIcon40x40@3x.png" ] || sips -z 120 120 "$SRC" --out "$ICONSET/AppIcon40x40@3x.png" >/dev/null
+          [ -f "$ICONSET/AppIcon29x29@2x.png" ] || sips -z 58 58 "$SRC" --out "$ICONSET/AppIcon29x29@2x.png" >/dev/null
+          [ -f "$ICONSET/AppIcon29x29@3x.png" ] || sips -z 87 87 "$SRC" --out "$ICONSET/AppIcon29x29@3x.png" >/dev/null
+          echo "[OK] iconset PNG 就绪"
+          # 打印关键构建设置，便于诊断（如 HEADER_SEARCH_PATHS 未生效时快速发现）
+          echo "[*] 关键构建设置:"
+          xcodebuild -project TrollAutoTouch.xcodeproj -scheme TrollAutoTouch \
+            -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null \
+            | grep -E "HEADER_SEARCH_PATHS|GCC_C_LANGUAGE_STANDARD" || echo "  (未找到设置!)"
+          mkdir -p build
+          # ENABLE_CHAINED_FIXUPS=NO + -Wl,-no_fixup_chains(已写入 project.yml):
+          # 禁用 chained fixups，兼容 Procursus ldid / TrollStore。
+          # 警告: 不能在这里传 OTHER_LDFLAGS，命令行会整体覆盖 project.yml 中的
+          #       框架链接参数（-framework UIKit ...），导致链接失败！
+          # 日志写入文件，失败时打印完整日志并立即退出（不再被管道吞掉退出码）。
+          if ! xcodebuild -project TrollAutoTouch.xcodeproj \
+            -scheme TrollAutoTouch \
+            -configuration Release \
+            -sdk iphoneos \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            STRIP_INSTALLED_PRODUCT=NO \
+            DEAD_CODE_STRIPPING=NO \
+            ENABLE_CHAINED_FIXUPS=NO \
+            -derivedDataPath build/DerivedData \
+            build > /tmp/xcodebuild.log 2>&1; then
+            echo "[x] xcodebuild 编译失败，完整日志:"
+            tail -80 /tmp/xcodebuild.log
+            # 写入 step summary，无需登录即可在 Actions 页面看到错误明细
+            {
+              echo "## xcodebuild 失败详情"
+              echo ""
+              echo '```'
+              grep -nE "error:|warning:|note:|fatal|file not found|duplicate symbol|Undefined symbols|ld: |clang:" /tmp/xcodebuild.log | tail -60
+              echo ""
+              echo "--- 日志尾部 ---"
+              tail -120 /tmp/xcodebuild.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            # 把完整日志推送到 ci-debug 分支，便于在仓库里直接读取（不触发 CI）
+            {
+              git config user.name "ci-bot"
+              git config user.email "ci-bot@users.noreply.github.com"
+              cp /tmp/xcodebuild.log ./ci-error.log
+              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
+              git add -f ci-error.log
+              git commit -m "ci: save xcodebuild log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+              git push origin ci-debug --force
+            } >/dev/null 2>&1 && echo "[i] 完整日志已推送到 ci-debug 分支" || echo "[i] 日志推送失败(忽略)"
+            exit 1
+          fi
+          tail -5 /tmp/xcodebuild.log
+          echo "[OK] xcodebuild 编译成功"
+
+      - name: Package IPA
+        run: |
+          set -e
+          APP=$(find build/DerivedData -name 'TrollAutoTouch.app' -type d | head -1)
+          [ -z "$APP" ] && echo "[-] .app not found" && exit 1
+          echo "[*] .app: $APP"
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          APP_DST="build/Payload/TrollAutoTouch.app"
+          BIN="$APP_DST/TrollAutoTouch"
+          ENT="$PWD/TrollAutoTouch/TrollAutoTouch.entitlements"
+
+          # 防御: 主二进制必须存在，否则说明 xcodebuild 产物不完整
+          if [ ! -f "$BIN" ]; then
+            echo "[x] 主二进制不存在: $BIN"
+            echo "[*] .app 目录内容:"
+            ls -la "$APP_DST" 2>/dev/null || echo "    (.app 目录都不存在!)"
+            echo "[*] 请查看 Build 步骤日志确认编译是否成功"
+            exit 1
+          fi
+
+          echo ""
+          echo "=== 架构 ==="
+          lipo -info "$BIN"
+          file "$BIN"
+
+          echo ""
+          echo "=== 清理旧签名 ==="
+          rm -rf "$APP_DST/_CodeSignature"
+          codesign --remove-signature "$BIN" 2>/dev/null && echo "[OK] 签名已移除" || echo "[*] 二进制无签名"
+
+          echo ""
+          echo "=== 图标 ==="
+          rm -f "$APP_DST/AppIcon.png" "$APP_DST/icon-1024.ico"
+          ICONSET="$PWD/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
+          ls "$ICONSET"/*.png 1>/dev/null 2>&1 && cp "$ICONSET"/*.png "$APP_DST/" && echo "[OK]" || echo "[!] no icons"
+
+          echo ""
+          echo "=== 注入 entitlements ==="
+          echo "[*] ldid 版本: $(ldid -V 2>&1 | head -1 || echo unknown)"
+          echo "[*] entitlements 文件: $ENT"
+
+          # 1) 防御: CI 上 checkout 出来的 entitlements 文件曾多次被破坏
+          #    (内容变为 181 字节的空 dict plist, 注入后验证为 0 键)。
+          #    因此不从工作区文件读取, 而是直接从 git 对象库强制恢复原始字节,
+          #    完全绕过 checkout/文件系统可能引入的任何问题。
+          echo "[*] checkout 后 $ENT 大小: $(wc -c < "$ENT" 2>/dev/null || echo 缺失)"
+          shasum -a 256 "$ENT" 2>/dev/null || true
+          git show HEAD:TrollAutoTouch/TrollAutoTouch.entitlements > /tmp/ent.xml 2>/tmp/gitshow.log || { echo "[x] git show 恢复失败:"; cat /tmp/gitshow.log; exit 1; }
+          echo "[*] git 对象恢复大小: $(wc -c < /tmp/ent.xml) bytes"
+          plutil -lint /tmp/ent.xml >/dev/null || { echo "[x] git 中的 entitlements 非法, 停止打包"; exit 1; }
+          echo "[OK] entitlements 已从 git 对象恢复并通过 plutil 校验"
+
+          # 2) 诊断: 二进制是否带 chained fixups load command
+          echo "[*] 二进制签名结构:"
+          otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
+
+          # 3) 注入: 优先 Apple 原生 codesign (adhoc 签名 + entitlements)。
+          #    codesign 与 Xcode 产物完全兼容, 不存在 ldid 的 plist parser / DER 格式错位问题;
+          #    且用同一工具验证不会出现"写入 DER 读不出 XML"的假阴性。
+          #    TrollStore 安装时会重新签名, 但保留二进制内已嵌入的 entitlements。
+          if codesign --force --sign - --entitlements /tmp/ent.xml "$BIN" 2>/tmp/codesign.log; then
+            echo "[OK] codesign 注入成功 (adhoc)"
+            SIGN_TOOL=codesign
+          else
+            echo "[!] codesign 失败, 回退 ldid:"
+            echo "    $(cat /tmp/codesign.log)"
+            ldid -S/tmp/ent.xml "$BIN" 2>&1 || { echo "[x] ldid 注入失败, 停止打包"; exit 1; }
+            echo "[OK] ldid 注入成功"
+            SIGN_TOOL=ldid
+          fi
+
+          echo ""
+          echo "=== 验证注入结果 ==="
+          # codesign 优先提取 (支持 DER), ldid -e 兜底
+          if [ "$SIGN_TOOL" = "codesign" ]; then
+            EXTRACTED=$(codesign -d --entitlements - "$BIN" 2>/dev/null || ldid -e "$BIN" 2>/dev/null || true)
+          else
+            EXTRACTED=$(ldid -e "$BIN" 2>/dev/null || codesign -d --entitlements - "$BIN" 2>/dev/null || true)
+          fi
+          echo "$EXTRACTED" > /tmp/ent_check.xml
+          echo "[*] 注入工具: ${SIGN_TOOL}, 提取 entitlements: $(wc -c < /tmp/ent_check.xml) bytes"
+          MISSING=0
+          for KEY in "com.apple.private.security.no-sandbox" "platform-application" "com.apple.private.tcc.allow" "keychain-access-groups" "com.apple.private.security.container-manager"; do
+            if grep -q "$KEY" /tmp/ent_check.xml; then
+              echo "[OK] $KEY"
+            else
+              echo "[x] 缺少: $KEY"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo ""
+            echo "[x] entitlements 注入验证失败, 停止打包"
+            echo "[debug] 提取的 entitlements 前 60 行:"
+            head -60 /tmp/ent_check.xml
+            echo "[debug] codesign 完整校验:"
+            codesign --verify --deep --strict "$APP_DST" 2>&1 || true
+            exit 1
+          fi
+          echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container 全部就位)"
+
+          echo ""
+          echo "=== Info.plist ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$APP_DST/Info.plist" 2>/dev/null || echo "(无 CFBundleIcons)"
+
+          echo ""
+          echo "=== .app PNG ==="
+          find "$APP_DST" -maxdepth 1 -name "*.png" | while read f; do echo "  $(basename $f) ($(stat -f%z "$f") bytes)"; done
+
+          echo ""
+          echo "=== 打包 ==="
+          cd build && zip -qry TrollAutoTouch.ipa Payload
+          echo "[OK] build/TrollAutoTouch.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollAutoTouch
+          path: build/TrollAutoTouch.ipa
+          if-no-files-found: error

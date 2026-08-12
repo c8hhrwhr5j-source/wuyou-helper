@@ -1,0 +1,65 @@
+# ============================================================
+#  TrollAutoTouch 演示脚本
+#  命令一览:
+#    tap x y [duration_ms]        — 点击
+#    swipe x1 y1 x2 y2 [dur_ms]   — 滑动
+#    longtap x y [duration_ms]    — 长按
+#    hold x y [index]             — 按下不放
+#    release x y [index]          — 抬起
+#    move x y [index]             — 移动
+#    stroke x1 y1 x2 y2 [...]     — 多点轨迹
+#    sleep ms                     — 等待
+#    findcolor 0xRRGGBB [x y w h] [sim] — 找单色
+#    findmcs mainColor sim dx1 dy1 c1 [...] — 多点找色
+#    getcolor x y                 — 取色
+#    keep                         — 缓存截屏
+#    unkeep                       — 释放缓存
+#    findimg image_path [sim] [x y w h] — 模板匹配
+#    screenshot [path]            — 保存截屏
+#    record [interval]            — 开始录制
+#    stoprecord                   — 停止录制
+#    playrecord [speed]           — 回放
+#    apptree                      — 打印 UI 树
+#    findnode className [text]    — 查找节点
+#    tapnode className [text]     — 点击节点
+#    deviceinfo                   — 设备信息
+#    inputtext "text"             — 文本输入
+#    log message                  — 日志输出
+#    run script_path              — 调用子脚本
+# ============================================================
+
+log === TrollAutoTouch Demo 开始 ===
+deviceinfo
+screensize
+
+# 等待切换到目标 App
+log 请在 3 秒内切换到目标 App...
+sleep 3000
+
+# 截屏并缓存
+keep
+screenshot
+
+# 取色
+log 屏幕中心颜色:
+getcolor 200 400
+
+# 找红色
+findcolor 0xFF0000 0.9
+
+# 点击(屏幕中心偏左)
+log 注入点击...
+tap 150 350
+
+sleep 1000
+
+# 滑动
+log 注入滑动...
+swipe 100 600 300 600 500
+
+sleep 500
+
+# 释放缓存
+unkeep
+
+log === Demo 完成 ===
