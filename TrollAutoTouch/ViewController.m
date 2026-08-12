@@ -21,6 +21,7 @@
 #import "TSColorFinder.h"
 #import "TSToolExecutor.h"
 #import "TSLuaBridge.h"
+#import "TSPaths.h"
 
 @interface ViewController () <TSLogDelegate, TSWebControlDelegate>
 @property (nonatomic, strong) UITextView *logView;
@@ -284,12 +285,11 @@
         [ws _log:msg];
     };
 
-    // 优先运行 Documents/demo.lua(用户可编辑)，否则用 Bundle 内置 demo.lua
-    NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
-                         stringByAppendingPathComponent:@"demo.lua"];
+    // 优先运行 /var/mobile/touch/lua/demo.lua(用户可编辑)，否则用 Bundle 内置 demo.lua
+    NSString *luaPath = [TSPaths pathForLua:@"demo.lua"];
     NSString *path = nil;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:docPath]) {
-        path = docPath;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:luaPath]) {
+        path = luaPath;
     } else {
         path = [[NSBundle mainBundle] pathForResource:@"demo" ofType:@"lua"];
     }

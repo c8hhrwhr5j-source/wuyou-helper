@@ -1,5 +1,7 @@
 -- demo.lua — TrollAutoTouch Lua 找色点击示例
--- 通过 [运行 Lua] 按钮执行；也可放到 Documents/demo.lua 后自行编辑。
+-- 通过 [运行 Lua] 按钮执行；把本文件复制到
+-- /var/mobile/touch/lua/demo.lua 后即可自行编辑(优先加载)。
+-- 其他目录: /var/mobile/touch/log 放本地日志, /var/mobile/touch/res 放资源文件。
 
 -- ===== 基础用法 =====
 logStr("TrollAutoTouch Lua 脚本启动!")

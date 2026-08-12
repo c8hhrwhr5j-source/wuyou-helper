@@ -39,6 +39,7 @@
 #import "TSAppNodeInfo.h"
 #import "TSDeviceInfo.h"
 #import "TSOCREngine.h"
+#import "../Common/TSPaths.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -316,8 +317,8 @@ static int l_screen_snapshot(lua_State *L) {
     } else {
         NSDateFormatter *f = [[NSDateFormatter alloc] init];
         f.dateFormat = @"yyyyMMdd_HHmmss";
-        path = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
-                stringByAppendingFormat:@"/snapshot_%@.png", [f stringFromDate:[NSDate date]]];
+        // 默认保存到 /var/mobile/touch/log (本地日志/调试产物目录)
+        path = [[TSPaths logDir] stringByAppendingFormat:@"/snapshot_%@.png", [f stringFromDate:[NSDate date]]];
     }
     BOOL ok = [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
     if (!ok) { lua_pushnil(L); return 1; }
@@ -766,6 +767,27 @@ static int l_file_documentsDir(lua_State *L) {
     return 1;
 }
 
+// ── 简化路径: /var/mobile/touch/{lua,log,res} ──
+static int l_file_touchDir(lua_State *L) {
+    lua_pushstring(L, [TSPaths rootDir].UTF8String);
+    return 1;
+}
+
+static int l_file_luaDir(lua_State *L) {
+    lua_pushstring(L, [TSPaths luaDir].UTF8String);
+    return 1;
+}
+
+static int l_file_logDir(lua_State *L) {
+    lua_pushstring(L, [TSPaths logDir].UTF8String);
+    return 1;
+}
+
+static int l_file_resDir(lua_State *L) {
+    lua_pushstring(L, [TSPaths resDir].UTF8String);
+    return 1;
+}
+
 static int l_file_readImage(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     UIImage *img = [UIImage imageWithContentsOfFile:@(path)];
@@ -931,6 +953,10 @@ static void lua_register_all(lua_State *L) {
         {"exists",  l_file_exists},
         {"delete",  l_file_delete},
         {"documentsDir", l_file_documentsDir},
+        {"touchDir", l_file_touchDir},  // /var/mobile/touch
+        {"luaDir",   l_file_luaDir},    // /var/mobile/touch/lua  (脚本)
+        {"logDir",   l_file_logDir},    // /var/mobile/touch/log  (日志)
+        {"resDir",   l_file_resDir},    // /var/mobile/touch/res  (资源)
         {"readImage",    l_file_readImage},
         {NULL, NULL}
     };

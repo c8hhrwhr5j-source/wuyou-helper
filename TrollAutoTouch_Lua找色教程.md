@@ -9,16 +9,18 @@ TrollAutoTouch 内置 Lua 5.4 解释器，可运行 `.lua` 脚本实现自动找
 
 ### 方式一：App 内置按钮
 打开 App → 点击 **「运行 Lua」** 按钮。脚本查找顺序：
-1. `Documents/demo.lua`（用户可自行编辑，优先）
+1. `/var/mobile/touch/lua/demo.lua`（用户可自行编辑，优先）
 2. 内置 `demo.lua`（App 自带示例）
 
 点击 **「停止 Lua」** 可中断正在运行的脚本。
 
-### 方式二：脚本放置位置
-把脚本放到 App 的 Documents 目录即可被加载：
+### 方式二：脚本放置位置（固定简化路径，不依赖沙盒）
 ```
-/var/mobile/Documents/TrollAutoTouch/demo.lua   ← 具体路径以 App 沙盒为准
+/var/mobile/touch/lua/demo.lua    ← 脚本
+/var/mobile/touch/log/            ← 本地日志
+/var/mobile/touch/res/            ← 资源文件（图片等）
 ```
+这三个目录 App 首次启动时自动创建，放好后点 **「运行 Lua」** 即加载 `/var/mobile/touch/lua/demo.lua`。
 > 脚本里所有函数均为**全局函数**，无需 require 任何模块。
 
 ---
@@ -162,7 +164,7 @@ end
 -- 保存当前屏幕截图，返回完整路径
 local path = snapshot("/tmp/my_snap.png")
 
--- 自动命名保存到 Documents
+-- 自动命名保存到 /var/mobile/touch/log/snapshot_*.png
 local p2 = snapshot()
 
 -- 缓存屏幕像素: 连续多次 findColor 时提高性能
@@ -261,6 +263,14 @@ local content = file.read("/tmp/x.txt")
 file.exists("/tmp/x.txt")
 file.delete("/tmp/x.txt")
 local docDir = file.documentsDir()
+
+-- 固定简化路径(同 /var/mobile/touch 下)
+file.touchDir()   -- /var/mobile/touch
+file.luaDir()     -- /var/mobile/touch/lua   (脚本)
+file.logDir()     -- /var/mobile/touch/log   (日志)
+file.resDir()     -- /var/mobile/touch/res   (资源文件)
+-- 例如读取资源图片:
+local w, h = file.readImage(file.resDir() .. "/button.png")
 ```
 
 ---
