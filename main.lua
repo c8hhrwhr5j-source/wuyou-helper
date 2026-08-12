@@ -5,20 +5,25 @@ function main()
     local w, h = getScreenSize()
     logStr(string.format("屏幕 %.0f x %.0f", w, h))
     while true do
-        sleep(500)
-        if getColor(254, 667) == "0x9C6D39" then
+        sleep(1000)
+        if getColor(254, 667) == 0x9C6D39 then
             log("找到坚屏公告确定按钮")
             tap(254, 667)  
             sleep(1000)
+        else
+            local c = getColor(254, 667)
+            logStr(string.format("颜色 = 0x%06X", c))
         end
 
-        if getColor(665, 496) == "0xA56D29" then
+        if getColor(665, 496) == 0xA56D29 then
             log("找到横屏公告确定按钮")
             tap(665, 496)  
             sleep(1000)
+        else
+            local c = getColor(665, 496)
+            logStr(string.format("颜色 = 0x%06X", c))
         end
-        
-        log("脚本循环中...")
+
     end
 end
 
