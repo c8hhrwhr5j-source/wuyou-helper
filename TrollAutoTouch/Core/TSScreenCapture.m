@@ -15,12 +15,11 @@
 typedef struct __IOSurface *IOSurfaceRef;
 
 // IOMobileFramebuffer 私有函数指针
-typedef void *(*IOMFBCreateFunc)(CFAllocatorRef);
-// iOS 14 及更早: IOMobileFramebufferGetSurface(fb, &surface) —— 2 参数
-typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
-// iOS 15+: IOMobileFramebufferGetLayerDefaultSurface(fb, layer, &surface) —— 3 参数!
-// 注意第 2 个参数是 layer/surface 索引(通常传 0)，若按 2 参数调用会往垃圾地址写 surface 导致闪退。
-typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int surfaceIndex, IOSurfaceRef *surface);
+// 注意: 这些函数是"输入参数 + 返回 kern_return_t"，不是"返回指针"。
+// 错误签名会把结果写到垃圾地址，是 getColor 闪退的根因(与原版逆向结果一致)。
+typedef kern_return_t (*IOMFBGetMainDisplayFunc)(void **fb);                    // IOMobileFramebufferGetMainDisplay(&fb)
+typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);  // iOS 14 及更早, 2 参数
+typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int layer, IOSurfaceRef *surface); // iOS 15+, 3 参数
 
 @interface TSScreenCapture () {
     void *_iomfbHandle;
@@ -59,25 +58,31 @@ typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int surfaceIndex, IO
                           height:(int *)heightOut {
     if (!_iomfbHandle || !_iosurfaceHandle) { return NO; }
 
-    // IOMobileFramebufferGetMainDisplay
-    IOMFBCreateFunc create = (IOMFBCreateFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay");
-    if (!create) { return NO; }
+    // IOMobileFramebufferGetMainDisplay(&fb)
+    // 注意: 这是"输出参数 + kern_return_t"签名，不能按"返回指针"调用，否则会往垃圾地址写 fb 指针闪退。
+    IOMFBGetMainDisplayFunc getMain = (IOMFBGetMainDisplayFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay");
+    if (!getMain) { return NO; }
 
-    void *fb = create(kCFAllocatorDefault);
-    if (!fb) { return NO; }
+    void *fb = NULL;
+    kern_return_t krMain = getMain(&fb);
+    if (krMain != KERN_SUCCESS || !fb) { return NO; }
 
     IOSurfaceRef surface = NULL;
     kern_return_t kr = KERN_FAILURE;
 
-    // 优先 iOS 14 及更早的 2 参数接口; 找不到(系统较新)再用 iOS 15+ 的 3 参数接口(第2参数传 0)。
-    // 注意: GetLayerDefaultSurface 是 3 参数函数，绝不能按 2 参数调用，否则会写垃圾地址闪退。
+    // 优先 iOS 14 及更早的 2 参数接口; 找不到(系统较新)再用 iOS 15+ 的 3 参数接口。
     IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
     if (getSurface) {
         kr = getSurface(fb, &surface);
     } else {
         IOMFBGetLayerSurfaceFunc getLayerSurface = (IOMFBGetLayerSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
         if (getLayerSurface) {
-            kr = getLayerSurface(fb, 0, &surface);
+            // iOS 15+ 第 2 参数是 layer 索引，个别机型/版本主屏不在 0，逐个尝试直到拿到 surface。
+            for (int layer = 0; layer < 4; layer++) {
+                surface = NULL;
+                kr = getLayerSurface(fb, layer, &surface);
+                if (kr == KERN_SUCCESS && surface) { break; }
+            }
         }
     }
     if (kr != KERN_SUCCESS || !surface) { return NO; }
