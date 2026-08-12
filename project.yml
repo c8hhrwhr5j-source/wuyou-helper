@@ -46,7 +46,7 @@ targets:
     info:
       path: TrollAutoTouch/Info.plist
       properties:
-        CFBundleDisplayName: TrollAutoScript
+        CFBundleDisplayName: TrollAutoTouch
         CFBundleVersion: "9"
         CFBundleShortVersionString: "9.9.9"
         CFBundleIcons:
@@ -64,7 +64,7 @@ targets:
       path: TrollAutoTouch/TrollAutoTouch.entitlements
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.TrollAutoScript.apple
+        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.apple
         PRODUCT_NAME: TrollAutoTouch
         # 让 dyld 在主二进制内解析私有框架符号
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"
