@@ -16,7 +16,11 @@ typedef struct __IOSurface *IOSurfaceRef;
 
 // IOMobileFramebuffer 私有函数指针
 typedef void *(*IOMFBCreateFunc)(CFAllocatorRef);
+// iOS 14 及更早: IOMobileFramebufferGetSurface(fb, &surface) —— 2 参数
 typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
+// iOS 15+: IOMobileFramebufferGetLayerDefaultSurface(fb, layer, &surface) —— 3 参数!
+// 注意第 2 个参数是 layer/surface 索引(通常传 0)，若按 2 参数调用会往垃圾地址写 surface 导致闪退。
+typedef kern_return_t (*IOMFBGetLayerSurfaceFunc)(void *fb, int surfaceIndex, IOSurfaceRef *surface);
 
 @interface TSScreenCapture () {
     void *_iomfbHandle;
@@ -57,19 +61,25 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
 
     // IOMobileFramebufferGetMainDisplay
     IOMFBCreateFunc create = (IOMFBCreateFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetMainDisplay");
-    // iOS 15+ 使用 IOMobileFramebufferGetLayerDefaultSurface，iOS 14 及更早用 GetSurface。
-    // 旧代码只 dlsym GetSurface，在 iOS 15+ 上返回 NULL 导致截屏永远失败(getColor 返回 nil)。
-    IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
-    if (!getSurface) {
-        getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
-    }
-    if (!create || !getSurface) { return NO; }
+    if (!create) { return NO; }
 
     void *fb = create(kCFAllocatorDefault);
     if (!fb) { return NO; }
 
     IOSurfaceRef surface = NULL;
-    kern_return_t kr = getSurface(fb, &surface);
+    kern_return_t kr = KERN_FAILURE;
+
+    // 优先 iOS 14 及更早的 2 参数接口; 找不到(系统较新)再用 iOS 15+ 的 3 参数接口(第2参数传 0)。
+    // 注意: GetLayerDefaultSurface 是 3 参数函数，绝不能按 2 参数调用，否则会写垃圾地址闪退。
+    IOMFBGetSurfaceFunc getSurface = (IOMFBGetSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetSurface");
+    if (getSurface) {
+        kr = getSurface(fb, &surface);
+    } else {
+        IOMFBGetLayerSurfaceFunc getLayerSurface = (IOMFBGetLayerSurfaceFunc)dlsym(_iomfbHandle, "IOMobileFramebufferGetLayerDefaultSurface");
+        if (getLayerSurface) {
+            kr = getLayerSurface(fb, 0, &surface);
+        }
+    }
     if (kr != KERN_SUCCESS || !surface) { return NO; }
 
     // 从 IOSurface 拷贝像素。这些函数来自 IOSurface.framework，通过 dlopen/dlsym 动态加载。
@@ -86,12 +96,14 @@ typedef kern_return_t (*IOMFBGetSurfaceFunc)(void *fb, IOSurfaceRef *surface);
 
     if (!lockFn || !unlockFn || !baseAddr || !widthFn || !heightFn || !bytesPerRowFn) { return NO; }
 
-    lockFn(surface, 0, NULL);
+    // 加锁失败说明 surface 当前不可读，直接放弃，避免读到无效内存
+    kern_return_t lk = lockFn(surface, 0, NULL);
+    if (lk != KERN_SUCCESS) { return NO; }
     size_t w = widthFn ? widthFn(surface) : 0;
     size_t h = heightFn ? heightFn(surface) : 0;
     size_t bpr = bytesPerRowFn ? bytesPerRowFn(surface) : 0;
     void *base = baseAddr ? baseAddr(surface) : NULL;
-    if (w == 0 || h == 0 || bpr == 0 || !base) {
+    if (w == 0 || h == 0 || bpr < w * 4 || !base) {
         unlockFn(surface, 0, NULL);
         return NO;
     }
