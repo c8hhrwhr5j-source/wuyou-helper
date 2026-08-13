@@ -48,6 +48,15 @@ jobs:
           # 先 dump 校验 spec，报错信息写入 step summary（无需登录即可查看）
           if ! xcodegen dump > /tmp/xcodegen_dump.log 2>&1; then
             mkdir -p build/logs; cp /tmp/xcodegen_dump.log build/logs/ 2>/dev/null || true
+            {
+              git config user.name "ci-bot"
+              git config user.email "ci-bot@users.noreply.github.com"
+              cp /tmp/xcodegen_dump.log ./ci-error.log
+              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
+              git add -f ci-error.log
+              git commit -m "ci: save xcodegen dump log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+              git push origin ci-debug --force
+            } >/dev/null 2>&1 && echo "[i] xcodegen dump 日志已推送到 ci-debug 分支" || echo "[i] 日志推送失败(忽略)"
             echo "## xcodegen spec 解析失败" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             tail -60 /tmp/xcodegen_dump.log >> "$GITHUB_STEP_SUMMARY"

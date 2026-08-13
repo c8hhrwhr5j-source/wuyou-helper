@@ -97,7 +97,7 @@ targets:
   # 由 build-ipa.sh 在打包时拷入 app bundle 的 bin/ 目录，
   # app 运行时用 opainject 把它注入 SpringBoard 进程。
   TSInjectedTouchService:
-    type: dynamic-library
+    type: library.dynamic
     platform: iOS
     deploymentTarget: "15.0"
     sources:
@@ -105,6 +105,10 @@ targets:
     settings:
       base:
         PRODUCT_NAME: TSInjectedTouchService
+        # library.dynamic 默认产物名是 libTSInjectedTouchService.dylib
+        # (EXECUTABLE_PREFIX=lib), 这里清空前缀, 让产物名固定为
+        # TSInjectedTouchService.dylib (与 app 端/CI 的查找路径一致)
+        EXECUTABLE_PREFIX: ""
         SKIP_INSTALL: YES
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
