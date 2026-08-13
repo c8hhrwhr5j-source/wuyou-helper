@@ -61,6 +61,20 @@ extern char **environ;
 
 - (NSString *)statusDescription {
     if (_injectFailed) {
+        // 附上 opainject 的具体错误 (task_for_pid / dlopen 失败原因), 便于真机定位
+        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
+        NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+        NSString *detail = @"";
+        if (out.length > 0) {
+            NSArray<NSString *> *lines = [out componentsSeparatedByString:@"\n"];
+            // 只取最后几行最有用的报错
+            NSUInteger from = lines.count > 4 ? lines.count - 4 : 0;
+            detail = [[[lines subarrayWithRange:NSMakeRange(from, lines.count - from)] componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        }
+        if (detail.length > 0) {
+            return [NSString stringWithFormat:@"注入失败: %@", detail];
+        }
         return @"注入失败(无法注入 SpringBoard)";
     }
     if (!_injected) {
@@ -134,6 +148,36 @@ extern char **environ;
     [fm copyItemAtPath:dylibSrc toPath:dylibDst error:NULL];
     chmod(dylibDst.UTF8String, 0755);
 
+    // 运行时重签工具链 (学原版 bin/: ldid + ent2.xml + injector.entitlements.xml)。
+    // TrollStore 重签主二进制时可能剥离额外 entitlements, 注入前用 ldid 重签
+    // opainject (ent2.xml 含 com.apple.springboard.debugapplications) 与 dylib
+    // (injector.entitlements.xml 含 platform-application), 确保注入权限齐全。
+    NSArray<NSString *> *tools = @[@"ldid", @"fastPathSign"];
+    for (NSString *tool in tools) {
+        NSString *src = [[NSBundle mainBundle] pathForResource:tool ofType:nil inDirectory:@"bin"];
+        NSString *dst = [binDir stringByAppendingPathComponent:tool];
+        if (src) {
+            [fm removeItemAtPath:dst error:NULL];
+            [fm copyItemAtPath:src toPath:dst error:NULL];
+            chmod(dst.UTF8String, 0755);
+        } else {
+            NSLog(@"[TSInjectedTouch] bundle 中找不到 %@", tool);
+        }
+    }
+    NSArray<NSString *> *plists = @[@"ent2.xml", @"injector.entitlements.xml"];
+    for (NSString *plist in plists) {
+        NSString *src = [[NSBundle mainBundle] pathForResource:plist.stringByDeletingPathExtension ofType:plist.pathExtension inDirectory:@"bin"];
+        if (!src && [plist isEqualToString:@"injector.entitlements.xml"]) {
+            // injector.entitlements.xml 在 Resources 根目录 (不在 bin/ 下)
+            src = [[NSBundle mainBundle] pathForResource:@"injector.entitlements" ofType:@"xml"];
+        }
+        if (src) {
+            NSString *dst = [binDir stringByAppendingPathComponent:plist];
+            [fm removeItemAtPath:dst error:NULL];
+            [fm copyItemAtPath:src toPath:dst error:NULL];
+        }
+    }
+
     NSLog(@"[TSInjectedTouch] 部署完成: %@", dylibDst);
     return YES;
 }
@@ -151,6 +195,33 @@ extern char **environ;
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     NSString *injectorPath = [docs stringByAppendingPathComponent:@"bin/opainject"];
     NSString *dylibPath = [docs stringByAppendingPathComponent:@"bin/TSInjectedTouchService.dylib"];
+
+    // 运行时重签 (学原版 bin/: ldid + ent2.xml + injector.entitlements.xml):
+    //   - opainject 签 ent2.xml (含 com.apple.springboard.debugapplications,
+    //     这是 task_for_pid SpringBoard 拿 task port 的关键权限)
+    //   - dylib 签 injector.entitlements.xml (含 platform-application, iOS 15+
+    //     SpringBoard platform 进程 dlopen 的必要条件)
+    // 防止 TrollStore 重签时剥离这些额外 entitlements。
+    NSString *ldidPath = [docs stringByAppendingPathComponent:@"bin/ldid"];
+    NSString *opainjectEnt = [docs stringByAppendingPathComponent:@"bin/ent2.xml"];
+    NSString *dylibEnt = [docs stringByAppendingPathComponent:@"bin/injector.entitlements.xml"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:ldidPath] &&
+        [[NSFileManager defaultManager] fileExistsAtPath:opainjectEnt] &&
+        [[NSFileManager defaultManager] fileExistsAtPath:dylibEnt]) {
+        const char *signArgs1[] = { ldidPath.UTF8String, "-S", opainjectEnt.UTF8String, injectorPath.UTF8String, NULL };
+        const char *signArgs2[] = { ldidPath.UTF8String, "-S", dylibEnt.UTF8String, dylibPath.UTF8String, NULL };
+        pid_t sp = -1;
+        if (posix_spawn(&sp, ldidPath.UTF8String, NULL, NULL, (char *const *)signArgs1, environ) == 0) {
+            waitpid(sp, NULL, 0);
+        }
+        sp = -1;
+        if (posix_spawn(&sp, ldidPath.UTF8String, NULL, NULL, (char *const *)signArgs2, environ) == 0) {
+            waitpid(sp, NULL, 0);
+        }
+        NSLog(@"[TSInjectedTouch] 注入前已重签 opainject + dylib");
+    } else {
+        NSLog(@"[TSInjectedTouch] 运行时重签工具不全, 跳过重签 (注入可能失败)");
+    }
 
     // opainject <pid> <dylib_path>
     const char *args[] = {
