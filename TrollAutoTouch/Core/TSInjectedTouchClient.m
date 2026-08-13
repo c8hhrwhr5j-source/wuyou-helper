@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libproc.h>
+#include <sys/sysctl.h>
 
 extern char **environ;
 
@@ -75,25 +75,30 @@ extern char **environ;
 #pragma mark - SpringBoard pid
 
 - (pid_t)findSpringBoardPid {
-    // 用 libproc 遍历进程, 不依赖 shell/grep/launchctl
-    // (iOS 真机上 /usr/bin/grep 不存在, popen 方案会静默失败导致注入无法继续)
-    int count = proc_listallpids(NULL, 0);
-    if (count <= 0) return -1;
+    // 用 sysctl 遍历进程 (KERN_PROC_ALL), 不依赖 libproc/shell/grep/launchctl
+    // (libproc.h 仅存在于 macOS, iOS SDK 没有; iOS 上也没有 /usr/bin/grep)
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+    size_t size = 0;
+    if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) return -1;
 
-    pid_t *pids = (pid_t *)malloc((size_t)count * sizeof(pid_t));
-    if (!pids) return -1;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
+    if (!procs) return -1;
+    memset(procs, 0, size);
+    if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) {
+        free(procs);
+        return -1;
+    }
 
-    int n = proc_listallpids(pids, count);
+    int count = (int)(size / sizeof(struct kinfo_proc));
     pid_t result = -1;
-    for (int i = 0; i < n; i++) {
-        char name[64] = {0};
-        int len = proc_name(pids[i], name, sizeof(name));
-        if (len > 0 && strcmp(name, "SpringBoard") == 0) {
-            result = pids[i];
+    for (int i = 0; i < count; i++) {
+        if (procs[i].kp_proc.p_comm[0] != '\0' &&
+            strcmp(procs[i].kp_proc.p_comm, "SpringBoard") == 0) {
+            result = procs[i].kp_proc.p_pid;
             break;
         }
     }
-    free(pids);
+    free(procs);
     return result;
 }
 
