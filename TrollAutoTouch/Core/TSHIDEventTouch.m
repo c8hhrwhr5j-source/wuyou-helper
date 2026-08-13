@@ -2,41 +2,29 @@
 //  TSHIDEventTouch.m
 //  TrollAutoTouch
 //
-//  IOHIDEvent 系统级触摸注入实现（复刻 ZXTouch pccontrol/Touch.xm 权威写法）。
+//  系统级触摸注入（注入式架构，对齐原版 TrollAutoScript / ZXTouch 13）。
 //
-//  逆向依据: 原 TrollAutoScript 的 luaLib 二进制中提取到如下触摸注入符号:
-//    _IOHIDEventSystemClientCreate
-//    _IOHIDEventSystemClientDispatchEvent
-//    _IOHIDEventSystemClientScheduleWithRunLoop
-//    _IOHIDEventSystemClientRegisterEventCallback   (senderID 动态获取)
-//    _IOHIDEventCreateDigitizerEvent
-//    _IOHIDEventCreateDigitizerFingerEventWithQuality   (iOS 15+ 完整 18 参签名)
-//    _IOHIDEventAppendEvent
-//    _IOHIDEventSetSenderID
-//    _IOHIDEventSetFloatValue / SetIntegerValue      (私有字段显式写入)
+//  背景:
+//    backboardd 只接受来自 SpringBoard 等受信 HID 服务进程的 IOHID 触摸事件。
+//    普通 app 进程即使拥有 event-dispatch entitlement，IOHIDEventSystemClientDispatchEvent
+//    发出的事件也会被 backboardd 丢弃。已实测验证: finger 事件用 13 参
+//    (ZXTouch) 与 18 参 WithQuality (原版 luaLib) 两种签名、radius/quality/
+//    tipPressure 参数完全对齐后，app 进程直接发送依旧"找色成功但点击无效"。
 //
-//  关键要点（依据 ZXTouch Touch.xm + 私有头 IOHIDEvent.h）:
-//  1. iOS 13+ 签名：IOHIDEventCreateDigitizerEvent 为 15 参
-//     (allocator, timeStamp, type, index, identity, eventMask, buttonMask,
-//      x, y, z, tipPressure, barrelPressure, range, touch, options)
-//     旧签名(≤iOS12, 14参)是 (allocator, timeStamp, eventMask, eventType, ...)。
-//  2. senderID 必须动态获取：注册事件回调读取系统真实触摸屏事件的 senderID
-//     (IOHIDEventGetSenderID)。硬编码 0x8000000800 在 iOS 13+ 会被 backboardd
-//     当作非法发送者丢弃 —— 这就是"能找色但点击无效"的真正根因。
-//     获取到的 senderID 持久化保存，设备未重启时直接复用。
-//  3. 子事件用 18 参 IOHIDEventCreateDigitizerFingerEventWithQuality（原版 luaLib
-//     实际使用的 iOS 15+ 完整签名）：identity 固定 3；Began mask=Range|Touch(3)/
-//     range=1/touch=1；Moved mask=Position(4)/range=1/touch=1；Ended mask=Touch(2)/
-//     range=0/touch=0。quality=1 density=1 irregularity=1 minor/majorRadius=5mm
-//     tipPressure=0。
-//  4. 父事件补 flags: 0xb0019=1、0x4=1；发送前写 0xb0007=0x23、0xb0008=1、0xb0009=1。
-//  5. 坐标按屏幕 bounds 归一化到 0.0~1.0；触摸半径用私有字段 0xb0014/0xb0015。
+//  当前架构（与原版 TrollAutoScript 2.2.0 相同）:
+//    1. app 启动/首次触摸时，用 opainject (OpenInject, PAC bypass) 把
+//       TSInjectedTouchService.dylib 注入 SpringBoard 进程;
+//    2. 该 dylib 在 SpringBoard 进程内启动 TCP server (127.0.0.1:23333) 并
+//       用 IOHID 事件系统向 backboardd 注入触摸;
+//    3. 本类通过 TSInjectedTouchClient 走 socket 把触摸指令发往 SpringBoard。
 //
-//  需要 entitlements: com.apple.private.hid.client.event-dispatch / event-monitor、
-//  com.apple.backboard.client 等（TrollStore 签名后生效）。
+//  senderID 动态获取机制保留（信息展示），真正发送端的 senderID 由
+//  TSInjectedTouchService.dylib 在 SpringBoard 进程内自行获取。
 //
 
 #import "TSHIDEventTouch.h"
+#import "TSInjectedTouchClient.h"
+#import "TSInjectedTouchService.h"
 #import <UIKit/UIKit.h>
 #import <mach/mach_time.h>
 #import <dlfcn.h>
@@ -258,15 +246,22 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     return [UIScreen mainScreen].bounds.size;
 }
 
-/// 构造并发送一次手指 HID 事件。
-/// pressure=压力(0~1 通常), radius=触摸半径(毫米, 0 用默认 4.5)。
+/// 发送一次触摸事件。
+///
+/// 触摸不再由本 app 进程直接构造 IOHID 事件 dispatch（实测 13 参/18 参 finger 事件、
+/// senderID 动态获取、radius/quality/tipPressure 等参数完全对齐 ZXTouch 与原版
+/// luaLib 后依旧无效），而是:
+///   1. 启动时用 opainject 把 TSInjectedTouchService.dylib 注入 SpringBoard 进程;
+///   2. 本方法把触摸指令通过 TCP socket (127.0.0.1:23333) 发往 SpringBoard;
+///   3. 服务端在 SpringBoard 进程内用 IOHID 向 backboardd 注入事件。
+///
+/// backboardd 只接受来自 SpringBoard 等受信 HID 服务进程的事件 —— 这是
+/// "找色成功但点击无效" 的根因。
 - (void)_sendFingerEventAtPoint:(CGPoint)point
                           index:(uint32_t)index
                           phase:(TSTouchPhase)phase
                        pressure:(CGFloat)pressure
                          radius:(CGFloat)radius {
-    if (!_client) { return; }
-
     // 同步按压状态，供 releaseAllTouches 清理残留触摸
     @synchronized (self) {
         if (phase == TSTouchPhaseEnded) {
@@ -278,106 +273,25 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
         }
     }
 
-    // 坐标：HID digitizer 事件使用 0.0~1.0 归一化坐标（逻辑点除以屏幕 bounds 宽高）。
-    CGSize screenBounds = [UIScreen mainScreen].bounds.size;
-    IOHIDFloat x = (screenBounds.width  > 0) ? (IOHIDFloat)(point.x / screenBounds.width)  : 0;
-    IOHIDFloat y = (screenBounds.height > 0) ? (IOHIDFloat)(point.y / screenBounds.height) : 0;
+    if (![[TSInjectedTouchClient shared] ensureInjected]) {
+        static BOOL s_loggedInjectFail = NO;
+        if (!s_loggedInjectFail) {
+            s_loggedInjectFail = YES;
+            NSLog(@"[TSHIDEventTouch] 注入 SpringBoard 失败: %@",
+                  [[TSInjectedTouchClient shared] statusDescription]);
+        }
+        return;
+    }
 
-    // ZXTouch 阶段掩码: Began mask=3(Range|Touch) range=1 touch=1;
-    //                   Moved mask=4(Position)    range=1 touch=1;
-    //                   Ended mask=2(Touch)       range=0 touch=0。
-    Boolean fingerRange, fingerTouch;
-    uint32_t fingerMask;
+    // Lua 层已是逻辑点坐标; TSInjectedTouchClient 内部会按屏幕 bounds 归一化为 0~1。
+    uint8_t type;
     switch (phase) {
-        case TSTouchPhaseBegan:
-            fingerRange = true; fingerTouch = true;
-            fingerMask = kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange;   // 3
-            break;
-        case TSTouchPhaseMoved:
-            fingerRange = true; fingerTouch = true;
-            fingerMask = kIOHIDDigitizerEventPosition;                            // 4
-            break;
+        case TSTouchPhaseBegan: type = TS_TOUCH_TYPE_DOWN; break;
+        case TSTouchPhaseMoved: type = TS_TOUCH_TYPE_MOVE; break;
         case TSTouchPhaseEnded:
-        default:
-            fingerRange = false; fingerTouch = false;
-            fingerMask = kIOHIDDigitizerEventTouch;                               // 2
-            break;
+        default:                type = TS_TOUCH_TYPE_UP;   break;
     }
-
-    uint64_t timeStamp = mach_absolute_time();
-    // tipPressure: 普通设备(无 3D Touch)恒为 0 —— 原版 luaLib / ZXTouch 均传 0。
-    // 写入非零压力可能被 backboardd 当作异常压力事件丢弃。
-    float p = 0.0f;
-    float q = 1.0f;                       // quality
-    float d = 1.0f;                       // density
-    float irr = 1.0f;                     // irregularity
-    float r = (radius > 0) ? (float)radius : 5.0f;  // major/minor radius (mm, 原版默认 5.0)
-    float twist = 0.0f;
-    float z = 0.0f;
-
-    // 1) 父事件: 整只手(digitizer)事件容器 —— iOS 13+ 新签名(15 参)。
-    //    ZXTouch: type=Hand(3) 作父容器、index=99、identity=1、eventMask=0、buttonMask=0；
-    //    坐标与掩码交给子手指事件，父事件随后显式补写关键字段。
-    IOHIDEventRef digitizer = IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault, timeStamp,
-        /*type*/       kIOHIDDigitizerTransducerTypeHand,   // Hand=3 父容器
-        /*index*/      99,
-        /*identity*/   1,
-        /*eventMask*/  0,
-        /*buttonMask*/ 0,
-        /*x,y,z*/      0, 0, 0,
-        /*tip,barrel*/ 0, 0,
-        /*range,touch*/0, 0,
-        /*options*/    0);
-    if (!digitizer) { return; }
-
-    // ZXTouch: 父事件 flags 需补写 0xb0019=1、0x4=1
-    IOHIDEventSetIntegerValue(digitizer, 0xb0019, 1);
-    IOHIDEventSetIntegerValue(digitizer, 0x4, 1);
-
-    // 2) 子事件: 单根手指 —— 原版 luaLib 实际使用 WithQuality 18 参版本:
-    //    (allocator, timeStamp, index, identity, eventMask,
-    //     x, y, z, tipPressure, twist, minorRadius, majorRadius,
-    //     quality, density, irregularity, range, touch, options)
-    //    quality=1 density=1 irregularity=1 radius=5mm tipPressure=0, 对齐原版。
-    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
-        kCFAllocatorDefault, timeStamp,
-        index,      // 手指索引
-        3,          // identity 固定 3 (ZXTouch/原版)
-        fingerMask,
-        x, y, z,
-        p, twist,   // tipPressure=0
-        r, r,       // minorRadius, majorRadius
-        q, d, irr,  // quality, density, irregularity
-        fingerRange, fingerTouch, 0);
-
-    // 3) 触摸半径字段（ZXTouch 同款：仅显式写 0xb0014/0xb0015，
-    //    其余字段在 WithQuality 创建时已带正确值，无需重复覆盖）
-    if (finger) {
-        IOHIDEventSetFloatValue(finger, kIOHIDEventFieldDigitizerMajorRadius, r);
-        IOHIDEventSetFloatValue(finger, kIOHIDEventFieldDigitizerMinorRadius, r);
-        IOHIDEventAppendEvent(digitizer, finger, 0);
-        CFRelease(finger);
-    }
-
-    // 父事件显式写入关键字段 (ZXTouch 固定值: EventMask=0x23, Range=1, Touch=1)
-    IOHIDEventSetIntegerValue(digitizer, kIOHIDEventFieldDigitizerEventMask,
-                              kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventIdentity);
-    IOHIDEventSetIntegerValue(digitizer, kIOHIDEventFieldDigitizerRange, 1);
-    IOHIDEventSetIntegerValue(digitizer, kIOHIDEventFieldDigitizerTouch, 1);
-
-    // 4) 标记发送者: 必须使用系统真实 senderID，否则 iOS 13+ backboardd 会丢弃事件。
-    if (s_senderID != 0) {
-        IOHIDEventSetSenderID(digitizer, s_senderID);
-    } else {
-        NSLog(@"[TSHIDEventTouch] 警告: senderID 未就绪(0)，使用兜底值 0x%llX 尝试发送，"
-              @"若点击仍无效请先在设备上手动触摸一次屏幕。", (unsigned long long)kTouchSenderIDFallback);
-        IOHIDEventSetSenderID(digitizer, kTouchSenderIDFallback);
-    }
-
-    // 5) 投递
-    IOHIDEventSystemClientDispatchEvent(_client, digitizer);
-    CFRelease(digitizer);
+    [[TSInjectedTouchClient shared] sendTouchType:type index:(uint8_t)index point:point];
 }
 
 #pragma mark - 公共 API
@@ -448,15 +362,13 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
 
 - (NSString *)statusDescription {
     NSMutableString *s = [NSMutableString string];
-    if (_client) {
-        [s appendString:@"client=OK"];
-    } else {
-        [s appendString:@"client=FAIL(创建失败, entitlement 可能未生效)"];
-    }
+    // 触摸通道: 注入 SpringBoard 的 socket 服务
+    [s appendFormat:@"touch=%@", [[TSInjectedTouchClient shared] statusDescription]];
+    // senderID 状态 (仅信息展示, 发送已不依赖它)
     if (s_senderID != 0) {
         [s appendFormat:@", senderID=0x%llX(就绪)", (unsigned long long)s_senderID];
     } else {
-        [s appendString:@", senderID=0(未就绪! 请先手动触摸一次屏幕, 再重跑脚本)"];
+        [s appendString:@", senderID=0(可先在设备上手动触摸一次屏幕)"];
     }
     return s;
 }

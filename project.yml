@@ -93,3 +93,25 @@ targets:
         HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/TrollAutoTouch/vendor/lua"
         # Lua 编译为标准 C99，禁用自动 ARC(纯 C 无影响但更稳)
         GCC_C_LANGUAGE_STANDARD: gnu99
+  # 注入 SpringBoard 的触摸服务 dylib。
+  # 由 build-ipa.sh 在打包时拷入 app bundle 的 bin/ 目录，
+  # app 运行时用 opainject 把它注入 SpringBoard 进程。
+  TSInjectedTouchService:
+    type: dynamic-library
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: TrollAutoTouch/Injected
+    settings:
+      base:
+        PRODUCT_NAME: TSInjectedTouchService
+        SKIP_INSTALL: YES
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        # 私有 IOHID 符号不在链接期解析，而是在 SpringBoard 进程内由 dyld 运行时查找
+        OTHER_LDFLAGS: -framework Foundation -Wl,-undefined,dynamic_lookup -Wl,-no_fixup_chains
+        DYLIB_INSTALL_NAME_BASE: "@executable_path/bin"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        CLANG_ENABLE_MODULES: NO
