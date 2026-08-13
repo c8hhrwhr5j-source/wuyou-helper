@@ -42,12 +42,12 @@
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 typedef struct __IOHIDService *IOHIDServiceRef;
-typedef struct __CFAllocator *CFAllocatorRef;
+// 注意: CFAllocatorRef / kCFAllocatorDefault 直接用 CoreFoundation 的系统定义
+// (Foundation.h 已导入)。不要在此重复 typedef/extern —— iOS SDK 中
+// CFAllocatorRef 是 const 版本, 重复声明会报 typedef redefinition / redeclaration。
 typedef double IOHIDFloat;
 typedef uint32_t IOHIDEventOptionBits;
 typedef uint32_t IOHIDEventType;
-
-extern CFAllocatorRef kCFAllocatorDefault;
 
 // iOS 13+ 新签名 (15 参)
 extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
