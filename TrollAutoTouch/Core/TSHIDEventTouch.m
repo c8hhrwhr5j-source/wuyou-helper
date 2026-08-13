@@ -2,27 +2,38 @@
 //  TSHIDEventTouch.m
 //  TrollAutoTouch
 //
-//  IOHIDEvent 系统级触摸注入实现。
+//  IOHIDEvent 系统级触摸注入实现（复刻 ZXTouch pccontrol/Touch.xm 权威写法）。
 //
 //  逆向依据: 原 TrollAutoScript 的 luaLib 二进制中提取到如下触摸注入符号:
 //    _IOHIDEventSystemClientCreate
 //    _IOHIDEventSystemClientDispatchEvent
 //    _IOHIDEventSystemClientScheduleWithRunLoop
+//    _IOHIDEventSystemClientRegisterEventCallback   (senderID 动态获取)
 //    _IOHIDEventCreateDigitizerEvent
-//    _IOHIDEventCreateDigitizerFingerEventWithQuality
+//    _IOHIDEventCreateDigitizerFingerEvent
 //    _IOHIDEventAppendEvent
 //    _IOHIDEventSetSenderID
-//    _IOHIDEventSetFloatValue              (压力/半径 显式写入)
-//    _IOHIDEventSetFloatValueWithOptions
-//    _IOHIDEventSetIntegerValueWithOptions (eventMask/range/touch 显式写入)
-//  原版触摸方法: luaTouch - touchWithFingerPosX:posY:finger:pressure:
-//    + initWithPoint:press:radius: / setPressure: (压力、触摸半径必设)。
-//  本实现复刻该路径, 且坐标按 HID digitizer 要求归一化到 0.0~1.0。
+//    _IOHIDEventSetFloatValue / SetIntegerValue      (私有字段显式写入)
 //
-//  注意: 这些是 IOKit 私有/未公开 C 接口，其参数签名随 iOS 版本略有差异。
-//  下面采用的声明是 ZXTouch / SimulateTouch 等开源项目长期验证过的版本，
-//  在 iOS 13~16 (越狱/TrollStore 环境) 上普遍可用。如遇新版本签名不符，
-//  请按头文件 <IOKit/hid/IOHIDEvent.h> (macOS SDK) 校正。
+//  关键要点（依据 ZXTouch Touch.xm + 私有头 IOHIDEvent.h）:
+//  1. iOS 13+ 签名：IOHIDEventCreateDigitizerEvent 为 15 参
+//     (allocator, timeStamp, type, index, identity, eventMask, buttonMask,
+//      x, y, z, tipPressure, barrelPressure, range, touch, options)
+//     旧签名(≤iOS12, 14参)是 (allocator, timeStamp, eventMask, eventType, ...)。
+//  2. senderID 必须动态获取：注册事件回调读取系统真实触摸屏事件的 senderID
+//     (IOHIDEventGetSenderID)。硬编码 0x8000000800 在 iOS 13+ 会被 backboardd
+//     当作非法发送者丢弃 —— 这就是"能找色但点击无效"的真正根因。
+//     获取到的 senderID 持久化保存，设备未重启时直接复用。
+//  3. 子事件用 13 参 IOHIDEventCreateDigitizerFingerEvent：
+//     identity 固定 3；Began mask=Range|Touch(3)/range=1/touch=1；
+//     Moved mask=Position(4)/range=1/touch=1；Ended mask=Touch(2)/range=0/touch=0。
+//     (注意 IOHIDEventCreateDigitizerFingerEventWithQuality 实际是 18 参，
+//      与本项目旧的 14 参调用不符，故弃用 WithQuality 版本。)
+//  4. 父事件补 flags: 0xb0019=1、0x4=1；发送前写 0xb0007=0x23、0xb0008=1、0xb0009=1。
+//  5. 坐标按屏幕 bounds 归一化到 0.0~1.0；触摸半径用私有字段 0xb0014/0xb0015。
+//
+//  需要 entitlements: com.apple.private.hid.client.event-dispatch / event-monitor、
+//  com.apple.backboard.client 等（TrollStore 签名后生效）。
 //
 
 #import "TSHIDEventTouch.h"
@@ -33,8 +44,12 @@
 // ---------- 私有类型与常量 ----------
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+typedef struct __IOHIDService *IOHIDServiceRef;
 typedef double IOHIDFloat;
 typedef uint32_t IOHIDEventOptionBits;
+typedef uint32_t IOHIDEventType;
+
+#define kIOHIDEventTypeDigitizer 11
 
 // IOHIDDigitizerEventMask 位 (来自 IOKit 私有头)
 #define kIOHIDDigitizerEventRange      (1 << 0)
@@ -46,26 +61,30 @@ typedef uint32_t IOHIDEventOptionBits;
 #define kIOHIDDigitizerTransducerTypeFinger   2   // 单根手指
 #define kIOHIDDigitizerTransducerTypeHand     3   // 整只手 (父事件容器)
 
-// 注意: iOS 13+ 的 IOHIDEventCreateDigitizerEvent 签名是 15 参:
-//   (allocator, timeStamp, type, index, identity, eventMask, buttonMask,
-//    x, y, z, tipPressure, barrelPressure, range, touch, options)
-// 旧签名(≤iOS12, 14参)是 (allocator, timeStamp, eventMask, eventType, index, ...)。
-// 本项目面向 TrollStore(iOS 14+)，必须使用 iOS 13+ 新签名(见 ZXTouch Touch.xm)。
+// 未获取到真实 senderID 时的兜底值（iOS 13 以下常用；iOS 13+ 大概率被丢弃，
+// 仅作 fallback，正式值来自系统事件回调）。
+#define kTouchSenderIDFallback 0x8000000800ULL
 
-// 模仿触摸屏上报者的 senderID (ZXTouch 常用值，使事件被识别为真实触屏)
-#define kTouchSenderID  0x8000000800ULL
+// senderID 持久化键 (NSUserDefaults)
+static NSString * const kSenderIDDefaultsKey        = @"TSHIDSenderID";
+static NSString * const kSenderIDBootTimeDefaultsKey = @"TSHIDSenderIDBootTime";
 
-// ---------- 私有函数声明 ----------
-// 这些符号来自 IOKit.framework (CoreFoundation 的一部分，随系统存在)。
+// ---------- 私有函数声明 (IOKit 私有/未公开 C 接口) ----------
 extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
 extern void IOHIDEventSystemClientScheduleWithRunLoop(IOHIDEventSystemClientRef client, CFRunLoopRef runLoop, CFStringRef mode);
+extern void IOHIDEventSystemClientUnscheduleWithRunLoop(IOHIDEventSystemClientRef client, CFRunLoopRef runLoop, CFStringRef mode);
 extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
 
-// iOS 13+ 新签名(15 参, 见 ZXTouch Touch.xm / SimulateTouch):
+typedef void (*IOHIDEventSystemClientEventCallback)(void *target, void *refcon, IOHIDServiceRef service, IOHIDEventRef event);
+extern void IOHIDEventSystemClientRegisterEventCallback(IOHIDEventSystemClientRef client, IOHIDEventSystemClientEventCallback callback, void *target, void *refcon);
+extern void IOHIDEventSystemClientUnregisterEventCallback(IOHIDEventSystemClientRef client);
+
+extern IOHIDEventType IOHIDEventGetType(IOHIDEventRef event);
+extern uint64_t IOHIDEventGetSenderID(IOHIDEventRef event);
+
+// iOS 13+ 新签名 (15 参):
 //   (allocator, timeStamp, type, index, identity, eventMask, buttonMask,
 //    x, y, z, tipPressure, barrelPressure, range, touch, options)
-// type = IOHIDDigitizerTransducerType: Hand(3) 作父容器, Finger(2) 作子手指。
-// 旧签名(≤iOS12, 14参)是 (allocator, timeStamp, eventMask, eventType, ...)。
 extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
     CFAllocatorRef allocator, uint64_t timeStamp,
     uint32_t type, uint32_t index, uint32_t identity,
@@ -75,20 +94,23 @@ extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
     Boolean range, Boolean touch,
     IOHIDEventOptionBits options);
 
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
+// 13 参 finger 子事件 (ZXTouch 使用，无 quality 的简版)：
+//   (allocator, timeStamp, index, identity, eventMask,
+//    x, y, z, tipPressure, twist, range, touch, options)
+extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEvent(
     CFAllocatorRef allocator, uint64_t timeStamp,
-    uint32_t index, uint32_t identity, uint32_t mask,
-    IOHIDFloat x, IOHIDFloat y, IOHIDFloat z, IOHIDFloat tipPressure, IOHIDFloat twist,
-    IOHIDFloat quality, IOHIDFloat density,
-    Boolean range, Boolean touch);
+    uint32_t index, uint32_t identity, uint32_t eventMask,
+    IOHIDFloat x, IOHIDFloat y, IOHIDFloat z,
+    IOHIDFloat tipPressure, IOHIDFloat twist,
+    Boolean range, Boolean touch, IOHIDEventOptionBits options);
 
 extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, IOHIDEventOptionBits options);
 extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
-// 原版 luaLib 额外链接的字段设置接口 —— 压力/质量/密度/半径 必须显式写入，
-// 否则 backboardd 会因缺省字段把事件当作无效触摸丢弃 (逆向结论)。
+// 私有字段写入 (ZXTouch 同款)
 extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, IOHIDFloat value);
 extern void IOHIDEventSetFloatValueWithOptions(IOHIDEventRef event, uint32_t field, IOHIDFloat value, IOHIDEventOptionBits options);
+extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
 extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t field, int64_t value, IOHIDEventOptionBits options);
 
 // ---------- IOHIDEventField 数字位字段常量 (IOKit 私有头 IOHIDEventTypes.h) ----------
@@ -116,10 +138,38 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
 #define kIOHIDEventFieldDigitizerMajorRadius   0x000b0014
 #define kIOHIDEventFieldDigitizerMinorRadius   0x000b0015
 
+// ---------- 静态全局 ----------
+// 触摸事件发送者 ID：通过监听系统 digitizer 事件动态获取。
+// 多线程共享，因此用静态全局（ZXTouch 亦为全局）。
+static uint64_t s_senderID = 0;
+
+// 当前开机时间（绝对秒）。用于判断设备是否重启过（重启后 senderID 会变化）。
+static NSTimeInterval TSHIDCurrentBootTime(void) {
+    return [[NSDate date] timeIntervalSince1970] - [NSProcessInfo processInfo].systemUptime;
+}
+
+// 监听系统触摸屏(digitizer)事件，读取真实 senderID（ZXTouch setSenderIdCallback 同款）。
+// 回调通过 ScheduleWithRunLoop 调度到主 RunLoop，可安全访问 NSUserDefaults。
+static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef service, IOHIDEventRef event) {
+    if (!event) return;
+    if (IOHIDEventGetType(event) != kIOHIDEventTypeDigitizer) return;
+    if (s_senderID != 0) return;
+    uint64_t sid = IOHIDEventGetSenderID(event);
+    if (sid == 0) return;
+
+    s_senderID = sid;
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setDouble:(double)sid forKey:kSenderIDDefaultsKey];
+    [ud setDouble:TSHIDCurrentBootTime() forKey:kSenderIDBootTimeDefaultsKey];
+    [ud synchronize];
+    NSLog(@"[TSHIDEventTouch] 已获取触摸发送者 senderID: 0x%llX", sid);
+}
+
 // ---------- 实现 ----------
 
 @interface TSHIDEventTouch ()
-@property (nonatomic, assign) IOHIDEventSystemClientRef client;
+@property (nonatomic, assign) IOHIDEventSystemClientRef client;          // 事件投递 client
+@property (nonatomic, assign) IOHIDEventSystemClientRef senderIDClient;  // senderID 监听 client
 // 当前仍处于按下状态的手指 index 集合，及每个手指的最后位置。
 // 用于 releaseAllTouches 在脚本停止时补发 touchUp，避免幽灵手指。
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *pressedIndexes;
@@ -143,19 +193,43 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
         _pressedIndexes = [NSMutableSet set];
         _lastPoints = [NSMutableDictionary dictionary];
         [self _setupClient];
+        [self _setupSenderID];
     }
     return self;
 }
 
 - (void)_setupClient {
     // 创建 HID 事件系统客户端并挂到主 RunLoop，使 dispatch 的事件被 backboardd 处理。
-    // 需要 entitlements: com.apple.backboard.client / task_for_pid-allow 等(TrollStore 签名后生效)。
+    // 需要 entitlements: com.apple.backboard.client / com.apple.private.hid.client.event-dispatch。
     _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (_client) {
         IOHIDEventSystemClientScheduleWithRunLoop(_client, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     } else {
         NSLog(@"[TSHIDEventTouch] IOHIDEventSystemClientCreate 失败，请确认已用 TrollStore 安装且权限生效。");
     }
+}
+
+/// 初始化 senderID：优先复用已保存值；否则注册回调监听系统触摸事件动态获取。
+/// 注意: 动态获取需要用户先在设备上触摸一次屏幕（或按 Home 键等产生 digitizer 事件）。
+- (void)_setupSenderID {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
+    NSTimeInterval savedBoot = [ud doubleForKey:kSenderIDBootTimeDefaultsKey];
+
+    if (saved != 0 && fabs(savedBoot - TSHIDCurrentBootTime()) <= 3) {
+        s_senderID = saved;
+        NSLog(@"[TSHIDEventTouch] 设备未重启，复用已保存的 senderID: 0x%llX", s_senderID);
+        return;
+    }
+
+    _senderIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+    if (!_senderIDClient) {
+        NSLog(@"[TSHIDEventTouch] 创建 senderID 监听 client 失败");
+        return;
+    }
+    IOHIDEventSystemClientScheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+    IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, NULL, NULL);
+    NSLog(@"[TSHIDEventTouch] 正在监听系统触摸事件获取 senderID……（若迟迟不生效请先在设备上手动触摸一次屏幕）");
 }
 
 /// 当前屏幕逻辑尺寸
@@ -183,24 +257,29 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
         }
     }
 
-    // 坐标：HID digitizer 事件使用 0.0~1.0 归一化坐标 (逆向 iosre/SimulateTouch 确认)，
-    // 逻辑点必须先除以屏幕 bounds 宽高，否则 backboardd 会把事件丢弃/坐标溢出。
+    // 坐标：HID digitizer 事件使用 0.0~1.0 归一化坐标（逻辑点除以屏幕 bounds 宽高）。
     CGSize screenBounds = [UIScreen mainScreen].bounds.size;
     IOHIDFloat x = (screenBounds.width  > 0) ? (IOHIDFloat)(point.x / screenBounds.width)  : 0;
     IOHIDFloat y = (screenBounds.height > 0) ? (IOHIDFloat)(point.y / screenBounds.height) : 0;
 
-    Boolean range, touch;
-    uint32_t mask;
+    // ZXTouch 阶段掩码: Began mask=3(Range|Touch) range=1 touch=1;
+    //                   Moved mask=4(Position)    range=1 touch=1;
+    //                   Ended mask=2(Touch)       range=0 touch=0。
+    Boolean fingerRange, fingerTouch;
+    uint32_t fingerMask;
     switch (phase) {
         case TSTouchPhaseBegan:
-            range = true;  touch = true;  mask = kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange;
+            fingerRange = true; fingerTouch = true;
+            fingerMask = kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange;   // 3
             break;
         case TSTouchPhaseMoved:
-            range = true;  touch = true;  mask = kIOHIDDigitizerEventPosition;
+            fingerRange = true; fingerTouch = true;
+            fingerMask = kIOHIDDigitizerEventPosition;                            // 4
             break;
         case TSTouchPhaseEnded:
         default:
-            range = false; touch = false; mask = kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange;
+            fingerRange = false; fingerTouch = false;
+            fingerMask = kIOHIDDigitizerEventTouch;                               // 2
             break;
     }
 
@@ -213,10 +292,8 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
     float z = 0.0f;
 
     // 1) 父事件: 整只手(digitizer)事件容器 —— iOS 13+ 新签名(15 参)。
-    //    按 ZXTouch Touch.xm 权威写法: type=Hand(3) 作父容器、index=99、identity=1、
-    //    eventMask=0、buttonMask=0; 坐标与掩码交给子手指事件, 父事件随后显式补写关键字段。
-    //    旧签名(14参, ≤iOS12)把 eventMask/eventType 放在第3/4参, 在 iOS 14+ 上会把
-    //    eventType 填错位导致事件不被 backboardd 识别为触摸 —— 这就是"能找色但点击无效"的根因。
+    //    ZXTouch: type=Hand(3) 作父容器、index=99、identity=1、eventMask=0、buttonMask=0；
+    //    坐标与掩码交给子手指事件，父事件随后显式补写关键字段。
     IOHIDEventRef digitizer = IOHIDEventCreateDigitizerEvent(
         kCFAllocatorDefault, timeStamp,
         /*type*/       kIOHIDDigitizerTransducerTypeHand,   // Hand=3 父容器
@@ -230,27 +307,34 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
         /*options*/    0);
     if (!digitizer) { return; }
 
-    // 2) 子事件: 单根手指
-    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEventWithQuality(
-        kCFAllocatorDefault, timeStamp,
-        index, index, mask,
-        x, y, z, p, twist,
-        q, d,
-        range, touch);
+    // ZXTouch: 父事件 flags 需补写 0xb0019=1、0x4=1
+    IOHIDEventSetIntegerValue(digitizer, 0xb0019, 1);
+    IOHIDEventSetIntegerValue(digitizer, 0x4, 1);
 
-    // 3) 显式写入关键字段 (逆向原版 luaLib 确认的缺失环节):
-    //    backboardd 根据这些字段判定触摸有效性，缺省时事件会被丢弃。
+    // 2) 子事件: 单根手指 (ZXTouch 13 参 IOHIDEventCreateDigitizerFingerEvent,
+    //    identity 固定 3)
+    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(
+        kCFAllocatorDefault, timeStamp,
+        index,      // 手指索引
+        3,          // identity 固定 3 (ZXTouch)
+        fingerMask,
+        x, y, z,
+        p, twist,
+        fingerRange, fingerTouch, 0);
+
+    // 3) 显式写入关键字段（确保 backboardd 正确识别触摸有效性）:
     if (finger) {
         IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerPressure,  p, 0);
         IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerQuality,     q, 0);
         IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerDensity,     d, 0);
+        // 触摸半径（ZXTouch 用 0xb0014/0xb0015）
         IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerMajorRadius, r, 0);
         IOHIDEventSetFloatValueWithOptions(finger, kIOHIDEventFieldDigitizerMinorRadius, r, 0);
         IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerIndex,    index, 0);
-        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerIdentity, index, 0);
-        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerEventMask, mask, 0);
-        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerRange, range ? 1 : 0, 0);
-        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerTouch, touch ? 1 : 0, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerIdentity, 3, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerEventMask, fingerMask, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerRange, fingerRange ? 1 : 0, 0);
+        IOHIDEventSetIntegerValueWithOptions(finger, kIOHIDEventFieldDigitizerTouch, fingerTouch ? 1 : 0, 0);
         IOHIDEventAppendEvent(digitizer, finger, 0);
         CFRelease(finger);
     }
@@ -261,8 +345,14 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
     IOHIDEventSetIntegerValueWithOptions(digitizer, kIOHIDEventFieldDigitizerRange, 1, 0);
     IOHIDEventSetIntegerValueWithOptions(digitizer, kIOHIDEventFieldDigitizerTouch, 1, 0);
 
-    // 4) 标记发送者为触摸屏，避免被丢弃
-    IOHIDEventSetSenderID(digitizer, kTouchSenderID);
+    // 4) 标记发送者: 必须使用系统真实 senderID，否则 iOS 13+ backboardd 会丢弃事件。
+    if (s_senderID != 0) {
+        IOHIDEventSetSenderID(digitizer, s_senderID);
+    } else {
+        NSLog(@"[TSHIDEventTouch] 警告: senderID 未就绪(0)，使用兜底值 0x%llX 尝试发送，"
+              @"若点击仍无效请先在设备上手动触摸一次屏幕。", (unsigned long long)kTouchSenderIDFallback);
+        IOHIDEventSetSenderID(digitizer, kTouchSenderIDFallback);
+    }
 
     // 5) 投递
     IOHIDEventSystemClientDispatchEvent(_client, digitizer);
