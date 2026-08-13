@@ -336,6 +336,38 @@ jobs:
           cd build && zip -qry TrollAutoTouch.ipa Payload
           echo "[OK] build/TrollAutoTouch.ipa"
 
+          # ── IPA 内容自检 ──
+          # artifact 下载需要 GitHub 认证, 无法直接验证; 因此把 IPA 内文件清单
+          # 推送到 ci-debug 分支的 ci-ipa-contents.txt, 匿名即可读取验证
+          # (确认 bin/TSInjectedTouchService.dylib 与 bin/opainject 确实在包里)。
+          echo ""
+          echo "=== IPA 内容清单 ==="
+          unzip -l TrollAutoTouch.ipa | tee /tmp/ipa_contents.txt
+          echo ""
+          echo "=== 关键文件检查 ==="
+          MISSING_IPA=0
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject"; do
+            if grep -q "$KEY" /tmp/ipa_contents.txt; then
+              echo "[OK] $KEY"
+            else
+              echo "[x] IPA 缺少: $KEY"
+              MISSING_IPA=1
+            fi
+          done
+          if [ "$MISSING_IPA" = "1" ]; then
+            echo "[x] IPA 内容不完整, 停止"
+            exit 1
+          fi
+          {
+            git config user.name "ci-bot"
+            git config user.email "ci-bot@users.noreply.github.com"
+            cp /tmp/ipa_contents.txt ./ci-ipa-contents.txt
+            git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
+            git add -f ci-ipa-contents.txt
+            git commit -m "ci: save ipa contents (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+            git push origin ci-debug --force
+          } >/dev/null 2>&1 && echo "[i] IPA 清单已推送到 ci-debug 分支" || echo "[i] IPA 清单推送失败(忽略)"
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
