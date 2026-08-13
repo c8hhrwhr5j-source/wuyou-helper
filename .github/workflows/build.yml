@@ -147,6 +147,11 @@ jobs:
           echo "[OK] xcodebuild 编译成功"
 
           # ── 编译触摸服务 dylib (TSInjectedTouchService, 注入 SpringBoard 用) ──
+          # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制,
+          # 该 flag 仅与 -scheme/-xctestrun 搭配), 否则报错:
+          #   "The flag -scheme, -testProductsPath, or -xctestrun is required
+          #    when specifying -derivedDataPath."
+          # 所以用 CONFIGURATION_BUILD_DIR 显式指定 dylib 输出目录。
           if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -target TSInjectedTouchService \
             -configuration Release \
@@ -156,7 +161,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             ENABLE_CHAINED_FIXUPS=NO \
-            -derivedDataPath build/DerivedData \
+            CONFIGURATION_BUILD_DIR="$PWD/build/dylib" \
             build > /tmp/dylib_build.log 2>&1; then
             echo "[x] dylib 编译失败，完整日志:"
             tail -80 /tmp/dylib_build.log
@@ -214,7 +219,7 @@ jobs:
           # + opainject (OpenInject 注入器)。app 运行时把它们部署到 Documents 后:
           #   opainject <SpringBoard_pid> <dylib>  → 注入 → socket 发触摸
           mkdir -p "$APP_DST/bin"
-          DYLIB=$(find build/DerivedData -name 'TSInjectedTouchService.dylib' -type f | head -1)
+          DYLIB=$(find build/DerivedData build/dylib -name 'TSInjectedTouchService.dylib' -type f 2>/dev/null | head -1)
           if [ -n "$DYLIB" ]; then
             cp "$DYLIB" "$APP_DST/bin/TSInjectedTouchService.dylib"
             # dylib 用 ldid 签假签名 (TrollStore 安装时会重新签名, 这里保证

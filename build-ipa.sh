@@ -162,6 +162,8 @@ case "$MODE" in
 
     # ── 注入式触摸服务: 编译 dylib + 打包 opainject 注入器 ──
     echo "[*] 编译触摸服务 dylib (TSInjectedTouchService)"
+    # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制),
+    # 用 CONFIGURATION_BUILD_DIR 显式指定 dylib 输出目录。
     xcodebuild -project "$ROOT/TrollAutoTouch.xcodeproj" \
       -target TSInjectedTouchService \
       -configuration Release \
@@ -169,9 +171,9 @@ case "$MODE" in
       CODE_SIGNING_ALLOWED=NO \
       CODE_SIGNING_REQUIRED=NO \
       CODE_SIGN_IDENTITY="" \
-      -derivedDataPath "$BUILD_DIR/DerivedData" \
+      CONFIGURATION_BUILD_DIR="$BUILD_DIR/dylib" \
       build
-    DYLIB="$(find "$BUILD_DIR/DerivedData" -name 'TSInjectedTouchService.dylib' -type f | head -1)"
+    DYLIB="$(find "$BUILD_DIR/dylib" "$BUILD_DIR/DerivedData" -name 'TSInjectedTouchService.dylib' -type f 2>/dev/null | head -1)"
     [ -z "$DYLIB" ] && { echo "[x] 未找到 TSInjectedTouchService.dylib"; exit 1; }
     mkdir -p "$PAYLOAD/TrollAutoTouch.app/bin"
     cp "$DYLIB" "$PAYLOAD/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib"
