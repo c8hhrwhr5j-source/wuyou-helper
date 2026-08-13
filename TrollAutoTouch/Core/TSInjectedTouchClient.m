@@ -22,13 +22,24 @@
 #include <sys/sysctl.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
 #include <mach/vm_map.h>
-#ifdef __arm64e__
-#include <ptrauth.h>
-#endif
+
+// mach_vm_* 不在 iOS 公共头文件中 (mach_vm.h 会 #error "unsupported"),
+// 但函数在共享缓存中导出, 运行时可调用。手动声明原型即可。
+extern kern_return_t mach_vm_allocate(vm_map_t target, mach_vm_address_t *address,
+                                      mach_vm_size_t size, int flags);
+extern kern_return_t mach_vm_write(vm_map_t target_task, mach_vm_address_t address,
+                                   vm_offset_t data, mach_msg_type_number_t data_count);
+extern kern_return_t mach_vm_protect(vm_map_t target_task, mach_vm_address_t address,
+                                     mach_vm_size_t size, boolean_t set_maximum,
+                                     vm_prot_t new_protection);
+extern kern_return_t mach_vm_deallocate(vm_map_t target_task, mach_vm_address_t address,
+                                        mach_vm_size_t size);
+extern kern_return_t mach_vm_read(vm_map_t target_task, mach_vm_address_t address,
+                                  mach_vm_size_t size, vm_offset_t *data,
+                                  mach_msg_type_number_t *data_count);
 
 extern char **environ;
 
@@ -82,6 +93,23 @@ extern char **environ;
         if (out.length == 0 && _lastErrorStage != nil && [_lastErrorStage hasPrefix:@"resign"]) {
             logPath = [docs stringByAppendingPathComponent:@"bin/resign.log"];
             out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+        }
+        // dlopen-NULL: 读 SpringBoard 侧 dylib 日志 (AMFI 拒绝时会有 NSLog, 但 /tmp/ts_touch.log
+        // 在 constructor 没跑起来时为空)。这是直接注入特有阶段, 必须单独提示用户。
+        if ([_lastErrorStage isEqualToString:@"dlopen-NULL"]) {
+            NSString *dylibLog = [NSString stringWithContentsOfFile:@"/tmp/ts_touch.log"
+                                                          encoding:NSUTF8StringEncoding error:NULL];
+            NSString *hint = @"dylib 被 AMFI 拒绝 (签名/entitlements 无效)";
+            if (dylibLog.length > 0) {
+                // constructor 跑了一部分 → 取最后 3 行
+                NSArray<NSString *> *lines = [dylibLog componentsSeparatedByString:@"\n"];
+                NSUInteger from = lines.count > 3 ? lines.count - 3 : 0;
+                NSString *tail = [[[lines subarrayWithRange:NSMakeRange(from, lines.count - from)]
+                                   componentsJoinedByString:@" | "]
+                                  stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (tail.length > 0) hint = tail;
+            }
+            return [NSString stringWithFormat:@"注入失败(直接注入 dlopen 返回 NULL: %@)", hint];
         }
         NSString *detail = @"";
         if (out.length > 0) {
@@ -396,29 +424,32 @@ extern char **environ;
     }
     NSLog(@"[TSInjectedTouch] 分配 stack 内存: 0x%llx (%zu bytes)", stackAddr, stackSize);
 
-    // 7. 获取 dlopen 地址 (共享缓存, 所有进程地址相同)
-    uint64_t dlopenAddr = (uint64_t)dlopen;
-#ifdef __arm64e__
-    // arm64e: dlopen 是签名指针, strip 后取原始地址, thread_create_running 会自动重新签名
-    dlopenAddr = (uint64_t)ptrauth_strip(dlopen, ptrauth_key_function_pointer);
-#endif
-    NSLog(@"[TSInjectedTouch] dlopen 地址: 0x%llx (arm64e=%d)", dlopenAddr,
-#ifdef __arm64e__
-          1
-#else
-          0
-#endif
-          );
+    // 7. 获取 dlopen 地址 (共享缓存, 所有同架构进程地址相同)
+    //    dlsym(RTLD_DEFAULT, ...) 返回原始地址 (无 PAC 签名), 可直接用于
+    //    thread_create_running 的 PC 寄存器。比直接取 &dlopen 更安全
+    //    (arm64e 上函数指针带 PAC, 直接 cast 会得到带签名位的值)。
+    uint64_t dlopenAddr = (uint64_t)dlsym(RTLD_DEFAULT, "dlopen");
+    if (dlopenAddr == 0) {
+        NSLog(@"[TSInjectedTouch] dlsym(dlopen) 返回 NULL");
+        _lastErrorStage = @"dlsym-dlopen";
+        _lastErrorErrno = ENOENT;
+        mach_vm_deallocate(task, codeAddr, allocSize);
+        mach_vm_deallocate(task, stackAddr, stackSize);
+        return NO;
+    }
+    NSLog(@"[TSInjectedTouch] dlopen 地址: 0x%llx", dlopenAddr);
 
     // 8. 创建远程线程: PC=dlopen, x0=path, x1=RTLD_NOW, LR=shellcode(b loop), SP=栈顶
+    //    Xcode 16+ / iOS 18 SDK 的 arm_thread_state64_t 使用 __opaque_* 字段
+    //    (旧 SDK 用 __pc/__lr/__sp/__fp)。__x[0..28] 两种 SDK 都一样。
     arm_thread_state64_t state;
     memset(&state, 0, sizeof(state));
-    state.__x[0] = pathAddr;                // arg1 = dylib path
-    state.__x[1] = RTLD_NOW;                // arg2 = mode
-    state.__sp  = stackAddr + stackSize - 256;  // 栈顶 (留 256B 对齐余量)
-    state.__lr  = codeAddr;                 // dlopen 返回后跳到 shellcode (b loop)
-    state.__fp  = 0;
-    state.__pc  = dlopenAddr;               // 入口 = dlopen
+    state.__x[0] = pathAddr;                    // arg1 = dylib path
+    state.__x[1] = RTLD_NOW;                    // arg2 = mode
+    state.__opaque_sp = (void *)(stackAddr + stackSize - 256);  // 栈顶
+    state.__opaque_lr = (void *)codeAddr;        // dlopen 返回后跳到 shellcode (b loop)
+    state.__opaque_fp = NULL;
+    state.__opaque_pc = (void *)dlopenAddr;      // 入口 = dlopen
 
     thread_act_t thread = MACH_PORT_NULL;
     kr = thread_create_running(task, ARM_THREAD_STATE64,
@@ -438,25 +469,32 @@ extern char **environ;
     //    dlopen 触发 dylib 的 __attribute__((constructor)) → 启动 socket server
     usleep(800 * 1000);  // 800ms 应足够 dlopen + constructor
 
-    // 检查线程状态 (PC 应在 shellcode 循环 = codeAddr)
+    // 检查线程状态 (PC 应在 shellcode 循环 = codeAddr, 表示 dlopen 已返回)
+    // 若 x0 != 0: dlopen 成功 (handle); x0 == 0: dlopen 失败 (dylib 加载被拒)
+    // — 必须把 dlopen NULL 当作失败, 否则 ensureInjected 会落到 opainject fallback,
+    //   覆盖真实错误阶段, 用户看到的是 EBADEXEC 而非 dlopen 失败。
     arm_thread_state64_t curState;
     mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
     kr = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&curState, &count);
+    BOOL dlopenOK = NO;
     if (kr == KERN_SUCCESS) {
         NSLog(@"[TSInjectedTouch] 线程状态: pc=0x%llx lr=0x%llx x0=0x%llx (dlopen 返回值)",
-              curState.__pc, curState.__lr, curState.__x[0]);
+              (uint64_t)curState.__opaque_pc, (uint64_t)curState.__opaque_lr, curState.__x[0]);
         if (curState.__x[0] != 0) {
             NSLog(@"[TSInjectedTouch] dlopen 成功! handle=0x%llx", curState.__x[0]);
+            dlopenOK = YES;
         } else {
-            NSLog(@"[TSInjectedTouch] dlopen 返回 NULL — dylib 可能加载失败 (检查 /tmp/ts_touch.log)");
+            NSLog(@"[TSInjectedTouch] dlopen 返回 NULL — dylib 加载失败 (AMFI 拒绝 / 签名无效 / 路径错误)");
         }
     } else {
-        NSLog(@"[TSInjectedTouch] thread_get_state 失败: %s — 继续 (dlopen 可能已完成)", mach_error_string(kr));
+        NSLog(@"[TSInjectedTouch] thread_get_state 失败: %s — 线程可能已崩溃 (PAC/arm64e?), 乐观认为 dlopen 已完成", mach_error_string(kr));
+        dlopenOK = YES;  // 无法确认时乐观继续, 让 socket 连接尝试给出最终结论
     }
 
     // 10. 终止远程线程 (b loop 循环浪费 CPU, dylib 已加载)
     kr = thread_terminate(thread);
-    NSLog(@"[TSInjectedTouch] thread_terminate: %s", kr == KERN_SUCCESS ? @"成功" : mach_error_string(kr));
+    NSLog(@"[TSInjectedTouch] thread_terminate: %@",
+          kr == KERN_SUCCESS ? @"成功" : [NSString stringWithUTF8String:mach_error_string(kr)]);
 
     // 读 dylib 日志 (constructor 在 dlopen 时已同步执行)
     NSString *dylibLog = [NSString stringWithContentsOfFile:@"/tmp/ts_touch.log"
@@ -465,6 +503,12 @@ extern char **environ;
         NSLog(@"[TSInjectedTouch] SpringBoard dylib 日志:\n%@", dylibLog);
     } else {
         NSLog(@"[TSInjectedTouch] /tmp/ts_touch.log 为空 (dylib constructor 可能未执行)");
+    }
+
+    if (!dlopenOK) {
+        _lastErrorStage = @"dlopen-NULL";
+        _lastErrorErrno = ENOEXEC;  // "Exec format error" — AMFI 拒绝 dylib 加载
+        return NO;
     }
 
     _lastErrorStage = nil;
