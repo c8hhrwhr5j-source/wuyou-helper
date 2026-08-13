@@ -69,6 +69,11 @@ extern char **environ;
         NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
         NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
         NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+        // 重签阶段失败时读 resign.log (ldid 输出), opainject 此时根本没跑
+        if (out.length == 0 && _lastErrorStage != nil && [_lastErrorStage hasPrefix:@"resign"]) {
+            logPath = [docs stringByAppendingPathComponent:@"bin/resign.log"];
+            out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+        }
         NSString *detail = @"";
         if (out.length > 0) {
             NSArray<NSString *> *lines = [out componentsSeparatedByString:@"\n"];
@@ -160,9 +165,8 @@ extern char **environ;
     [fm copyItemAtPath:dylibSrc toPath:dylibDst error:NULL];
     chmod(dylibDst.UTF8String, 0755);
 
-    // 重签工具链保留部署 (与原版 bin/ 一致), 但运行时不再使用——签名在 CI 打包时
-    // 已用 codesign 完成 (opainject 补了 no-sandbox/debugapplications, dylib 用
-    // injector.entitlements.xml)。此处保留仅为对齐原版文件结构, 供后续排查/备用。
+    // 重签工具链: ldid 用于运行时重签 opainject/dylib, 恢复 TrollStore 安装时被剥离的
+    // entitlements (CI codesign 的签名会被 TrollStore 重签覆盖)。fastPathSign 为备用。
     NSArray<NSString *> *tools = @[@"ldid", @"fastPathSign"];
     for (NSString *tool in tools) {
         NSString *src = [[NSBundle mainBundle] pathForResource:tool ofType:nil inDirectory:@"bin"];
@@ -175,22 +179,111 @@ extern char **environ;
             NSLog(@"[TSInjectedTouch] bundle 中找不到 %@", tool);
         }
     }
+    // 重签工具链 + entitlements: 部署到 Documents/bin/ 供运行时 ldid 重签使用。
+    // ent2.xml 在 bundle/bin/ 下; opainject/injector.entitlements.xml 在 Resources 根目录。
     NSArray<NSString *> *plists = @[@"ent2.xml", @"injector.entitlements.xml", @"opainject.entitlements.xml"];
     for (NSString *plist in plists) {
         NSString *src = [[NSBundle mainBundle] pathForResource:plist.stringByDeletingPathExtension ofType:plist.pathExtension inDirectory:@"bin"];
-        if (!src && [plist isEqualToString:@"injector.entitlements.xml"]) {
-            // injector.entitlements.xml 在 Resources 根目录 (不在 bin/ 下)
-            src = [[NSBundle mainBundle] pathForResource:@"injector.entitlements" ofType:@"xml"];
+        if (!src) {
+            // 不在 bin/ 下则回退到 Resources 根目录 (opainject/injector.entitlements.xml)
+            src = [[NSBundle mainBundle] pathForResource:plist.stringByDeletingPathExtension ofType:plist.pathExtension];
         }
         if (src) {
             NSString *dst = [binDir stringByAppendingPathComponent:plist];
             [fm removeItemAtPath:dst error:NULL];
             [fm copyItemAtPath:src toPath:dst error:NULL];
+        } else {
+            NSLog(@"[TSInjectedTouch] bundle 中找不到 %@", plist);
         }
     }
 
     NSLog(@"[TSInjectedTouch] 部署完成: %@", dylibDst);
     return YES;
+}
+
+#pragma mark - 运行时重签 (ldid)
+
+- (BOOL)resignBinaries {
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *binDir = [docs stringByAppendingPathComponent:@"bin"];
+    NSString *ldidPath = [binDir stringByAppendingPathComponent:@"ldid"];
+    NSString *injectorPath = [binDir stringByAppendingPathComponent:@"opainject"];
+    NSString *dylibPath = [binDir stringByAppendingPathComponent:@"TSInjectedTouchService.dylib"];
+    NSString *opainjectEnt = [binDir stringByAppendingPathComponent:@"opainject.entitlements.xml"];
+    NSString *injectorEnt = [binDir stringByAppendingPathComponent:@"injector.entitlements.xml"];
+    NSString *resignLog = [binDir stringByAppendingPathComponent:@"resign.log"];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:ldidPath]) {
+        NSLog(@"[TSInjectedTouch] 重签失败: ldid 不存在于 %@", ldidPath);
+        _lastErrorStage = @"resign-noldid";
+        _lastErrorErrno = ENOENT;
+        return NO;
+    }
+    if (![fm fileExistsAtPath:opainjectEnt]) {
+        NSLog(@"[TSInjectedTouch] 重签失败: opainject.entitlements.xml 不存在于 %@", opainjectEnt);
+        _lastErrorStage = @"resign-noent";
+        _lastErrorErrno = ENOENT;
+        return NO;
+    }
+
+    // 重签 opainject: 恢复 no-sandbox + task_for_pid-allow + system-task-ports 等,
+    // 否则被 app spawn 后继承沙箱, task_for_pid(SpringBoard) 被拦截。
+    if (![self _resignBinary:injectorPath withEntitlements:opainjectEnt ldid:ldidPath log:resignLog]) {
+        NSLog(@"[TSInjectedTouch] opainject 重签失败");
+        _lastErrorStage = @"resign-opainject";
+        return NO;
+    }
+    // 重签 dylib: 确保 AMFI 允许 dlopen (签名有效 + entitlements 完整)。失败不致命。
+    if ([fm fileExistsAtPath:injectorEnt]) {
+        if (![self _resignBinary:dylibPath withEntitlements:injectorEnt ldid:ldidPath log:resignLog]) {
+            NSLog(@"[TSInjectedTouch] dylib 重签失败 (继续, dlopen 仍可能成功)");
+        }
+    }
+    NSLog(@"[TSInjectedTouch] 运行时重签完成");
+    return YES;
+}
+
+- (BOOL)_resignBinary:(NSString *)binaryPath
+       withEntitlements:(NSString *)entPath
+                  ldid:(NSString *)ldidPath
+                   log:(NSString *)logPath {
+    // ldid -S<entitlements> <binary>  (无空格: -S 紧跟 entitlements 文件路径)
+    NSString *entFlag = [NSString stringWithFormat:@"-S%@", entPath];
+    const char *args[] = {
+        ldidPath.UTF8String,
+        entFlag.UTF8String,
+        binaryPath.UTF8String,
+        NULL
+    };
+
+    int logFD = open(logPath.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (logFD >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, logFD, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, logFD, STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, logFD);
+    }
+
+    pid_t child = -1;
+    int rc = posix_spawn(&child, ldidPath.UTF8String, logFD >= 0 ? &actions : NULL, NULL,
+                         (char *const *)args, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        NSLog(@"[TSInjectedTouch] posix_spawn ldid 失败: %d (%s)", rc, strerror(rc));
+        if (logFD >= 0) close(logFD);
+        return NO;
+    }
+
+    int status = 0;
+    waitpid(child, &status, 0);
+    if (logFD >= 0) close(logFD);
+
+    int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+    NSLog(@"[TSInjectedTouch] ldid 重签 %@ exit=%d 输出=%@", binaryPath.lastPathComponent, exitCode, out.length > 0 ? out : @"(无)");
+    return (WIFEXITED(status) && exitCode == 0);
 }
 
 #pragma mark - 注入
@@ -207,14 +300,9 @@ extern char **environ;
     NSString *injectorPath = [docs stringByAppendingPathComponent:@"bin/opainject"];
     NSString *dylibPath = [docs stringByAppendingPathComponent:@"bin/TSInjectedTouchService.dylib"];
 
-    // 注意: 不在运行时重签 opainject/dylib!
-    // opainject 在 CI 打包时已用 codesign 重签, 补齐原版缺失的
-    // com.apple.private.security.no-sandbox + com.apple.springboard.debugapplications
-    // (并带 --platform-apply / CS_PLATFORM_BINARY)。此前 opainject 缺这两个权限时,
-    // 被本 app spawn 后作为子进程继承 app 沙箱 → sandbox 拦截 task_for_pid(SpringBoard)
-    // → opainject 报 "ERROR: Got invalid task port (-1)" (dead name)。
-    // dylib 已在 CI 用 injector.entitlements.xml 签名 (platform-application + no-sandbox),
-    // TrollStore 安装时保留二进制内已嵌入的 entitlements, 运行时无需再签。
+    // opainject/dylib 已在 ensureInjected 阶段由 resignBinaries 用 ldid 重签,
+    // 恢复 TrollStore 安装时被剥离的 entitlements (no-sandbox / task_for_pid-allow /
+    // system-task-ports / platform-application 等)。此处直接 spawn opainject 即可。
 
     // opainject <pid> <dylib_path>
     const char *args[] = {
@@ -318,6 +406,14 @@ extern char **environ;
 
     if (![self deployBinaries]) {
         _lastErrorStage = @"deploy";
+        _injectFailed = YES;
+        return NO;
+    }
+
+    // TrollStore 安装时会重签所有二进制, 覆盖 CI codesign 注入的 entitlements。
+    // 必须运行时用 ldid 重签, 否则 opainject 以沙箱子进程运行,
+    // task_for_pid(SpringBoard) 被拦截 → "Got invalid task port (-1)"。
+    if (![self resignBinaries]) {
         _injectFailed = YES;
         return NO;
     }

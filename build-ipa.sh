@@ -187,6 +187,15 @@ case "$MODE" in
     else
       echo "[!] 未找到 ldid, opainject 未预签名 (注入可能失败)"
     fi
+    # 运行时重签工具链 + entitlements: app 用 ldid 在注入前重签 opainject/dylib,
+    # 恢复 TrollStore 安装时被剥离的 entitlements (no-sandbox / task_for_pid-allow 等)。
+    for T in ldid fastPathSign; do
+      cp "$ROOT/TrollAutoTouch/Resources/bin/$T" "$PAYLOAD/TrollAutoTouch.app/bin/$T" 2>/dev/null && chmod 755 "$PAYLOAD/TrollAutoTouch.app/bin/$T"
+    done
+    cp "$ROOT/TrollAutoTouch/Resources/bin/ent2.xml" "$PAYLOAD/TrollAutoTouch.app/bin/ent2.xml" 2>/dev/null || true
+    cp "$ROOT/TrollAutoTouch/Resources/opainject.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject.entitlements.xml" 2>/dev/null || true
+    cp "$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/injector.entitlements.xml" 2>/dev/null || true
+    echo "[OK] 运行时重签工具链已部署到 bin/"
     echo "[OK] 触摸服务已打包: bin/TSInjectedTouchService.dylib + bin/opainject"
 
     prepare_icons "$PAYLOAD/TrollAutoTouch.app"
@@ -205,6 +214,13 @@ case "$MODE" in
       ldid -S"$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
       echo "[OK] opainject 已注入注入器 entitlements"
     fi
+    # 运行时重签工具链 + entitlements (同 xcode 子命令)
+    for T in ldid fastPathSign; do
+      cp "$ROOT/TrollAutoTouch/Resources/bin/$T" "$PAYLOAD/TrollAutoTouch.app/bin/$T" 2>/dev/null && chmod 755 "$PAYLOAD/TrollAutoTouch.app/bin/$T"
+    done
+    cp "$ROOT/TrollAutoTouch/Resources/bin/ent2.xml" "$PAYLOAD/TrollAutoTouch.app/bin/ent2.xml" 2>/dev/null || true
+    cp "$ROOT/TrollAutoTouch/Resources/opainject.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject.entitlements.xml" 2>/dev/null || true
+    cp "$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/injector.entitlements.xml" 2>/dev/null || true
     DYLIB="$(find "$BUILD_DIR/DerivedData" -name 'TSInjectedTouchService.dylib' -type f 2>/dev/null | head -1)"
     if [ -n "$DYLIB" ]; then
       cp "$DYLIB" "$PAYLOAD/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib"
