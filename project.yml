@@ -40,6 +40,10 @@ targets:
           # 若不排除，本递归条目会把它们一并收录，与 AppDelegate 的 main 冲突
           # 导致链接期 duplicate symbol '_main'。
           - "vendor/lua/**"
+          # Injected/ 是注入 SpringBoard 的触摸服务 dylib 源码，
+          # 由 TSInjectedTouchService target 单独编译，绝不编译进 app 主二进制
+          # （否则 __attribute__((constructor)) 会在 app 进程里就启动 TCP 服务）。
+          - "Injected/**"
       - path: TrollAutoTouch/vendor/lua
         excludes:
           - "lua.c"    # 独立解释器程序, 不需要编译进 App
@@ -89,8 +93,9 @@ targets:
         PRODUCT_NAME: TrollAutoTouch
         # 让 dyld 在主二进制内解析私有框架符号
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"
-        # Lua 5.4 头文件搜索路径
-        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/TrollAutoTouch/vendor/lua"
+        # Lua 5.4 头文件搜索路径 + 注入服务协议头文件目录
+        # (TSInjectedTouchService.h 虽被排除出 app sources, 但客户端仍要 import)
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/TrollAutoTouch/vendor/lua $(PROJECT_DIR)/TrollAutoTouch/Injected"
         # Lua 编译为标准 C99，禁用自动 ARC(纯 C 无影响但更稳)
         GCC_C_LANGUAGE_STANDARD: gnu99
   # 注入 SpringBoard 的触摸服务 dylib。

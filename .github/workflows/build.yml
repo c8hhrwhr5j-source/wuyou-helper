@@ -170,6 +170,16 @@ jobs:
               tail -100 /tmp/dylib_build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 把 dylib 编译日志推送到 ci-debug 分支（便于在仓库里直接读取）
+            {
+              git config user.name "ci-bot"
+              git config user.email "ci-bot@users.noreply.github.com"
+              cp /tmp/dylib_build.log ./ci-error.log
+              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
+              git add -f ci-error.log
+              git commit -m "ci: save dylib build log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+              git push origin ci-debug --force
+            } >/dev/null 2>&1 && echo "[i] dylib 日志已推送到 ci-debug 分支" || echo "[i] dylib 日志推送失败(忽略)"
             exit 1
           fi
           tail -3 /tmp/dylib_build.log
