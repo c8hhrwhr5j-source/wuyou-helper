@@ -85,6 +85,32 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 static IOHIDEventSystemClientRef s_client = NULL;
 static uint64_t s_senderID = 0;
 
+#pragma mark - 文件日志 (SpringBoard 内 NSLog 用户看不到, 写入 /tmp 供 app 读回定位)
+
+static void TSLog(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    NSLog(@"[TSInjectedTouch] %@", msg);
+    @try {
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/tmp/ts_touch.log"];
+        if (!fh) {
+            [[NSFileManager defaultManager] createFileAtPath:@"/tmp/ts_touch.log" contents:nil attributes:nil];
+            fh = [NSFileHandle fileHandleForWritingAtPath:@"/tmp/ts_touch.log"];
+        }
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[[NSString stringWithFormat:@"[%@] %@\n",
+                            [NSDate date], msg] dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
+    } @catch (NSException *e) {
+        // 写日志失败不致命
+    }
+}
+
 #pragma mark - senderID 动态获取 (ZXTouch setSenderIdCallback 同款)
 
 static void TSSenderIDCallback(void *target, void *refcon, IOHIDServiceRef service, IOHIDEventRef event) {
@@ -92,7 +118,7 @@ static void TSSenderIDCallback(void *target, void *refcon, IOHIDServiceRef servi
     uint64_t sid = IOHIDEventGetSenderID(event);
     if (sid != 0 && s_senderID == 0) {
         s_senderID = sid;
-        NSLog(@"[TSInjectedTouch] 已获取真实 senderID: 0x%llX", (unsigned long long)sid);
+        TSLog(@"已获取真实 senderID: 0x%llX", (unsigned long long)sid);
     }
 }
 
@@ -101,7 +127,7 @@ static void TSStartSenderIDMonitor(void) {
     if (s_client) return;
     s_client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (!s_client) {
-        NSLog(@"[TSInjectedTouch] IOHIDEventSystemClientCreate 失败");
+        TSLog(@"IOHIDEventSystemClientCreate 失败");
         return;
     }
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -224,16 +250,17 @@ static void TSRunServer(void) {
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        NSLog(@"[TSInjectedTouch] bind 失败 (端口 %d 可能被占用): %s", TS_TOUCH_PORT, strerror(errno));
+        TSLog(@"bind 失败 (端口 %d 可能被占用): %s", TS_TOUCH_PORT, strerror(errno));
         close(fd);
         return;
     }
     if (listen(fd, 4) < 0) {
+        TSLog(@"listen 失败: %s", strerror(errno));
         close(fd);
         return;
     }
 
-    NSLog(@"[TSInjectedTouch] 触摸服务已启动, 监听 127.0.0.1:%d", TS_TOUCH_PORT);
+    TSLog(@"触摸服务已启动, 监听 127.0.0.1:%d", TS_TOUCH_PORT);
 
     while (1) {
         int client = accept(fd, NULL, NULL);
@@ -249,7 +276,9 @@ static void TSRunServer(void) {
 // dlopen 成功后由 dyld 自动调用
 __attribute__((constructor))
 static void TSInjectedTouchInit(void) {
-    NSLog(@"[TSInjectedTouch] 触摸服务 dylib 已加载到进程: %@", [NSProcessInfo processInfo].processName);
+    // 清空上一次的日志, 避免混淆
+    [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/ts_touch.log" error:NULL];
+    TSLog(@"触摸服务 dylib 已加载到进程: %@", [NSProcessInfo processInfo].processName);
     TSStartSenderIDMonitor();
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         TSRunServer();

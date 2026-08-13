@@ -13,9 +13,13 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <libproc.h>
 
 extern char **environ;
 
@@ -71,21 +75,26 @@ extern char **environ;
 #pragma mark - SpringBoard pid
 
 - (pid_t)findSpringBoardPid {
-    // launchctl list 输出: PID  Status  Label; SpringBoard 的 label 为 com.apple.SpringBoard
-    FILE *fp = popen("launchctl list | grep com.apple.SpringBoard", "r");
-    if (!fp) return -1;
+    // 用 libproc 遍历进程, 不依赖 shell/grep/launchctl
+    // (iOS 真机上 /usr/bin/grep 不存在, popen 方案会静默失败导致注入无法继续)
+    int count = proc_listallpids(NULL, 0);
+    if (count <= 0) return -1;
 
-    char line[256];
-    pid_t pid = -1;
-    while (fgets(line, sizeof(line), fp)) {
-        int p = -1;
-        if (sscanf(line, "%d", &p) == 1 && p > 0) {
-            pid = p;
+    pid_t *pids = (pid_t *)malloc((size_t)count * sizeof(pid_t));
+    if (!pids) return -1;
+
+    int n = proc_listallpids(pids, count);
+    pid_t result = -1;
+    for (int i = 0; i < n; i++) {
+        char name[64] = {0};
+        int len = proc_name(pids[i], name, sizeof(name));
+        if (len > 0 && strcmp(name, "SpringBoard") == 0) {
+            result = pids[i];
             break;
         }
     }
-    pclose(fp);
-    return pid;
+    free(pids);
+    return result;
 }
 
 #pragma mark - 文件部署 (opainject + dylib -> Documents)
@@ -104,9 +113,9 @@ extern char **environ;
         NSLog(@"[TSInjectedTouch] bundle 中找不到 opainject");
         return NO;
     }
-    if (![fm fileExistsAtPath:injectorDst]) {
-        [fm copyItemAtPath:injectorSrc toPath:injectorDst error:NULL];
-    }
+    // 每次强制覆盖, 避免旧版本二进制残留 (此前仅不存在时拷贝, bundle 更新后 Documents 里仍是旧文件)
+    [fm removeItemAtPath:injectorDst error:NULL];
+    [fm copyItemAtPath:injectorSrc toPath:injectorDst error:NULL];
     chmod(injectorDst.UTF8String, 0755);
 
     // 触摸服务 dylib (bundle/bin/TSInjectedTouchService.dylib -> Documents/bin/)
@@ -116,9 +125,8 @@ extern char **environ;
         NSLog(@"[TSInjectedTouch] bundle 中找不到 TSInjectedTouchService.dylib");
         return NO;
     }
-    if (![fm fileExistsAtPath:dylibDst]) {
-        [fm copyItemAtPath:dylibSrc toPath:dylibDst error:NULL];
-    }
+    [fm removeItemAtPath:dylibDst error:NULL];
+    [fm copyItemAtPath:dylibSrc toPath:dylibDst error:NULL];
     chmod(dylibDst.UTF8String, 0755);
 
     NSLog(@"[TSInjectedTouch] 部署完成: %@", dylibDst);
@@ -147,9 +155,25 @@ extern char **environ;
         NULL
     };
 
+    // 捕获 opainject 的 stdout/stderr 到日志文件, 注入失败时能定位原因
+    NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
+    int logFD = open(logPath.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (logFD >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, logFD, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, logFD, STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, logFD);
+    }
+
     pid_t child = -1;
-    int rc = posix_spawn(&child, injectorPath.UTF8String, NULL, NULL,
+    int rc = posix_spawn(&child, injectorPath.UTF8String, logFD >= 0 ? &actions : NULL, NULL,
                          (char *const *)args, environ);
+    if (logFD >= 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        close(logFD);
+    }
     if (rc != 0) {
         NSLog(@"[TSInjectedTouch] posix_spawn opainject 失败: %d (%s)", rc, strerror(rc));
         return NO;
@@ -157,9 +181,25 @@ extern char **environ;
 
     int status = 0;
     waitpid(child, &status, 0);
-    NSLog(@"[TSInjectedTouch] opainject 退出, status=%d (pid=%d)", status, pid);
-    // opainject 正常退出即注入完成 (注入错误会输出到 stderr)
-    return WIFEXITED(status);
+    int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    NSLog(@"[TSInjectedTouch] opainject 退出, status=%d exit=%d (SpringBoard pid=%d)", status, exitCode, pid);
+
+    // 读回注入日志 (opainject 的具体错误信息)
+    NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+    if (out.length > 0) {
+        NSLog(@"[TSInjectedTouch] opainject 输出:\n%@", out);
+    } else {
+        NSLog(@"[TSInjectedTouch] opainject 无输出 (logPath=%@)", logPath);
+    }
+
+    // 读回 SpringBoard 侧 dylib 日志 (constructor 在 dlopen 时已同步执行)
+    NSString *dylibLog = [NSString stringWithContentsOfFile:@"/tmp/ts_touch.log" encoding:NSUTF8StringEncoding error:NULL];
+    if (dylibLog.length > 0) {
+        NSLog(@"[TSInjectedTouch] SpringBoard dylib 日志:\n%@", dylibLog);
+    }
+
+    // opainject 正常退出且 exit code 为 0 才算注入成功
+    return WIFEXITED(status) && exitCode == 0;
 }
 
 #pragma mark - socket
@@ -181,6 +221,8 @@ extern char **environ;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        int err = errno;
+        NSLog(@"[TSInjectedTouch] connect 127.0.0.1:%d 失败: %d (%s)", TS_TOUCH_PORT, err, strerror(err));
         close(fd);
         return NO;
     }

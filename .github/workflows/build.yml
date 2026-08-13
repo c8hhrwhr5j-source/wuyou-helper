@@ -152,11 +152,16 @@ jobs:
           #   "The flag -scheme, -testProductsPath, or -xctestrun is required
           #    when specifying -derivedDataPath."
           # 所以用 CONFIGURATION_BUILD_DIR 显式指定 dylib 输出目录。
+          # 架构必须为 universal (arm64 + arm64e)!
+          # SpringBoard 在 A12+ (arm64e) 设备上是 arm64e 进程,
+          # 只有 arm64 的 dylib 无法被 dlopen, 触摸服务永远不会启动。
+          # 注意: ONLY_ACTIVE_ARCH 必须为 NO 才会把 ARCHS 里的两个架构都编出来。
           if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -target TSInjectedTouchService \
             -configuration Release \
             -sdk iphoneos \
-            ONLY_ACTIVE_ARCH=YES \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS="arm64 arm64e" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -189,6 +194,8 @@ jobs:
           fi
           tail -3 /tmp/dylib_build.log
           echo "[OK] TSInjectedTouchService.dylib 编译成功"
+          echo "[*] dylib 架构 (必须同时包含 arm64 与 arm64e):"
+          lipo -info "$PWD/build/dylib/TSInjectedTouchService.dylib"
 
       - name: Package IPA
         run: |
