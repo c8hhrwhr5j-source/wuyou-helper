@@ -160,10 +160,9 @@ extern char **environ;
     [fm copyItemAtPath:dylibSrc toPath:dylibDst error:NULL];
     chmod(dylibDst.UTF8String, 0755);
 
-    // 运行时重签工具链 (学原版 bin/: ldid + ent2.xml + injector.entitlements.xml)。
-    // TrollStore 重签主二进制时可能剥离额外 entitlements, 注入前用 ldid 重签
-    // opainject (ent2.xml 含 com.apple.springboard.debugapplications) 与 dylib
-    // (injector.entitlements.xml 含 platform-application), 确保注入权限齐全。
+    // 重签工具链保留部署 (与原版 bin/ 一致), 但运行时不再使用——重签会剥离
+    // opainject 原版的 system-task-ports/platform-application 权限并破坏 arm64e
+    // 签名。此处保留仅为对齐原版文件结构, 供后续排查/备用。
     NSArray<NSString *> *tools = @[@"ldid", @"fastPathSign"];
     for (NSString *tool in tools) {
         NSString *src = [[NSBundle mainBundle] pathForResource:tool ofType:nil inDirectory:@"bin"];
@@ -208,32 +207,12 @@ extern char **environ;
     NSString *injectorPath = [docs stringByAppendingPathComponent:@"bin/opainject"];
     NSString *dylibPath = [docs stringByAppendingPathComponent:@"bin/TSInjectedTouchService.dylib"];
 
-    // 运行时重签 (学原版 bin/: ldid + ent2.xml + injector.entitlements.xml):
-    //   - opainject 签 ent2.xml (含 com.apple.springboard.debugapplications,
-    //     这是 task_for_pid SpringBoard 拿 task port 的关键权限)
-    //   - dylib 签 injector.entitlements.xml (含 platform-application, iOS 15+
-    //     SpringBoard platform 进程 dlopen 的必要条件)
-    // 防止 TrollStore 重签时剥离这些额外 entitlements。
-    NSString *ldidPath = [docs stringByAppendingPathComponent:@"bin/ldid"];
-    NSString *opainjectEnt = [docs stringByAppendingPathComponent:@"bin/ent2.xml"];
-    NSString *dylibEnt = [docs stringByAppendingPathComponent:@"bin/injector.entitlements.xml"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:ldidPath] &&
-        [[NSFileManager defaultManager] fileExistsAtPath:opainjectEnt] &&
-        [[NSFileManager defaultManager] fileExistsAtPath:dylibEnt]) {
-        const char *signArgs1[] = { ldidPath.UTF8String, "-S", opainjectEnt.UTF8String, injectorPath.UTF8String, NULL };
-        const char *signArgs2[] = { ldidPath.UTF8String, "-S", dylibEnt.UTF8String, dylibPath.UTF8String, NULL };
-        pid_t sp = -1;
-        if (posix_spawn(&sp, ldidPath.UTF8String, NULL, NULL, (char *const *)signArgs1, environ) == 0) {
-            waitpid(sp, NULL, 0);
-        }
-        sp = -1;
-        if (posix_spawn(&sp, ldidPath.UTF8String, NULL, NULL, (char *const *)signArgs2, environ) == 0) {
-            waitpid(sp, NULL, 0);
-        }
-        NSLog(@"[TSInjectedTouch] 注入前已重签 opainject + dylib");
-    } else {
-        NSLog(@"[TSInjectedTouch] 运行时重签工具不全, 跳过重签 (注入可能失败)");
-    }
+    // 注意: 不在运行时重签 opainject/dylib!
+    // 原版 opainject 自带的签名已含完整 entitlements (com.apple.system-task-ports +
+    // platform-application), CI 打包时也原样保留。运行时用 ldid 重签反而会剥离这些
+    // 关键权限并破坏 arm64e slice 签名 (opainject dyld 崩溃 → 零输出 → log 为空)。
+    // dylib 已在 CI 用 injector.entitlements.xml 签名 (platform-application),
+    // TrollStore 安装时保留二进制内已嵌入的 entitlements, 无需再签。
 
     // opainject <pid> <dylib_path>
     const char *args[] = {

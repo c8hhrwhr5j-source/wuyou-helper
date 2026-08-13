@@ -246,15 +246,15 @@ jobs:
           fi
           cp "$PWD/TrollAutoTouch/Resources/bin/opainject" "$APP_DST/bin/opainject"
           chmod 755 "$APP_DST/bin/opainject"
-          # opainject 预签名: 必须用原版同款 ent2.xml (含 com.apple.springboard.debugapplications,
-          # 这是 task_for_pid SpringBoard 获取 task port 的关键权限)。此前用的
-          # injector.entitlements.xml 缺这一项, 导致 opainject 无法拿到 SpringBoard
-          # task port, 注入必然失败。
-          if ldid -S"$PWD/TrollAutoTouch/Resources/bin/ent2.xml" "$APP_DST/bin/opainject" 2>/dev/null; then
-            echo "[OK] opainject 已签名 (ent2.xml: springboard.debugapplications)"
-          else
-            echo "[!] opainject 签名失败 (触摸注入可能失败)"
-          fi
+          # 重要: 不要对 opainject 做任何重签!
+          # 原版 opainject 自带的签名 entitlements 含完整关键权限:
+          #   com.apple.system-task-ports / .control (task_for_pid 拿 SpringBoard task port),
+          #   platform-application (平台二进制标志)。
+          # 此前用 ent2.xml 重签会剥离这些权限(实测 CI 重签版丢失), 且 ldid 重写 fat
+          # 文件会破坏 arm64e slice 签名, 导致 opainject 在设备上 dyld 崩溃、零输出,
+          # opainject.log 为空 → 注入显示"无法注入 SpringBoard"。
+          # TrollStore 安装时保留二进制内已嵌入的 entitlements, 无需额外签名。
+          echo "[OK] opainject 原样保留 (完整 entitlements: system-task-ports + platform-application)"
           # 运行时重签工具链 (学原版 bin/): 部署 ldid + ent2.xml + injector.entitlements.xml,
           # app 在注入前可再次重签 opainject/dylib, 兜底应对 TrollStore 重签剥离权限。
           for T in ldid fastPathSign; do
