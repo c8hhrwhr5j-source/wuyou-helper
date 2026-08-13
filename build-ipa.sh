@@ -150,6 +150,8 @@ case "$MODE" in
       -scheme TrollAutoTouch \
       -configuration Release \
       -sdk iphoneos \
+      ARCHS="arm64 arm64e" \
+      ONLY_ACTIVE_ARCH=NO \
       CODE_SIGNING_ALLOWED=NO \
       CODE_SIGNING_REQUIRED=NO \
       CODE_SIGN_IDENTITY="" \
@@ -168,6 +170,8 @@ case "$MODE" in
       -target TSInjectedTouchService \
       -configuration Release \
       -sdk iphoneos \
+      ARCHS="arm64 arm64e" \
+      ONLY_ACTIVE_ARCH=NO \
       CODE_SIGNING_ALLOWED=NO \
       CODE_SIGNING_REQUIRED=NO \
       CODE_SIGN_IDENTITY="" \

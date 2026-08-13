@@ -20,6 +20,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sysctl.h>
+#include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/thread_act.h>
+#include <mach/arm/thread_status.h>
+#include <mach/vm_map.h>
+#ifdef __arm64e__
+#include <ptrauth.h>
+#endif
 
 extern char **environ;
 
@@ -84,8 +93,16 @@ extern char **environ;
         if (detail.length > 0) {
             return [NSString stringWithFormat:@"注入失败: %@", detail];
         }
-        // opainject.log 为空/不存在 → 兜底. 附上最后一次失败阶段 + errno, 方便 Lua 侧直接定位
+        // 直接注入失败的阶段 (task_for_pid / vm_alloc / thread_create 等) errno 是 kern_return_t
+        // 用 mach_error_string 解析比裸数字更直观
         if (_lastErrorStage != nil && _lastErrorErrno != 0) {
+            // 直接注入的阶段名以 task_for_pid / vm_ / thread_ 开头, errno 是 kern_return_t
+            if ([_lastErrorStage hasPrefix:@"task_for_pid"] ||
+                [_lastErrorStage hasPrefix:@"vm_"] ||
+                [_lastErrorStage hasPrefix:@"thread_"]) {
+                return [NSString stringWithFormat:@"注入失败(直接注入 [%@] kr=%d: %s)",
+                        _lastErrorStage, _lastErrorErrno, mach_error_string((kern_return_t)_lastErrorErrno)];
+            }
             return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", _lastErrorStage, _lastErrorErrno];
         } else if (_lastErrorStage != nil) {
             return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@])", _lastErrorStage];
@@ -286,6 +303,175 @@ extern char **environ;
     return (WIFEXITED(status) && exitCode == 0);
 }
 
+#pragma mark - 直接远程线程注入 (app 自身有 task_for_pid-allow + system-task-ports,
+// 不需要 opainject。学原版 luaLib: task_for_pid → mach_vm_allocate → dlopen via
+// thread_create_running。绕过 opainject 的 fat-binary ldid 重签问题。)
+
+- (BOOL)injectDirectlyIntoSpringBoard {
+    pid_t pid = [self findSpringBoardPid];
+    if (pid <= 0) {
+        NSLog(@"[TSInjectedTouch] 直接注入: 未找到 SpringBoard");
+        _lastErrorStage = @"find-sb";
+        _lastErrorErrno = ESRCH;
+        return NO;
+    }
+    _springBoardPid = pid;
+
+    // 1. task_for_pid — app 有 task_for_pid-allow + system-task-ports
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] task_for_pid(%d) 失败: %s (kr=%d)", pid, mach_error_string(kr), kr);
+        _lastErrorStage = @"task_for_pid";
+        _lastErrorErrno = (int)kr;
+        return NO;
+    }
+    NSLog(@"[TSInjectedTouch] task_for_pid 成功: task=0x%x, pid=%d", task, pid);
+
+    // 2. 准备 dylib 路径
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *dylibPath = [docs stringByAppendingPathComponent:@"bin/TSInjectedTouchService.dylib"];
+    const char *path = dylibPath.UTF8String;
+    size_t pathLen = strlen(path) + 1;
+    NSLog(@"[TSInjectedTouch] dylib 路径: %@", dylibPath);
+
+    // 3. 分配 shellcode + path (一片连续内存)
+    //    shellcode = "b loop" (0x14000000), 作为 dlopen 返回后的 LR, 让线程无限循环而非崩溃
+    size_t shellcodeSize = 4;
+    size_t allocSize = shellcodeSize + pathLen;
+    allocSize = (allocSize + 0xFFF) & ~0xFFF;  // 4K 对齐
+    mach_vm_address_t codeAddr = 0;
+    kr = mach_vm_allocate(task, &codeAddr, allocSize, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] mach_vm_allocate(code) 失败: %s", mach_error_string(kr));
+        _lastErrorStage = @"vm_alloc-code";
+        _lastErrorErrno = (int)kr;
+        return NO;
+    }
+    NSLog(@"[TSInjectedTouch] 分配 code 内存: 0x%llx (%zu bytes)", codeAddr, allocSize);
+
+    // 4. 写入 shellcode (b #0 = 0x14000000, 无限循环)
+    uint32_t shellcode = 0x14000000;  // ARM64: b #0 (跳转到自身)
+    kr = mach_vm_write(task, codeAddr, (vm_offset_t)&shellcode, 4);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] mach_vm_write(shellcode) 失败: %s", mach_error_string(kr));
+        _lastErrorStage = @"vm_write-shell";
+        _lastErrorErrno = (int)kr;
+        mach_vm_deallocate(task, codeAddr, allocSize);
+        return NO;
+    }
+    // 写入 path (在 shellcode 之后)
+    mach_vm_address_t pathAddr = codeAddr + shellcodeSize;
+    kr = mach_vm_write(task, pathAddr, (vm_offset_t)path, (mach_msg_type_number_t)pathLen);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] mach_vm_write(path) 失败: %s", mach_error_string(kr));
+        _lastErrorStage = @"vm_write-path";
+        _lastErrorErrno = (int)kr;
+        mach_vm_deallocate(task, codeAddr, allocSize);
+        return NO;
+    }
+    NSLog(@"[TSInjectedTouch] 已写入 shellcode + path (pathAddr=0x%llx)", pathAddr);
+
+    // 5. 设置内存保护: shellcode 可执行, path 可读
+    kr = mach_vm_protect(task, codeAddr, shellcodeSize, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] mach_vm_protect(code, EXECUTE) 失败: %s (kr=%d) — 继续, 内核可能已默认 RX", mach_error_string(kr), kr);
+        // 不致命: mach_vm_allocate 默认 RW, 某些 iOS 版本允许在 RW 页执行 (W^X 宽松)
+    }
+    kr = mach_vm_protect(task, pathAddr, pathLen, FALSE, VM_PROT_READ);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] mach_vm_protect(path, READ) 失败: %s — 继续", mach_error_string(kr));
+    }
+
+    // 6. 分配栈 (16KB, 对齐)
+    size_t stackSize = 0x4000;  // 16KB
+    mach_vm_address_t stackAddr = 0;
+    kr = mach_vm_allocate(task, &stackAddr, stackSize, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] mach_vm_allocate(stack) 失败: %s", mach_error_string(kr));
+        _lastErrorStage = @"vm_alloc-stack";
+        _lastErrorErrno = (int)kr;
+        mach_vm_deallocate(task, codeAddr, allocSize);
+        return NO;
+    }
+    NSLog(@"[TSInjectedTouch] 分配 stack 内存: 0x%llx (%zu bytes)", stackAddr, stackSize);
+
+    // 7. 获取 dlopen 地址 (共享缓存, 所有进程地址相同)
+    uint64_t dlopenAddr = (uint64_t)dlopen;
+#ifdef __arm64e__
+    // arm64e: dlopen 是签名指针, strip 后取原始地址, thread_create_running 会自动重新签名
+    dlopenAddr = (uint64_t)ptrauth_strip(dlopen, ptrauth_key_function_pointer);
+#endif
+    NSLog(@"[TSInjectedTouch] dlopen 地址: 0x%llx (arm64e=%d)", dlopenAddr,
+#ifdef __arm64e__
+          1
+#else
+          0
+#endif
+          );
+
+    // 8. 创建远程线程: PC=dlopen, x0=path, x1=RTLD_NOW, LR=shellcode(b loop), SP=栈顶
+    arm_thread_state64_t state;
+    memset(&state, 0, sizeof(state));
+    state.__x[0] = pathAddr;                // arg1 = dylib path
+    state.__x[1] = RTLD_NOW;                // arg2 = mode
+    state.__sp  = stackAddr + stackSize - 256;  // 栈顶 (留 256B 对齐余量)
+    state.__lr  = codeAddr;                 // dlopen 返回后跳到 shellcode (b loop)
+    state.__fp  = 0;
+    state.__pc  = dlopenAddr;               // 入口 = dlopen
+
+    thread_act_t thread = MACH_PORT_NULL;
+    kr = thread_create_running(task, ARM_THREAD_STATE64,
+                               (thread_state_t)&state, ARM_THREAD_STATE64_COUNT,
+                               &thread);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] thread_create_running 失败: %s (kr=%d)", mach_error_string(kr), kr);
+        _lastErrorStage = @"thread_create";
+        _lastErrorErrno = (int)kr;
+        mach_vm_deallocate(task, codeAddr, allocSize);
+        mach_vm_deallocate(task, stackAddr, stackSize);
+        return NO;
+    }
+    NSLog(@"[TSInjectedTouch] 远程线程已创建: thread=0x%x", thread);
+
+    // 9. 等待 dlopen 完成 (线程会停在 shellcode 的 b loop 循环)
+    //    dlopen 触发 dylib 的 __attribute__((constructor)) → 启动 socket server
+    usleep(800 * 1000);  // 800ms 应足够 dlopen + constructor
+
+    // 检查线程状态 (PC 应在 shellcode 循环 = codeAddr)
+    arm_thread_state64_t curState;
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    kr = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&curState, &count);
+    if (kr == KERN_SUCCESS) {
+        NSLog(@"[TSInjectedTouch] 线程状态: pc=0x%llx lr=0x%llx x0=0x%llx (dlopen 返回值)",
+              curState.__pc, curState.__lr, curState.__x[0]);
+        if (curState.__x[0] != 0) {
+            NSLog(@"[TSInjectedTouch] dlopen 成功! handle=0x%llx", curState.__x[0]);
+        } else {
+            NSLog(@"[TSInjectedTouch] dlopen 返回 NULL — dylib 可能加载失败 (检查 /tmp/ts_touch.log)");
+        }
+    } else {
+        NSLog(@"[TSInjectedTouch] thread_get_state 失败: %s — 继续 (dlopen 可能已完成)", mach_error_string(kr));
+    }
+
+    // 10. 终止远程线程 (b loop 循环浪费 CPU, dylib 已加载)
+    kr = thread_terminate(thread);
+    NSLog(@"[TSInjectedTouch] thread_terminate: %s", kr == KERN_SUCCESS ? @"成功" : mach_error_string(kr));
+
+    // 读 dylib 日志 (constructor 在 dlopen 时已同步执行)
+    NSString *dylibLog = [NSString stringWithContentsOfFile:@"/tmp/ts_touch.log"
+                                                  encoding:NSUTF8StringEncoding error:NULL];
+    if (dylibLog.length > 0) {
+        NSLog(@"[TSInjectedTouch] SpringBoard dylib 日志:\n%@", dylibLog);
+    } else {
+        NSLog(@"[TSInjectedTouch] /tmp/ts_touch.log 为空 (dylib constructor 可能未执行)");
+    }
+
+    _lastErrorStage = nil;
+    _lastErrorErrno = 0;
+    return YES;
+}
+
 #pragma mark - 注入
 
 - (BOOL)injectSpringBoard {
@@ -410,31 +596,50 @@ extern char **environ;
         return NO;
     }
 
-    // TrollStore 安装时会重签所有二进制, 覆盖 CI codesign 注入的 entitlements。
-    // 必须运行时用 ldid 重签, 否则 opainject 以沙箱子进程运行,
-    // task_for_pid(SpringBoard) 被拦截 → "Got invalid task port (-1)"。
-    if (![self resignBinaries]) {
-        _injectFailed = YES;
-        return NO;
-    }
-
-    // 注入 + 等待服务端就绪 (最多 ~4s)
-    for (int attempt = 0; attempt < 3; attempt++) {
-        if (![self injectSpringBoard]) {
-            // opainject 本身失败, 不再重试
-            _injectFailed = YES;
-            return NO;
-        }
-        // 等待 dylib 加载 + socket server 启动
+    // === 方案 A: app 直接远程线程注入 (首选) ===
+    // app 自身有 task_for_pid-allow + system-task-ports + no-sandbox + platform-application,
+    // 直接 task_for_pid(SpringBoard) + mach_vm_allocate + thread_create_running(dlopen).
+    // 绕过 opainject, 不需要 ldid 重签 fat binary (ldid 重签会破坏 arm64e slice → EBADEXEC).
+    NSLog(@"[TSInjectedTouch] === 尝试直接远程线程注入 ===");
+    if ([self injectDirectlyIntoSpringBoard]) {
+        // 等待 dylib 的 socket server 启动
         for (int i = 0; i < 10; i++) {
             usleep(200 * 1000);
             if ([self connectSocket]) {
                 _injected = YES;
+                NSLog(@"[TSInjectedTouch] 直接注入成功, socket 已连接");
                 return YES;
             }
         }
-        NSLog(@"[TSInjectedTouch] 第 %d 次注入后未连上服务, 重试", attempt + 1);
+        NSLog(@"[TSInjectedTouch] 直接注入完成但 socket 未连接, 尝试 opainject fallback");
+    } else {
+        NSLog(@"[TSInjectedTouch] 直接注入失败: [%@] errno=%d, 尝试 opainject fallback",
+              _lastErrorStage, _lastErrorErrno);
     }
+
+    // === 方案 B: opainject fallback ===
+    // 先尝试 ldid 重签 (恢复 entitlements), 再 spawn opainject
+    if (![self resignBinaries]) {
+        NSLog(@"[TSInjectedTouch] resignBinaries 失败, 尝试不重签直接注入");
+    }
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (![self injectSpringBoard]) {
+            NSLog(@"[TSInjectedTouch] opainject fallback 第 %d 次失败", attempt + 1);
+            continue;
+        }
+        for (int i = 0; i < 10; i++) {
+            usleep(200 * 1000);
+            if ([self connectSocket]) {
+                _injected = YES;
+                NSLog(@"[TSInjectedTouch] opainject fallback 成功, socket 已连接");
+                return YES;
+            }
+        }
+        NSLog(@"[TSInjectedTouch] opainject 第 %d 次注入后未连上服务, 重试", attempt + 1);
+    }
+
+    NSLog(@"[TSInjectedTouch] 所有注入方式均失败");
     _injectFailed = YES;
     return NO;
 }

@@ -104,12 +104,17 @@ jobs:
           # 禁用 chained fixups，兼容 Procursus ldid / TrollStore。
           # 警告: 不能在这里传 OTHER_LDFLAGS，命令行会整体覆盖 project.yml 中的
           #       框架链接参数（-framework UIKit ...），导致链接失败！
+          # ARCHS="arm64 arm64e" + ONLY_ACTIVE_ARCH=NO: app 必须编译为 universal!
+          # app 自身直接注入 SpringBoard (task_for_pid + thread_create_running(dlopen)),
+          # 在 A12+ arm64e 设备上 app 必须以 arm64e 模式运行, 否则本进程的 dlopen 地址
+          # (arm64 共享缓存) ≠ SpringBoard 的 dlopen (arm64e 共享缓存), 注入会崩溃。
           # 日志写入文件，失败时打印完整日志并立即退出（不再被管道吞掉退出码）。
           if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
             -configuration Release \
             -sdk iphoneos \
-            ONLY_ACTIVE_ARCH=YES \
+            ARCHS="arm64 arm64e" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -145,6 +150,18 @@ jobs:
           fi
           tail -5 /tmp/xcodebuild.log
           echo "[OK] xcodebuild 编译成功"
+
+          # 验证 app 主二进制架构 (必须同时包含 arm64 + arm64e, 否则直接注入 SpringBoard 会失败)
+          APP_BIN="build/DerivedData/Build/Products/Release-iphoneos/TrollAutoTouch.app/TrollAutoTouch"
+          if [ -f "$APP_BIN" ]; then
+            echo "[*] app 主二进制架构:"
+            lipo -info "$APP_BIN"
+            if lipo -info "$APP_BIN" 2>/dev/null | grep -q "arm64e"; then
+              echo "[OK] app 包含 arm64e slice (直接注入可用)"
+            else
+              echo "[!] 警告: app 不包含 arm64e slice! 在 A12+ 设备上直接注入 SpringBoard 会失败"
+            fi
+          fi
 
           # ── 编译触摸服务 dylib (TSInjectedTouchService, 注入 SpringBoard 用) ──
           # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制,
