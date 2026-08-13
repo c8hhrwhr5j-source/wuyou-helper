@@ -69,6 +69,9 @@ typedef uint32_t IOHIDEventType;
 static NSString * const kSenderIDDefaultsKey        = @"TSHIDSenderID";
 static NSString * const kSenderIDBootTimeDefaultsKey = @"TSHIDSenderIDBootTime";
 
+// senderID 获取成功通知（userInfo 带 senderID），供 Lua 桥接层输出可见日志
+NSString * const TSHIDSenderIDDidChangeNotification = @"TSHIDSenderIDDidChangeNotification";
+
 // ---------- 私有函数声明 (IOKit 私有/未公开 C 接口) ----------
 extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
 extern void IOHIDEventSystemClientScheduleWithRunLoop(IOHIDEventSystemClientRef client, CFRunLoopRef runLoop, CFStringRef mode);
@@ -163,6 +166,10 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     [ud setDouble:TSHIDCurrentBootTime() forKey:kSenderIDBootTimeDefaultsKey];
     [ud synchronize];
     NSLog(@"[TSHIDEventTouch] 已获取触摸发送者 senderID: 0x%llX", sid);
+    // 通知 Lua 桥接层，让"已获取 senderID"直接显示在脚本日志中
+    [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
+                                                        object:nil
+                                                      userInfo:@{@"senderID": @(sid)}];
 }
 
 // ---------- 实现 ----------
@@ -421,12 +428,32 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     }
 }
 
+- (uint64_t)senderID {
+    return s_senderID;
+}
+
+- (NSString *)statusDescription {
+    NSMutableString *s = [NSMutableString string];
+    if (_client) {
+        [s appendString:@"client=OK"];
+    } else {
+        [s appendString:@"client=FAIL(创建失败, entitlement 可能未生效)"];
+    }
+    if (s_senderID != 0) {
+        [s appendFormat:@", senderID=0x%llX(就绪)", (unsigned long long)s_senderID];
+    } else {
+        [s appendString:@", senderID=0(未就绪! 请先手动触摸一次屏幕, 再重跑脚本)"];
+    }
+    return s;
+}
+
 - (void)tapAtPoint:(CGPoint)point duration:(NSTimeInterval)pressDuration
           pressure:(CGFloat)pressure radius:(CGFloat)radius {
     [self touchDownAtPoint:point index:0 pressure:pressure radius:radius];
-    // 让出 RunLoop 让 backboardd 处理 down，再 up
-    [NSThread sleepForTimeInterval:MAX(pressDuration, 0.02)];
-    [self _yieldRunLoopForSeconds:MAX(pressDuration, 0.02)];
+    // 纯 sleep 保证 down/up 有足够时间间隔（HID 事件经 backboardd 异步处理）。
+    // 此前在 Lua 后台线程调用 _yieldRunLoopForSeconds 无意义，且 down/up 间隔仅 20ms，
+    // backboardd 可能把两者合并处理导致点击无效。
+    [NSThread sleepForTimeInterval:MAX(pressDuration, 0.05)];
     [self touchUpAtPoint:point index:0];
 }
 

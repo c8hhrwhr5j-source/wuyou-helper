@@ -75,8 +75,18 @@ static volatile BOOL _stopRequested = NO;
     if (self) {
         _luaQueue = dispatch_queue_create("com.trollautotouch.lua", DISPATCH_QUEUE_SERIAL);
         self.isRunning = NO;
+        // senderID 就绪时输出到脚本日志，方便确认注入链路是否打通
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(_handleSenderIDDidChange:)
+                                                     name:TSHIDSenderIDDidChangeNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)_handleSenderIDDidChange:(NSNotification *)note {
+    uint64_t sid = [note.userInfo[@"senderID"] unsignedLongLongValue];
+    lua_log([NSString stringWithFormat:@"[touch] 已获取真实触摸 senderID: 0x%llX, 点击注入已就绪", sid]);
 }
 
 - (void)setIsRunning:(BOOL)isRunning {
@@ -437,6 +447,10 @@ static int l_screen_keepScreen(lua_State *L) {
 #pragma mark - 触摸
 
 static int l_touch_tap(lua_State *L) {
+    TSHIDEventTouch *touch = [TSHIDEventTouch shared];
+    if (touch.senderID == 0) {
+        lua_log(@"[touch] 警告: senderID 未就绪(0), 注入事件可能被系统丢弃! 请先在设备上手动触摸一次屏幕后重跑脚本");
+    }
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
     // 第 3 参: 抬起时间(毫秒), 与文档 touch.tap(x,y,抬起ms) 一致; 默认 50ms
@@ -445,10 +459,15 @@ static int l_touch_tap(lua_State *L) {
     CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    [[TSHIDEventTouch shared] tapAtPoint:CGPointMake(x / sc, y / sc)
-                                 duration:dur
-                                 pressure:pressure radius:radius];
+    [touch tapAtPoint:CGPointMake(x / sc, y / sc)
+             duration:dur
+             pressure:pressure radius:radius];
     return 0;
+}
+
+static int l_touch_status(lua_State *L) {
+    lua_pushstring(L, [[TSHIDEventTouch shared] statusDescription].UTF8String);
+    return 1;
 }
 
 static int l_touch_down(lua_State *L) {
@@ -975,6 +994,7 @@ static void lua_register_all(lua_State *L) {
         {"touchUp",     l_touch_up},
         {"swipe",       l_touch_swipe},
         {"stroke",      l_touch_stroke},
+        {"touchStatus", l_touch_status},
         {"findText",    l_screen_findText},
         {NULL, NULL}
     };
@@ -989,6 +1009,7 @@ static void lua_register_all(lua_State *L) {
         {"up",       l_touch_up},
         {"swipe",    l_touch_swipe},
         {"stroke",   l_touch_stroke},
+        {"status",   l_touch_status},
         {NULL, NULL}
     };
     luaL_newlib(L, touchLib);
