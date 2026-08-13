@@ -28,6 +28,9 @@ extern char **environ;
     pid_t _springBoardPid;
     BOOL _injected;
     BOOL _injectFailed;
+    // 暴露最后失败阶段 + errno 给 statusDescription, 否则 Lua 侧只能看到 NSLog, 看不到具体错误码
+    NSString *_lastErrorStage;  // nil = 暂无失败; 否则 "deploy" / "spawn" / "log-open"
+    int _lastErrorErrno;        // 0 = 暂无失败; 否则 POSIX errno 或 posix_spawn 返回值
 }
 @end
 
@@ -47,6 +50,7 @@ extern char **environ;
     if (self) {
         _socketFD = -1;
         _springBoardPid = -1;
+        _lastErrorErrno = 0;
     }
     return self;
 }
@@ -74,6 +78,14 @@ extern char **environ;
         }
         if (detail.length > 0) {
             return [NSString stringWithFormat:@"注入失败: %@", detail];
+        }
+        // opainject.log 为空/不存在 → 兜底. 附上最后一次失败阶段 + errno, 方便 Lua 侧直接定位
+        if (_lastErrorStage != nil && _lastErrorErrno != 0) {
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", _lastErrorStage, _lastErrorErrno];
+        } else if (_lastErrorStage != nil) {
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@])", _lastErrorStage];
+        } else if (_lastErrorErrno != 0) {
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, errno=%d)", _lastErrorErrno];
         }
         return @"注入失败(无法注入 SpringBoard)";
     }
@@ -234,6 +246,11 @@ extern char **environ;
     // 捕获 opainject 的 stdout/stderr 到日志文件, 注入失败时能定位原因
     NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
     int logFD = open(logPath.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (logFD < 0) {
+        _lastErrorStage = @"log-open";
+        _lastErrorErrno = errno;
+        NSLog(@"[TSInjectedTouch] 打开 opainject.log 失败: %d (%s) logPath=%@", errno, strerror(errno), logPath);
+    }
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -251,6 +268,8 @@ extern char **environ;
         close(logFD);
     }
     if (rc != 0) {
+        _lastErrorStage = @"spawn";
+        _lastErrorErrno = rc;
         NSLog(@"[TSInjectedTouch] posix_spawn opainject 失败: %d (%s)", rc, strerror(rc));
         return NO;
     }
@@ -275,7 +294,12 @@ extern char **environ;
     }
 
     // opainject 正常退出且 exit code 为 0 才算注入成功
-    return WIFEXITED(status) && exitCode == 0;
+    if (WIFEXITED(status) && exitCode == 0) {
+        _lastErrorStage = nil;
+        _lastErrorErrno = 0;
+        return YES;
+    }
+    return NO;
 }
 
 #pragma mark - socket
@@ -312,6 +336,7 @@ extern char **environ;
     if (_injectFailed) return NO;
 
     if (![self deployBinaries]) {
+        _lastErrorStage = @"deploy";
         _injectFailed = YES;
         return NO;
     }
