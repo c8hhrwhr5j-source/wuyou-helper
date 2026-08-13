@@ -45,7 +45,23 @@ jobs:
       - name: Generate Xcode project
         run: |
           rm -rf TrollAutoTouch.xcodeproj
-          xcodegen generate
+          # 先 dump 校验 spec，报错信息写入 step summary（无需登录即可查看）
+          if ! xcodegen dump > /tmp/xcodegen_dump.log 2>&1; then
+            mkdir -p build/logs; cp /tmp/xcodegen_dump.log build/logs/ 2>/dev/null || true
+            echo "## xcodegen spec 解析失败" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -60 /tmp/xcodegen_dump.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! xcodegen generate 2>&1 | tee /tmp/xcodegen.log; then
+            mkdir -p build/logs; cp /tmp/xcodegen.log build/logs/ 2>/dev/null || true
+            echo "## xcodegen generate 失败" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -60 /tmp/xcodegen.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Build
         run: |
@@ -112,6 +128,35 @@ jobs:
           tail -5 /tmp/xcodebuild.log
           echo "[OK] xcodebuild 编译成功"
 
+          # ── 编译触摸服务 dylib (TSInjectedTouchService, 注入 SpringBoard 用) ──
+          if ! xcodebuild -project TrollAutoTouch.xcodeproj \
+            -target TSInjectedTouchService \
+            -configuration Release \
+            -sdk iphoneos \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ENABLE_CHAINED_FIXUPS=NO \
+            -derivedDataPath build/DerivedData \
+            build > /tmp/dylib_build.log 2>&1; then
+            echo "[x] dylib 编译失败，完整日志:"
+            tail -80 /tmp/dylib_build.log
+            {
+              echo "## dylib 编译失败详情"
+              echo ""
+              echo '```'
+              grep -nE "error:|undefined|ld: |clang:|file not found" /tmp/dylib_build.log | tail -60
+              echo ""
+              echo "--- 日志尾部 ---"
+              tail -100 /tmp/dylib_build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          tail -3 /tmp/dylib_build.log
+          echo "[OK] TSInjectedTouchService.dylib 编译成功"
+
       - name: Package IPA
         run: |
           set -e
@@ -134,6 +179,35 @@ jobs:
             echo "[*] 请查看 Build 步骤日志确认编译是否成功"
             exit 1
           fi
+
+          echo ""
+          echo "=== 触摸服务 (injected touch) ==="
+          # 注入式触摸: TSInjectedTouchService.dylib (注入 SpringBoard 的触摸服务)
+          # + opainject (OpenInject 注入器)。app 运行时把它们部署到 Documents 后:
+          #   opainject <SpringBoard_pid> <dylib>  → 注入 → socket 发触摸
+          mkdir -p "$APP_DST/bin"
+          DYLIB=$(find build/DerivedData -name 'TSInjectedTouchService.dylib' -type f | head -1)
+          if [ -n "$DYLIB" ]; then
+            cp "$DYLIB" "$APP_DST/bin/TSInjectedTouchService.dylib"
+            # dylib 用 ldid 签假签名 (TrollStore 安装时会重新签名, 这里保证
+            # SpringBoard dlopen 前有合法签名结构)
+            ldid -S "$APP_DST/bin/TSInjectedTouchService.dylib" 2>/dev/null || true
+            echo "[OK] TSInjectedTouchService.dylib ($(stat -f%z "$APP_DST/bin/TSInjectedTouchService.dylib") bytes)"
+          else
+            echo "[x] 未找到 TSInjectedTouchService.dylib, 触摸注入不可用"
+            exit 1
+          fi
+          cp "$PWD/TrollAutoTouch/Resources/bin/opainject" "$APP_DST/bin/opainject"
+          chmod 755 "$APP_DST/bin/opainject"
+          # opainject 预签名: 需要 task_for_pid / system-task-ports / thread-set-state 等
+          # 注入权限, 否则 TrollStore 重签后权限不保, 注入 SpringBoard 会失败
+          if ldid -S"$PWD/TrollAutoTouch/Resources/injector.entitlements.xml" "$APP_DST/bin/opainject" 2>/dev/null; then
+            echo "[OK] opainject 已签名 (injector entitlements)"
+          else
+            echo "[!] opainject 签名失败 (触摸注入可能失败)"
+          fi
+          echo "[OK] bin/ 内容:"
+          ls -la "$APP_DST/bin"
 
           echo ""
           echo "=== 架构 ==="
@@ -235,3 +309,20 @@ jobs:
           name: TrollAutoTouch
           path: build/TrollAutoTouch.ipa
           if-no-files-found: error
+
+      - name: Upload diagnostic logs (any outcome)
+        if: always()
+        run: |
+          mkdir -p build/logs
+          for f in /tmp/xcodegen_dump.log /tmp/xcodegen.log /tmp/xcodebuild.log /tmp/dylib_build.log /tmp/codesign.log /tmp/ent_check.xml; do
+            [ -f "$f" ] && cp "$f" build/logs/
+          done
+          echo "logs:"; ls -la build/logs 2>/dev/null || echo "  (no logs)"
+
+      - name: Upload diagnostic logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: build/logs
+          if-no-files-found: ignore
