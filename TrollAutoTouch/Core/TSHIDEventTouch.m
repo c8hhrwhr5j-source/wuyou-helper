@@ -41,6 +41,13 @@ typedef uint32_t IOHIDEventOptionBits;
 #define kIOHIDDigitizerEventTouch      (1 << 1)
 #define kIOHIDDigitizerEventPosition   (1 << 2)
 
+// IOHIDEventType 枚举 (来自 IOKit 私有头 IOHIDEventTypes.h):
+//   IOHIDEventCreateDigitizerEvent 的第 3 个参数 "type" 必须是事件类型
+//   kIOHIDEventTypeDigitizer (=11)，而不是 digitizer 事件掩码位。
+//   若误传 kIOHIDDigitizerEventTouch(=2)，事件会被标记成 kIOHIDEventTypeButton，
+//   backboardd 不把它当触摸处理，点击完全不生效 (iOS 13~16 实测)。
+#define kIOHIDEventTypeDigitizer       11
+
 // 模仿触摸屏上报者的 senderID (ZXTouch 常用值，使事件被识别为真实触屏)
 #define kTouchSenderID  0x8000000800ULL
 
@@ -196,9 +203,11 @@ extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t f
     float z = 0.0f;
 
     // 1) 父事件: 数位板(digitizer)事件
+    //    注意: type 参数必须是 kIOHIDEventTypeDigitizer(11) 事件类型，
+    //    而不是 kIOHIDDigitizerEventTouch(2) 掩码位 (见文件头注释)。
     IOHIDEventRef digitizer = IOHIDEventCreateDigitizerEvent(
         kCFAllocatorDefault, timeStamp,
-        /*type*/     kIOHIDDigitizerEventTouch,
+        /*type*/     kIOHIDEventTypeDigitizer,
         /*subtype*/  0,
         /*index*/    index,
         /*identity*/ index,
