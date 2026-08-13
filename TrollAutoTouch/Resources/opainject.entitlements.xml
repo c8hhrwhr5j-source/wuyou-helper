@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- opainject (OpenInject) 注入器所需权限。
+	     原版 opainject 自带: get-task-allow / platform-application / task_for_pid-allow /
+	     container-required=false / com.apple.system-task-ports / .control /
+	     com.apple.private.thread-set-state。
+	     实测单独这些仍不够: opainject 被 app spawn 后作为子进程会继承 app 沙箱,
+	     sandbox 拦截 task_for_pid(SpringBoard) → opainject 报 "Got invalid task port (-1)"
+	     (返回 dead name)。原版可用的注入器 luaLib 自带 no-sandbox + debugapplications,
+	     这里对齐补上这两个, 确保 opainject 以无沙箱 + platform 上下文运行。 -->
+	<key>get-task-allow</key>
+	<true/>
+	<key>platform-application</key>
+	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
+	<key>com.apple.private.security.container-required</key>
+	<false/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>com.apple.system-task-ports.control</key>
+	<true/>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.springboard.debugapplications</key>
+	<true/>
+	<key>proc_info-allow</key>
+	<true/>
+	<key>run-unsigned-code</key>
+	<true/>
+</dict>
+</plist>

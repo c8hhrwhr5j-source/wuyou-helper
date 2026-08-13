@@ -160,9 +160,9 @@ extern char **environ;
     [fm copyItemAtPath:dylibSrc toPath:dylibDst error:NULL];
     chmod(dylibDst.UTF8String, 0755);
 
-    // 重签工具链保留部署 (与原版 bin/ 一致), 但运行时不再使用——重签会剥离
-    // opainject 原版的 system-task-ports/platform-application 权限并破坏 arm64e
-    // 签名。此处保留仅为对齐原版文件结构, 供后续排查/备用。
+    // 重签工具链保留部署 (与原版 bin/ 一致), 但运行时不再使用——签名在 CI 打包时
+    // 已用 codesign 完成 (opainject 补了 no-sandbox/debugapplications, dylib 用
+    // injector.entitlements.xml)。此处保留仅为对齐原版文件结构, 供后续排查/备用。
     NSArray<NSString *> *tools = @[@"ldid", @"fastPathSign"];
     for (NSString *tool in tools) {
         NSString *src = [[NSBundle mainBundle] pathForResource:tool ofType:nil inDirectory:@"bin"];
@@ -175,7 +175,7 @@ extern char **environ;
             NSLog(@"[TSInjectedTouch] bundle 中找不到 %@", tool);
         }
     }
-    NSArray<NSString *> *plists = @[@"ent2.xml", @"injector.entitlements.xml"];
+    NSArray<NSString *> *plists = @[@"ent2.xml", @"injector.entitlements.xml", @"opainject.entitlements.xml"];
     for (NSString *plist in plists) {
         NSString *src = [[NSBundle mainBundle] pathForResource:plist.stringByDeletingPathExtension ofType:plist.pathExtension inDirectory:@"bin"];
         if (!src && [plist isEqualToString:@"injector.entitlements.xml"]) {
@@ -208,11 +208,13 @@ extern char **environ;
     NSString *dylibPath = [docs stringByAppendingPathComponent:@"bin/TSInjectedTouchService.dylib"];
 
     // 注意: 不在运行时重签 opainject/dylib!
-    // 原版 opainject 自带的签名已含完整 entitlements (com.apple.system-task-ports +
-    // platform-application), CI 打包时也原样保留。运行时用 ldid 重签反而会剥离这些
-    // 关键权限并破坏 arm64e slice 签名 (opainject dyld 崩溃 → 零输出 → log 为空)。
-    // dylib 已在 CI 用 injector.entitlements.xml 签名 (platform-application),
-    // TrollStore 安装时保留二进制内已嵌入的 entitlements, 无需再签。
+    // opainject 在 CI 打包时已用 codesign 重签, 补齐原版缺失的
+    // com.apple.private.security.no-sandbox + com.apple.springboard.debugapplications
+    // (并带 --platform-apply / CS_PLATFORM_BINARY)。此前 opainject 缺这两个权限时,
+    // 被本 app spawn 后作为子进程继承 app 沙箱 → sandbox 拦截 task_for_pid(SpringBoard)
+    // → opainject 报 "ERROR: Got invalid task port (-1)" (dead name)。
+    // dylib 已在 CI 用 injector.entitlements.xml 签名 (platform-application + no-sandbox),
+    // TrollStore 安装时保留二进制内已嵌入的 entitlements, 运行时无需再签。
 
     // opainject <pid> <dylib_path>
     const char *args[] = {

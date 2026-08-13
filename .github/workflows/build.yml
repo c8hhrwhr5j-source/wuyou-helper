@@ -246,15 +246,29 @@ jobs:
           fi
           cp "$PWD/TrollAutoTouch/Resources/bin/opainject" "$APP_DST/bin/opainject"
           chmod 755 "$APP_DST/bin/opainject"
-          # 重要: 不要对 opainject 做任何重签!
-          # 原版 opainject 自带的签名 entitlements 含完整关键权限:
-          #   com.apple.system-task-ports / .control (task_for_pid 拿 SpringBoard task port),
-          #   platform-application (平台二进制标志)。
-          # 此前用 ent2.xml 重签会剥离这些权限(实测 CI 重签版丢失), 且 ldid 重写 fat
-          # 文件会破坏 arm64e slice 签名, 导致 opainject 在设备上 dyld 崩溃、零输出,
-          # opainject.log 为空 → 注入显示"无法注入 SpringBoard"。
-          # TrollStore 安装时保留二进制内已嵌入的 entitlements, 无需额外签名。
-          echo "[OK] opainject 原样保留 (完整 entitlements: system-task-ports + platform-application)"
+          # opainject 重签: 补上 no-sandbox + springboard.debugapplications。
+          # 实测 opainject 被 app spawn 后以 mobile(501) 运行, 若二进制自身缺 no-sandbox,
+          # 子进程会继承 app 沙箱 → sandbox 拦截 task_for_pid(SpringBoard) → opainject
+          # 报 "ERROR: Got invalid task port (-1)" (task_for_pid 返回 dead name)。
+          # 原版可用的注入器 luaLib 自带 no-sandbox + debugapplications, 这里对齐该权限集。
+          # 签名用 Apple 原生 codesign (adhoc + entitlements), 重签 universal 二进制不会
+          # 破坏 arm64e slice (此前用 ldid 重签才导致 dyld 崩溃、零输出)。
+          # --platform-apply: 让 CodeDirectory 带上 CS_PLATFORM_BINARY, 使 opainject 进程
+          # 成为 platform 进程(与 platform-application 权限配合), 兜底应对 task_for_pid
+          # 对 platform 目标进程(SpringBoard)的平台进程检查。
+          # 注意: 不能用 ent2.xml(仅 5 个 key, 会剥离 system-task-ports 等关键权限)。
+          OP_ENT="$PWD/TrollAutoTouch/Resources/opainject.entitlements.xml"
+          if codesign --force --sign - --platform-apply --entitlements "$OP_ENT" "$APP_DST/bin/opainject" 2>/tmp/op_sign.log; then
+            echo "[OK] opainject 已重签 (no-sandbox + debugapplications + platform-apply)"
+          elif codesign --force --sign - --entitlements "$OP_ENT" "$APP_DST/bin/opainject" 2>>/tmp/op_sign.log; then
+            echo "[OK] opainject 已重签 (no-sandbox + debugapplications, 无 platform-apply)"
+          else
+            echo "[!] opainject 重签失败, 保留原版签名 (task_for_pid 可能仍会失败):"
+            echo "    $(cat /tmp/op_sign.log)"
+          fi
+          echo "[*] opainject 提取 entitlements (验证):"
+          codesign -d --entitlements - "$APP_DST/bin/opainject" 2>/dev/null | grep -E "no-sandbox|debugapplications|platform-application|system-task-ports|task_for_pid|thread-set-state" || echo "    (提取失败/为空!)"
+          cp "$OP_ENT" "$APP_DST/bin/opainject.entitlements.xml"
           # 运行时重签工具链 (学原版 bin/): 部署 ldid + ent2.xml + injector.entitlements.xml,
           # app 在注入前可再次重签 opainject/dylib, 兜底应对 TrollStore 重签剥离权限。
           for T in ldid fastPathSign; do
