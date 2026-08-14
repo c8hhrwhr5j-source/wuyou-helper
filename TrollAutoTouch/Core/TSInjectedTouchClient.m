@@ -149,7 +149,7 @@ extern char **environ;
                 return [NSString stringWithFormat:@"注入失败(直接注入 [%@] kr=%d: %s)",
                         stage, errn, mach_error_string((kern_return_t)errn)];
             }
-            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", stage, errn);
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", stage, errn];
         } else if (stage != nil) {
             return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@])", stage];
         } else if (errn != 0) {
