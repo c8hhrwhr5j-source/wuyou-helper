@@ -43,6 +43,28 @@ extern kern_return_t mach_vm_read(vm_map_t target_task, mach_vm_address_t addres
 
 extern char **environ;
 
+// ── arm_thread_state64_t 字段兼容层 ──
+// Xcode 26+ / iOS 26 SDK 的 arm_thread_state64_t 使用 __opaque_pc/__opaque_lr/__opaque_sp/__opaque_fp (void*),
+// 旧 SDK (Xcode 16 / iOS 18 等) 使用 __pc/__lr/__sp/__fp (__uint64_t)。
+// mach/arm/_structs.h 的条件与 Apple 头文件完全一致:
+//   #if __DARWIN_OPAQUE_ARM_THREAD_STATE64 || __DARWIN_PAC_ARM_THREAD_STATE64
+// 用 #if (非 #ifdef) 因为宏可能被定义为 0; 未定义时预处理器视为 0。
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64 || __DARWIN_PAC_ARM_THREAD_STATE64
+    #define TS_SET_PC(s, v)   (s).__opaque_pc = (void *)(uintptr_t)(v)
+    #define TS_SET_LR(s, v)   (s).__opaque_lr = (void *)(uintptr_t)(v)
+    #define TS_SET_SP(s, v)   (s).__opaque_sp = (void *)(uintptr_t)(v)
+    #define TS_SET_FP(s, v)   (s).__opaque_fp = (void *)(uintptr_t)(v)
+    #define TS_GET_PC(s)      ((uint64_t)(uintptr_t)(s).__opaque_pc)
+    #define TS_GET_LR(s)      ((uint64_t)(uintptr_t)(s).__opaque_lr)
+#else
+    #define TS_SET_PC(s, v)   (s).__pc = (uint64_t)(v)
+    #define TS_SET_LR(s, v)   (s).__lr = (uint64_t)(v)
+    #define TS_SET_SP(s, v)   (s).__sp = (uint64_t)(v)
+    #define TS_SET_FP(s, v)   (s).__fp = (uint64_t)(0)
+    #define TS_GET_PC(s)      ((s).__pc)
+    #define TS_GET_LR(s)      ((s).__lr)
+#endif
+
 @interface TSInjectedTouchClient () {
     int _socketFD;
     pid_t _springBoardPid;
@@ -440,16 +462,16 @@ extern char **environ;
     NSLog(@"[TSInjectedTouch] dlopen 地址: 0x%llx", dlopenAddr);
 
     // 8. 创建远程线程: PC=dlopen, x0=path, x1=RTLD_NOW, LR=shellcode(b loop), SP=栈顶
-    //    Xcode 16+ / iOS 18 SDK 的 arm_thread_state64_t 使用 __opaque_* 字段
-    //    (旧 SDK 用 __pc/__lr/__sp/__fp)。__x[0..28] 两种 SDK 都一样。
+    //    arm_thread_state64_t 字段通过 TS_SET_*/TS_GET_* 宏兼容新旧 SDK
+    //    (新 SDK __opaque_*, 旧 SDK __pc/__lr/__sp/__fp)。__x[0..28] 两种 SDK 都一样。
     arm_thread_state64_t state;
     memset(&state, 0, sizeof(state));
     state.__x[0] = pathAddr;                    // arg1 = dylib path
     state.__x[1] = RTLD_NOW;                    // arg2 = mode
-    state.__opaque_sp = (void *)(stackAddr + stackSize - 256);  // 栈顶
-    state.__opaque_lr = (void *)codeAddr;        // dlopen 返回后跳到 shellcode (b loop)
-    state.__opaque_fp = NULL;
-    state.__opaque_pc = (void *)dlopenAddr;      // 入口 = dlopen
+    TS_SET_SP(state, stackAddr + stackSize - 256);  // 栈顶
+    TS_SET_LR(state, codeAddr);                 // dlopen 返回后跳到 shellcode (b loop)
+    TS_SET_FP(state, 0);
+    TS_SET_PC(state, dlopenAddr);               // 入口 = dlopen
 
     thread_act_t thread = MACH_PORT_NULL;
     kr = thread_create_running(task, ARM_THREAD_STATE64,
@@ -479,7 +501,7 @@ extern char **environ;
     BOOL dlopenOK = NO;
     if (kr == KERN_SUCCESS) {
         NSLog(@"[TSInjectedTouch] 线程状态: pc=0x%llx lr=0x%llx x0=0x%llx (dlopen 返回值)",
-              (uint64_t)curState.__opaque_pc, (uint64_t)curState.__opaque_lr, curState.__x[0]);
+              TS_GET_PC(curState), TS_GET_LR(curState), curState.__x[0]);
         if (curState.__x[0] != 0) {
             NSLog(@"[TSInjectedTouch] dlopen 成功! handle=0x%llx", curState.__x[0]);
             dlopenOK = YES;
