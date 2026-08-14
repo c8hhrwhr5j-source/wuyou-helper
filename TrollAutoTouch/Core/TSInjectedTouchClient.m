@@ -73,6 +73,12 @@ extern char **environ;
     // 暴露最后失败阶段 + errno 给 statusDescription, 否则 Lua 侧只能看到 NSLog, 看不到具体错误码
     NSString *_lastErrorStage;  // nil = 暂无失败; 否则 "deploy" / "spawn" / "log-open"
     int _lastErrorErrno;        // 0 = 暂无失败; 否则 POSIX errno 或 posix_spawn 返回值
+    // 直接注入 (task_for_pid + thread_create_running) 的失败阶段。
+    // 必须独立保存, 否则会被 opainject fallback 的 "spawn" 阶段覆盖,
+    // 用户只看到 errno=85 (opainject ldid 重签破坏 arm64e) 而看不到
+    // 直接注入真正失败在哪一步 (task_for_pid / vm_alloc / thread_create / dlopen)。
+    NSString *_directErrorStage;
+    int _directErrorErrno;
 }
 @end
 
@@ -107,18 +113,15 @@ extern char **environ;
 
 - (NSString *)statusDescription {
     if (_injectFailed) {
-        // 附上 opainject 的具体错误 (task_for_pid / dlopen 失败原因), 便于真机定位
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
-        NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
-        // 重签阶段失败时读 resign.log (ldid 输出), opainject 此时根本没跑
-        if (out.length == 0 && _lastErrorStage != nil && [_lastErrorStage hasPrefix:@"resign"]) {
-            logPath = [docs stringByAppendingPathComponent:@"bin/resign.log"];
-            out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
-        }
+        // 优先显示直接注入 (task_for_pid + thread_create_running) 的失败阶段。
+        // 直接注入是首选方案; opainject fallback 已知有 ldid 重签破坏 arm64e 的问题
+        // (errno=85 EBADEXEC), 显示它没意义, 必须让用户看到直接注入真正失败在哪一步。
+        NSString *stage = _directErrorStage ?: _lastErrorStage;
+        int errn = _directErrorStage ? _directErrorErrno : _lastErrorErrno;
+
         // dlopen-NULL: 读 SpringBoard 侧 dylib 日志 (AMFI 拒绝时会有 NSLog, 但 /tmp/ts_touch.log
         // 在 constructor 没跑起来时为空)。这是直接注入特有阶段, 必须单独提示用户。
-        if ([_lastErrorStage isEqualToString:@"dlopen-NULL"]) {
+        if ([stage isEqualToString:@"dlopen-NULL"]) {
             NSString *dylibLog = [NSString stringWithContentsOfFile:@"/tmp/ts_touch.log"
                                                           encoding:NSUTF8StringEncoding error:NULL];
             NSString *hint = @"dylib 被 AMFI 拒绝 (签名/entitlements 无效)";
@@ -133,31 +136,44 @@ extern char **environ;
             }
             return [NSString stringWithFormat:@"注入失败(直接注入 dlopen 返回 NULL: %@)", hint];
         }
-        NSString *detail = @"";
-        if (out.length > 0) {
-            NSArray<NSString *> *lines = [out componentsSeparatedByString:@"\n"];
-            // 只取最后几行最有用的报错
-            NSUInteger from = lines.count > 4 ? lines.count - 4 : 0;
-            detail = [[[lines subarrayWithRange:NSMakeRange(from, lines.count - from)] componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        }
-        if (detail.length > 0) {
-            return [NSString stringWithFormat:@"注入失败: %@", detail];
-        }
+
         // 直接注入失败的阶段 (task_for_pid / vm_alloc / thread_create 等) errno 是 kern_return_t
         // 用 mach_error_string 解析比裸数字更直观
-        if (_lastErrorStage != nil && _lastErrorErrno != 0) {
-            // 直接注入的阶段名以 task_for_pid / vm_ / thread_ 开头, errno 是 kern_return_t
-            if ([_lastErrorStage hasPrefix:@"task_for_pid"] ||
-                [_lastErrorStage hasPrefix:@"vm_"] ||
-                [_lastErrorStage hasPrefix:@"thread_"]) {
+        if (stage != nil && errn != 0) {
+            // 直接注入的阶段名以 task_for_pid / vm_ / thread_ / find- / dlsym- 开头
+            if ([stage hasPrefix:@"task_for_pid"] ||
+                [stage hasPrefix:@"vm_"] ||
+                [stage hasPrefix:@"thread_"] ||
+                [stage hasPrefix:@"find-"] ||
+                [stage hasPrefix:@"dlsym-"]) {
                 return [NSString stringWithFormat:@"注入失败(直接注入 [%@] kr=%d: %s)",
-                        _lastErrorStage, _lastErrorErrno, mach_error_string((kern_return_t)_lastErrorErrno)];
+                        stage, errn, mach_error_string((kern_return_t)errn)];
             }
-            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", _lastErrorStage, _lastErrorErrno];
-        } else if (_lastErrorStage != nil) {
-            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@])", _lastErrorStage];
-        } else if (_lastErrorErrno != 0) {
-            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, errno=%d)", _lastErrorErrno];
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", stage, errn);
+        } else if (stage != nil) {
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@])", stage];
+        } else if (errn != 0) {
+            return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, errno=%d)", errn];
+        }
+
+        // 没有直接注入的错误信息时, 回退到 opainject 日志 (opainject fallback 的输出)
+        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
+        NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+        // 重签阶段失败时读 resign.log (ldid 输出), opainject 此时根本没跑
+        if (out.length == 0 && _lastErrorStage != nil && [_lastErrorStage hasPrefix:@"resign"]) {
+            logPath = [docs stringByAppendingPathComponent:@"bin/resign.log"];
+            out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+        }
+        if (out.length > 0) {
+            NSArray<NSString *> *lines = [out componentsSeparatedByString:@"\n"];
+            NSUInteger from = lines.count > 4 ? lines.count - 4 : 0;
+            NSString *detail = [[[lines subarrayWithRange:NSMakeRange(from, lines.count - from)]
+                                componentsJoinedByString:@"\n"]
+                               stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (detail.length > 0) {
+                return [NSString stringWithFormat:@"注入失败: %@", detail];
+            }
         }
         return @"注入失败(无法注入 SpringBoard)";
     }
@@ -681,6 +697,10 @@ extern char **environ;
     } else {
         NSLog(@"[TSInjectedTouch] 直接注入失败: [%@] errno=%d, 尝试 opainject fallback",
               _lastErrorStage, _lastErrorErrno);
+        // 快照直接注入的失败阶段到独立字段, 防止被 opainject fallback 的
+        // "spawn" 阶段覆盖。statusDescription 优先显示直接注入的真实失败原因。
+        _directErrorStage = _lastErrorStage;
+        _directErrorErrno = _lastErrorErrno;
     }
 
     // === 方案 B: opainject fallback ===
