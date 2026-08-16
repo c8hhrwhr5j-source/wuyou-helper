@@ -197,6 +197,23 @@ local battery = sys.battery()           -- 电量 0~1
 > 本引擎的 `tap` / `findColor` / `getColor` / `swipe` 等全部使用**同一套点坐标**，直接用返回值即可，无需换算。
 > 如需截图文件的物理像素尺寸，可用 `file.readImage(路径)` 返回 `w, h`（该值为像素）。
 
+### 6.1 屏幕方向 `screen.init`
+
+横屏游戏/应用可用 `screen.init(方向)` 指定**脚本坐标系方向**，让同一套坐标在设备横竖屏切换后仍指向正确位置：
+
+```lua
+screen.init(0)   -- 脚本坐标系 = home 在下（竖屏，默认）
+screen.init(1)   -- 脚本坐标系 = home 在右
+screen.init(2)   -- 脚本坐标系 = home 在左
+```
+
+- 方向参数：`0` = home 在下，`1` = home 在右，`2` = home 在左；传入其他值会被忽略并打印提示。
+- 设置后，`tap` / `touchDown` / `touchMove` / `touchUp` / `swipe` / `stroke` / `findColor` / `findColors` / `findImage` / `getColor` 的坐标全部按该方向解释，引擎自动旋转到设备**当前实际方向**后再执行。
+- 返回值也统一换算回脚本坐标系：`getScreenSize`（横竖屏不同时宽高互换）、`findText`、`appNode` 节点坐标。
+- 脚本坐标系与设备实际方向一致时**零额外开销**；不一致时才做 90° 旋转换算。
+
+> 示例：横屏游戏按 `screen.init(1)` 写脚本，即使设备被切到竖屏，触摸和取色依然落在横屏坐标系的正确位置。
+
 ---
 
 ## 7. 应用管理
