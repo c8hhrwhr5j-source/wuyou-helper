@@ -365,7 +365,13 @@ static void luaStopHook(lua_State *L, lua_Debug *ar) {
 }
 
 /// 取整屏 RGBA 像素，返回给调用方(需 free)
+/// 若已 screen.keep()/keepScreen(true) 缓存，则直接返回缓存副本(不再重复截屏，找色找图性能极大提升)；
+/// 无缓存则新截屏(截屏偶尔会失败，重试最多 3 次)。
 static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
+    // 优先复用 keep 缓存: screen.keep() 后多次 findColor/findColors/getColor 读取同一帧像素
+    if ([[TSScreenCapture shared] getCachedPixels:pxOut width:wOut height:hOut]) {
+        return YES;
+    }
     // 截屏偶尔会失败(帧缓冲 surface 未就绪/主线程忙/动画中)，重试最多 3 次
     for (int attempt = 0; attempt < 3; attempt++) {
         if ([[TSScreenCapture shared] captureScreenToRGBA:pxOut width:wOut height:hOut] && *pxOut) {
@@ -585,13 +591,28 @@ static int l_screen_snapshot(lua_State *L) {
     return 1;
 }
 
-/// keepScreen(flag): true 缓存截屏, false 释放缓存
+/// keepScreen(flag): true 缓存截屏, false 释放缓存 (与 screen.keep()/screen.unkeep() 等价)
 static int l_screen_keepScreen(lua_State *L) {
     if (lua_toboolean(L, 1)) {
         [[TSScreenCapture shared] keepPixels];
     } else {
         [[TSScreenCapture shared] unkeepPixels];
     }
+    return 0;
+}
+
+/// screen.keep(): 缓存当前屏幕像素。之后 findColor/findColors/getColor/findImage 直接复用缓存
+/// 不再重复截屏，找色找图性能极大提升。
+/// 注意: 缓存期间屏幕内容被"冻结"(读取的是缓存帧)，画面变化后须调用 screen.unkeep() 释放
+/// 或重新 screen.keep() 刷新缓存。
+static int l_screen_keep(lua_State *L) {
+    [[TSScreenCapture shared] keepPixels];
+    return 0;
+}
+
+/// screen.unkeep(): 释放 screen.keep() 缓存的屏幕像素，恢复每次实时截屏。
+static int l_screen_unkeep(lua_State *L) {
+    [[TSScreenCapture shared] unkeepPixels];
     return 0;
 }
 
@@ -1155,6 +1176,8 @@ static void lua_register_all(lua_State *L) {
         {"getColor",    l_screen_getColor},
         {"snapshot",    l_screen_snapshot},
         {"keepScreen",  l_screen_keepScreen},
+        {"keep",        l_screen_keep},
+        {"unkeep",      l_screen_unkeep},
         {"getScreenSize", l_screen_getSize},
         {"tap",         l_touch_tap},
         {"touchDown",   l_touch_down},
@@ -1192,6 +1215,8 @@ static void lua_register_all(lua_State *L) {
         {"getColor",   l_screen_getColor},
         {"snapshot",   l_screen_snapshot},
         {"keepScreen", l_screen_keepScreen},
+        {"keep",       l_screen_keep},
+        {"unkeep",     l_screen_unkeep},
         {"getSize",    l_screen_getSize},
         {"findText",   l_screen_findText},
         {NULL, NULL}

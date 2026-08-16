@@ -166,13 +166,43 @@ local path = snapshot("/tmp/my_snap.png")
 
 -- 自动命名保存到 /var/mobile/touch/log/snapshot_*.png
 local p2 = snapshot()
-
--- 缓存屏幕像素: 连续多次 findColor 时提高性能
-keepScreen(true)          -- 开始缓存
-local a = findColor(0xFF0000)
-local b = findColor(0x00FF00)
-keepScreen(false)         -- 释放缓存(画面变化后必须释放并重新缓存)
 ```
+
+### 屏幕保持: `screen.keep()` / `screen.unkeep()`
+
+`screen.keep()` 会把当前屏幕像素缓存到内存。之后脚本里的
+`findColor` / `findColors` / `getColor` / `findImage` **全部直接复用这帧缓存**，
+不再重复截屏，找图找色性能极大提升（画面静止的挂机脚本尤其明显）。
+
+```lua
+screen.keep()             -- 保持屏幕(缓存当前帧)，之后找色找图不再截屏
+
+local a = findColor(0xFF0000)   -- 读缓存
+local b = getColor(100, 200)    -- 读缓存
+local x, y = findImage("/tmp/btn.png")  -- 读缓存
+
+screen.unkeep()           -- 取消保持，释放内存中的图像数据，恢复实时截屏
+```
+
+⚠️ **重要：缓存期间屏幕内容被"冻结"**。`screen.keep()` 后脚本读到的一直是
+开始保持那一刻的画面，如果屏幕内容已变化，必须 `screen.unkeep()`（或重新
+`screen.keep()` 刷新缓存），否则会一直按旧画面找色。
+
+```lua
+-- 推荐写法: 画面固定时保持，画面变化后刷新
+while true do
+    screen.keep()                         -- 保持当前画面
+    local x, y = findColor(0x00FF00)
+    if x then
+        tap(x, y)
+        screen.unkeep()                   -- 点击后画面可能变化，释放
+    end
+    mSleep(500)
+end
+```
+
+> 兼容写法：`keepScreen(true)` / `keepScreen(false)` 与
+> `screen.keep()` / `screen.unkeep()` 完全等价，任选一种即可。
 
 ---
 
@@ -377,7 +407,8 @@ logStr("自动任务结束")
 | `swipe(x1,y1,x2,y2[, ms][, steps])` | 滑动 |
 | `stroke({x1,y1,...}, ms)` | 多点轨迹 |
 | `snapshot([path])` | 保存截屏 → 路径 |
-| `keepScreen(bool)` | 缓存/释放截屏 |
+| `screen.keep()` / `keepScreen(true)` | 保持屏幕(缓存当前帧)，提升找色找图性能 |
+| `screen.unkeep()` / `keepScreen(false)` | 取消保持，释放内存中的图像数据 |
 | `getScreenSize()` | 屏幕尺寸 → w,h |
 | `mSleep(ms)` / `sleep(sec)` | 延时 |
 | `logStr(s)` / `print(...)` | 日志 |

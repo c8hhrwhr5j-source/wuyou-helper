@@ -45,7 +45,8 @@
                                                  rect:(CGRect)rect {
     uint8_t *pixels = NULL;
     int w = 0, h = 0;
-    if (![[TSScreenCapture shared] captureScreenToRGBA:&pixels width:&w height:&h] || !pixels) {
+    // 优先复用 screen.keep() 缓存像素(找图性能提升)；无缓存则实时截屏
+    if (![[TSScreenCapture shared] getCachedPixels:&pixels width:&w height:&h] || !pixels) {
         return nil;
     }
     
