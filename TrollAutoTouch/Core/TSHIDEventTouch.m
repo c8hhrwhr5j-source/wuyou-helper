@@ -276,6 +276,9 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 // 用于 releaseAllTouches 在脚本停止时补发 touchUp，避免幽灵手指。
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *pressedIndexes;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *lastPoints;
+- (void)_setupClient;
+- (void)_setupSenderID;
+- (void)_releaseSenderIDClient;
 @end
 
 @implementation TSHIDEventTouch
