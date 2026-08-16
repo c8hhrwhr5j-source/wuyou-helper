@@ -1649,7 +1649,7 @@ print(str.random(1, 100))
 | `screen.findImage(tpl, sim, rect)` | 屏幕找图 | `findimg` (DSL) |
 | `screen.getColor(x, y)` | 屏幕取色 | `getcolor` (DSL) |
 | `screen.getColorRGB(x, y)` | 屏幕取 RGB | ❌ |
-| `screen.init(orientation)` | 初始化屏幕方向 | ❌ |
+| `screen.init(orientation)` | 初始化屏幕方向 (0=home在下 1=home在右 2=home在左) | ✅ `screen.init()` |
 | `screen.keep()` | 保持屏幕 | `keep` (DSL) |
 | `screen.unkeep()` | 取消保持 | `unkeep` (DSL) |
 | `screen.loadImageData(data)` | 从数据加载图片 | ❌ |
