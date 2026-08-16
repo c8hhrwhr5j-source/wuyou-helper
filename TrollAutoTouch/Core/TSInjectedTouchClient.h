@@ -8,8 +8,9 @@
 //    2. 连接 SpringBoard 内触摸服务的 TCP socket (127.0.0.1:23333)
 //    3. 把触摸指令通过 socket 发往 SpringBoard, 由服务端注入 IOHID 事件
 //
-//  (backboardd 只接受 SpringBoard 等受信进程的 IOHID 事件,
-//   app 进程直接 dispatch 会被丢弃 —— 之前点击无效的根因)
+//  注: 原版 TrollAutoScript 2.2.0 触摸并非注入实现, 而是 HUDServices 在
+//  自己进程内直发 IOHID (research/zxtouch/Touch.xm)。此处保留注入链路
+//  作为直发 (TSHIDEventTouch 第一通道) 不可用时的备选。
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
