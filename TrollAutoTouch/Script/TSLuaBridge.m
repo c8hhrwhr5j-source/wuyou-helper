@@ -176,6 +176,8 @@ static CGSize tsPortraitPixelSize(void) {
 // 以竖屏为基准 (Wp=竖屏宽, Hp=竖屏高):
 //   home右(x,y) -> portrait (Wp-y, x);  portrait -> home右 (Y, Wp-X)
 //   home左(x,y) -> portrait (y, Hp-x);  portrait -> home左 (Hp-Y, X)
+// 注意: 本函数是"连续坐标"版本(旋转不减 1), 用于 UIKit 逻辑点坐标(appNode/findText 返回值);
+// 像素索引版本见 tsTransformPixelPoint, 用于脚本像素坐标 <-> 截屏缓冲像素。
 static CGPoint tsTransformPoint(CGPoint p, NSInteger from, NSInteger to, CGSize portraitSize) {
     if (from == to) return p;   // 方向一致时恒等, 零开销
     CGFloat Wp = portraitSize.width;
@@ -193,13 +195,35 @@ static CGPoint tsTransformPoint(CGPoint p, NSInteger from, NSInteger to, CGSize 
     }
 }
 
-// 坐标系变换: 矩形 (旋转 90° 后仍是轴对齐矩形, 变换四角取外接即可)
-static CGRect tsTransformRect(CGRect r, NSInteger from, NSInteger to, CGSize portraitSize) {
+// 像素索引坐标变换: 旋转分支按像素索引(W-1)处理。
+// 截屏缓冲像素与第三方取色软件(横屏时左上角为(0,0))都采用像素索引模型:
+//   竖屏像素 (585,959) == 横屏(home右)像素 (959, 750-1-585) = (959,164)
+// 所以脚本像素坐标 <-> 截屏缓冲像素坐标的 90° 旋转必须减 1,
+// 否则会差 1 像素, 导致 getColor/click 在横屏下取错像素(公告关闭按钮 (959,164) 实测偏出按钮颜色区)。
+static CGPoint tsTransformPixelPoint(CGPoint p, NSInteger from, NSInteger to, CGSize portraitSize) {
+    if (from == to) return p;   // 方向一致时恒等, 零开销
+    CGFloat Wp = portraitSize.width;
+    CGFloat Hp = portraitSize.height;
+    CGFloat X, Y;
+    switch (from) {
+        case 1: X = Wp - 1 - p.y; Y = p.x; break;            // home 右 -> portrait
+        case 2: X = p.y;          Y = Hp - 1 - p.x; break;   // home 左 -> portrait
+        default: X = p.x; Y = p.y; break;                    // portrait
+    }
+    switch (to) {
+        case 1: return CGPointMake(Y, Wp - 1 - X);            // portrait -> home 右
+        case 2: return CGPointMake(Hp - 1 - Y, X);            // portrait -> home 左
+        default: return CGPointMake(X, Y);                    // portrait
+    }
+}
+
+// 像素索引坐标变换: 矩形 (旋转 90° 后仍是轴对齐矩形, 变换四角取外接即可)
+static CGRect tsTransformPixelRect(CGRect r, NSInteger from, NSInteger to, CGSize portraitSize) {
     if (from == to) return r;
-    CGPoint p1 = tsTransformPoint(r.origin, from, to, portraitSize);
-    CGPoint p2 = tsTransformPoint(CGPointMake(CGRectGetMaxX(r), r.origin.y), from, to, portraitSize);
-    CGPoint p3 = tsTransformPoint(CGPointMake(r.origin.x, CGRectGetMaxY(r)), from, to, portraitSize);
-    CGPoint p4 = tsTransformPoint(CGPointMake(CGRectGetMaxX(r), CGRectGetMaxY(r)), from, to, portraitSize);
+    CGPoint p1 = tsTransformPixelPoint(r.origin, from, to, portraitSize);
+    CGPoint p2 = tsTransformPixelPoint(CGPointMake(CGRectGetMaxX(r), r.origin.y), from, to, portraitSize);
+    CGPoint p3 = tsTransformPixelPoint(CGPointMake(r.origin.x, CGRectGetMaxY(r)), from, to, portraitSize);
+    CGPoint p4 = tsTransformPixelPoint(CGPointMake(CGRectGetMaxX(r), CGRectGetMaxY(r)), from, to, portraitSize);
     CGFloat minX = MIN(MIN(p1.x, p2.x), MIN(p3.x, p4.x));
     CGFloat minY = MIN(MIN(p1.y, p2.y), MIN(p3.y, p4.y));
     CGFloat maxX = MAX(MAX(p1.x, p2.x), MAX(p3.x, p4.x));
@@ -212,16 +236,18 @@ static CGRect tsTransformRect(CGRect r, NSInteger from, NSInteger to, CGSize por
 //   * 截屏(TSScreenCapture createScreenIOSurface)像素缓冲固定为物理竖屏尺寸, 横屏时只是内容旋转;
 //   * IOHID digitizer 事件坐标按屏幕固定坐标系(fixedCoordinateSpace)归一化解释。
 // 因此脚本坐标必须统一旋转到竖屏物理方向, 与缓冲/事件坐标系对齐; 用 cur 会导致 init(1) 后坐标错位。
+// 像素旋转统一走 tsTransformPixelPoint(旋转分支减 1): 与取色软件横屏坐标(左上角 0,0)严格一致,
+// 这样取色软件直接给出的横屏坐标可原样用于 getColor/click, 无需手动 ±1。
 static CGPoint tsScriptToActualPoint(CGPoint p) {
-    return tsTransformPoint(p, s_scriptOrientation, 0, tsPortraitPixelSize());
+    return tsTransformPixelPoint(p, s_scriptOrientation, 0, tsPortraitPixelSize());
 }
 static CGRect tsScriptToActualRect(CGRect r) {
-    return tsTransformRect(r, s_scriptOrientation, 0, tsPortraitPixelSize());
+    return tsTransformPixelRect(r, s_scriptOrientation, 0, tsPortraitPixelSize());
 }
-// buffer(竖屏物理方向, 像素) -> 脚本坐标系(像素): findColor/findColors/findImage 返回值用,
+// buffer(竖屏物理方向, 像素) -> 脚本坐标系(像素): findColor/findColors/findImage/OCR 返回值用,
 // 否则 init(1) 下拿到的是截屏缓冲坐标, 直接 click 会二次错位。
 static CGPoint tsBufferToScriptPoint(CGPoint p) {
-    return tsTransformPoint(p, 0, s_scriptOrientation, tsPortraitPixelSize());
+    return tsTransformPixelPoint(p, 0, s_scriptOrientation, tsPortraitPixelSize());
 }
 // 设备实际方向(逻辑点) -> 脚本坐标系(逻辑点): findText/appNode 返回值用
 static CGPoint tsActualToScriptPoint(CGPoint p) {

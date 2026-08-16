@@ -26,10 +26,10 @@ function main()
             log("找到坚屏公告关闭按钮点击")
         end
 
-        if getColor(959, 165) == 0xB53029 then
-            click(959, 165)
+        if getColor(959, 164) == 0xB53029 then
+            click(959, 164)
             sleep(1000)
-            log("找到横屏公告关闭按钮点击1")
+            log("找到横屏公告关闭按钮点击")
         end
     end
 end
