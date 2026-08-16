@@ -21,6 +21,18 @@
 //  senderID 动态获取机制保留（信息展示），真正发送端的 senderID 由
 //  TSInjectedTouchService.dylib 在 SpringBoard 进程内自行获取。
 //
+//  本应用点击 fallback（借鉴 无忧辅助触控 TouchSimulation 的三重策略）:
+//    注入链路不可用（task_for_pid 失败 / 未注入）时, 点击不再直接丢弃, 而是
+//    退化为"本应用点击模式", 按优先级尝试:
+//      1. AX (Accessibility) 辅助功能点击: AXUIElementCopyElementAtPosition +
+//         AXUIElementPerformAction(AXPress)。需要 entitlement com.apple.accessibility.api
+//         (TrollAutoTouch.entitlements 已含)。对前台 app(含本 app)的标准 UIKit
+//         元素有效 —— 这正是"本应用点击"的来源;
+//      2. 进程内 UIControl: 主线程 hitTest + sendActionsForControlEvents,
+//         仅对本 app 前台 UI 按钮有效。
+//    注入链路是"跨应用"的基础; fallback 让脚本在本 app 内的点击先可用,
+//    跨应用注入恢复后自动优先走注入链路。
+//
 
 #import "TSHIDEventTouch.h"
 #import "TSInjectedTouchClient.h"
@@ -174,6 +186,83 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
                                                       userInfo:@{@"senderID": @(sid)}];
 }
 
+// ---------- AX (Accessibility) 辅助功能点击: 本应用点击的核心 fallback ----------
+// 借鉴自 无忧辅助触控 TouchSimulation.m (已验证"本应用点击有效")。
+// 原理: AXUIElementCreateSystemWide + AXUIElementCopyElementAtPosition 在屏幕坐标
+// 处找到前台 app 的可访问性元素, 再 AXUIElementPerformAction(AXPress) 触发点击。
+// 需要 entitlement: com.apple.accessibility.api (TrollAutoTouch.entitlements 已含)。
+// 注意: 系统级 AX 对任意前台 app 的标准 UIKit 元素都有效; 对自绘/无 accessibility
+// 元素的游戏类 app 无效 —— 这正是"本应用点击有效, 跨应用(游戏)失效"的边界。
+// 全部通过 dlsym 动态加载, 避免链接私有框架; 线程安全, 可在 Lua 后台线程调用。
+typedef struct __AXUIElement *TSAXUIElementRef;
+typedef int32_t TSAXError;
+static const TSAXError TSAXErrorSuccess = 0;
+
+static BOOL s_tsAXReady = NO;
+static void *s_tsAXCreateSystemWide = NULL;
+static void *s_tsAXCopyElementAtPosition = NULL;
+static void *s_tsAXPerformAction = NULL;
+
+static void TSAXSetup(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // 优先查共享缓存, 再逐路径 dlopen (对齐无忧辅助的做法)
+        s_tsAXCreateSystemWide      = dlsym(RTLD_DEFAULT, "AXUIElementCreateSystemWide");
+        s_tsAXCopyElementAtPosition = dlsym(RTLD_DEFAULT, "AXUIElementCopyElementAtPosition");
+        s_tsAXPerformAction         = dlsym(RTLD_DEFAULT, "AXUIElementPerformAction");
+        if (!s_tsAXCreateSystemWide || !s_tsAXCopyElementAtPosition || !s_tsAXPerformAction) {
+            const char *axPaths[] = {
+                "/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities",
+                "/System/Library/PrivateFrameworks/AXRuntime.framework/AXRuntime",
+                "/System/Library/PrivateFrameworks/Accessibility.framework/Accessibility",
+                NULL
+            };
+            for (int i = 0; axPaths[i]; i++) {
+                void *h = dlopen(axPaths[i], RTLD_NOW | RTLD_LOCAL);
+                if (!h) continue;
+                if (!s_tsAXCreateSystemWide) s_tsAXCreateSystemWide = dlsym(h, "AXUIElementCreateSystemWide");
+                if (!s_tsAXCopyElementAtPosition) s_tsAXCopyElementAtPosition = dlsym(h, "AXUIElementCopyElementAtPosition");
+                if (!s_tsAXPerformAction) s_tsAXPerformAction = dlsym(h, "AXUIElementPerformAction");
+                if (s_tsAXCreateSystemWide && s_tsAXCopyElementAtPosition && s_tsAXPerformAction) {
+                    NSLog(@"[TSHIDEventTouch] AX API 已加载 (%s)", axPaths[i]);
+                    break;
+                }
+            }
+        }
+        s_tsAXReady = (s_tsAXCreateSystemWide && s_tsAXCopyElementAtPosition && s_tsAXPerformAction);
+        NSLog(@"[TSHIDEventTouch] AX 辅助功能点击 %@", s_tsAXReady ? @"可用 (权限: com.apple.accessibility.api)" : @"不可用 (符号缺失或权限不足)");
+    });
+}
+
+// 在屏幕坐标 (x, y) 处执行一次 AX 点击。返回是否成功 (找到元素且动作成功)。
+static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
+    TSAXSetup();
+    if (!s_tsAXReady) return NO;
+    TSAXUIElementRef (*createSysWide)(void) = (TSAXUIElementRef (*)(void))s_tsAXCreateSystemWide;
+    TSAXError (*copyAt)(TSAXUIElementRef, float, float, TSAXUIElementRef *) = (TSAXError (*)(TSAXUIElementRef, float, float, TSAXUIElementRef *))s_tsAXCopyElementAtPosition;
+    TSAXError (*perform)(TSAXUIElementRef, CFStringRef) = (TSAXError (*)(TSAXUIElementRef, CFStringRef))s_tsAXPerformAction;
+    TSAXUIElementRef sysWide = createSysWide();
+    if (!sysWide) return NO;
+    TSAXUIElementRef element = NULL;
+    TSAXError err = copyAt(sysWide, (float)x, (float)y, &element);
+    CFRelease(sysWide);
+    if (err != TSAXErrorSuccess || !element) {
+        NSLog(@"[TSHIDEventTouch] AX 未找到元素 @(%.0f,%.0f) (err=%d) —— 目标可能无 accessibility 元素", x, y, (int)err);
+        return NO;
+    }
+    err = perform(element, CFSTR("AXPress"));
+    if (err != TSAXErrorSuccess) err = perform(element, CFSTR("AXPick"));
+    if (err != TSAXErrorSuccess) err = perform(element, CFSTR("AXConfirm"));
+    BOOL ok = (err == TSAXErrorSuccess);
+    CFRelease(element);
+    if (ok) {
+        NSLog(@"[TSHIDEventTouch] AX 点击成功 @(%.0f,%.0f)", x, y);
+    } else {
+        NSLog(@"[TSHIDEventTouch] AX 点击失败 @(%.0f,%.0f) (err=%d)", x, y, (int)err);
+    }
+    return ok;
+}
+
 // ---------- 实现 ----------
 
 @interface TSHIDEventTouch ()
@@ -274,11 +363,20 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     }
 
     if (![[TSInjectedTouchClient shared] ensureInjected]) {
+        // ── 注入链路不可用 → 本应用点击 fallback (借鉴无忧辅助触控) ──
+        // 注入失败时点击不再直接丢弃。只在 Began(down) 时触发一次"本应用点击",
+        // Moved/Ended 忽略 (fallback 是元素级点击, 无连续触摸流)。
+        // 优先级: AX(辅助功能) > 进程内 UIControl。
         static BOOL s_loggedInjectFail = NO;
         if (!s_loggedInjectFail) {
             s_loggedInjectFail = YES;
-            NSLog(@"[TSHIDEventTouch] 注入 SpringBoard 失败: %@",
+            NSLog(@"[TSHIDEventTouch] 注入 SpringBoard 失败, 进入本应用点击模式 (AX/进程内): %@",
                   [[TSInjectedTouchClient shared] statusDescription]);
+        }
+        if (phase == TSTouchPhaseBegan) {
+            if (!TSAXTapAt(point.x, point.y)) {
+                [self _localTapAtPoint:point];
+            }
         }
         return;
     }
@@ -292,6 +390,37 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
         default:                type = TS_TOUCH_TYPE_UP;   break;
     }
     [[TSInjectedTouchClient shared] sendTouchType:type index:(uint8_t)index point:point];
+}
+
+/// 进程内点击 fallback: 仅对本 app 前台 UI 有效。
+/// 主线程 hitTest 找到坐标处的视图, 若命中 UIControl 则触发 TouchDown + TouchUpInside。
+/// AX 策略找不到元素时兜底; 必须在主线程执行, 非主线程调用会同步派发到主线程。
+- (BOOL)_localTapAtPoint:(CGPoint)point {
+    __block BOOL handled = NO;
+    void (^block)(void) = ^{
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        if (!window) return;
+        UIView *view = [window hitTest:point withEvent:nil];
+        if (!view) return;
+        UIView *candidate = view;
+        while (candidate && ![candidate isKindOfClass:[UIControl class]]) {
+            candidate = candidate.superview;
+        }
+        if ([candidate isKindOfClass:[UIControl class]]) {
+            UIControl *ctl = (UIControl *)candidate;
+            [ctl sendActionsForControlEvents:UIControlEventTouchDown];
+            [ctl sendActionsForControlEvents:UIControlEventTouchUpInside];
+            handled = YES;
+            NSLog(@"[TSHIDEventTouch] 进程内点击成功: %@ @(%.0f,%.0f)",
+                  NSStringFromClass(candidate.class), point.x, point.y);
+        }
+    };
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), block);
+    }
+    return handled;
 }
 
 #pragma mark - 公共 API
@@ -364,6 +493,13 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     NSMutableString *s = [NSMutableString string];
     // 触摸通道: 注入 SpringBoard 的 socket 服务
     [s appendFormat:@"touch=%@", [[TSInjectedTouchClient shared] statusDescription]];
+    // 本应用点击 fallback 状态 (AX 辅助功能 / 进程内 UIControl)
+    TSAXSetup();
+    if (s_tsAXReady) {
+        [s appendString:@", 本应用点击=AX可用"];
+    } else {
+        [s appendString:@", 本应用点击=AX不可用"];
+    }
     // senderID 状态 (仅信息展示, 发送已不依赖它)
     if (s_senderID != 0) {
         [s appendFormat:@", senderID=0x%llX(就绪)", (unsigned long long)s_senderID];
