@@ -56,15 +56,12 @@ typedef uint32_t IOHIDEventType;
 #define kIOHIDDigitizerEventRange      (1 << 0)
 #define kIOHIDDigitizerEventTouch      (1 << 1)
 #define kIOHIDDigitizerEventPosition   (1 << 2)
-#define kIOHIDDigitizerEventIdentity   (1 << 5)   // 0x20, ZXTouch 父事件掩码含此位
+// 注: identity 位 (1<<5=0x20) 未单列宏, 它含于直发时父事件的掩码 0xb0007=0x23
+//     (0x23 = 1|2|32), 见 _dispatchIOHIDTouchAtPoint:。
 
 // IOHIDDigitizerTransducerType (iOS 13+ 私有头 IOHIDEventTypes.h)
 #define kIOHIDDigitizerTransducerTypeFinger   2   // 单根手指
 #define kIOHIDDigitizerTransducerTypeHand     3   // 整只手 (父事件容器)
-
-// 未获取到真实 senderID 时的兜底值（iOS 13 以下常用；iOS 13+ 大概率被丢弃，
-// 仅作 fallback，正式值来自系统事件回调）。
-#define kTouchSenderIDFallback 0x8000000800ULL
 
 // senderID 持久化键 (NSUserDefaults)
 static NSString * const kSenderIDDefaultsKey        = @"TSHIDSenderID";
@@ -127,9 +124,7 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
 // 私有字段写入 (ZXTouch 同款)
 extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, IOHIDFloat value);
-extern void IOHIDEventSetFloatValueWithOptions(IOHIDEventRef event, uint32_t field, IOHIDFloat value, IOHIDEventOptionBits options);
 extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
-extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t field, int64_t value, IOHIDEventOptionBits options);
 
 // ---------- IOHIDEventField 数字位字段常量 (IOKit 私有头 IOHIDEventTypes.h) ----------
 // 位 20-31: 类别, 低 16 位: 字段序号。digitizer 类别 = 0x000b。
@@ -168,6 +163,7 @@ static NSTimeInterval TSHIDCurrentBootTime(void) {
 
 // 监听系统触摸屏(digitizer)事件，读取真实 senderID（ZXTouch setSenderIdCallback 同款）。
 // 回调通过 ScheduleWithRunLoop 调度到主 RunLoop，可安全访问 NSUserDefaults。
+// target 传入 self (见 _setupSenderID)，拿到 senderID 后立即释放监听 client，避免常驻监听。
 static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef service, IOHIDEventRef event) {
     if (!event) return;
     if (IOHIDEventGetType(event) != kIOHIDEventTypeDigitizer) return;
@@ -185,6 +181,13 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
                                                         object:nil
                                                       userInfo:@{@"senderID": @(sid)}];
+    // senderID 已就绪，监听不再需要 → 注销回调并释放监听 client（省掉每次系统触摸事件的回调检查）
+    TSHIDEventTouch *self = (__bridge TSHIDEventTouch *)target;
+    if (self) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _releaseSenderIDClient];
+        });
+    }
 }
 
 // ---------- AX (Accessibility) 辅助功能点击: 本应用点击的核心 fallback ----------
@@ -327,8 +330,20 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
         return;
     }
     IOHIDEventSystemClientScheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-    IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, NULL, NULL);
+    // target 传 self: 回调拿到 senderID 后经 _releaseSenderIDClient 注销回调并释放 client
+    IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, (__bridge void *)self, NULL);
     NSLog(@"[TSHIDEventTouch] 正在监听系统触摸事件获取 senderID……（若迟迟不生效请先在设备上手动触摸一次屏幕）");
+}
+
+/// senderID 已获取后调用：注销回调、解除 runloop 调度并释放监听 client。
+/// 避免监听 client 常驻，让每个系统触摸事件都进回调检查（省掉持续的开销）。
+- (void)_releaseSenderIDClient {
+    if (!_senderIDClient) return;
+    IOHIDEventSystemClientUnregisterEventCallback(_senderIDClient);
+    IOHIDEventSystemClientUnscheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+    CFRelease(_senderIDClient);
+    _senderIDClient = NULL;
+    NSLog(@"[TSHIDEventTouch] senderID 已就绪, 已释放监听 client");
 }
 
 /// 当前屏幕逻辑尺寸
@@ -401,11 +416,13 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 /// 构造一个 parent digitizer 事件 (Hand 容器) + 一个 child finger 事件,
 /// 设置 senderID 后由 IOHIDEventSystemClientDispatchEvent 直发 backboardd。
 /// 坐标归一化: 输入为逻辑点坐标, 除以屏幕 bounds 得到 0~1 比例 (ZXTouch 同款)。
+/// 注意: pressure/radius 为 API 兼容占位 (Lua 层 touchDownAtPoint: 签名透传),
+/// 事件构造使用已验证的固定值 (tipPressure=0, radius=0.04), 暂未映射。
 - (void)_dispatchIOHIDTouchAtPoint:(CGPoint)point
                              index:(uint32_t)index
                              phase:(TSTouchPhase)phase
-                          pressure:(CGFloat)pressure
-                            radius:(CGFloat)radius {
+                          pressure:(__unused CGFloat)pressure
+                            radius:(__unused CGFloat)radius {
     if (!_client) {
         NSLog(@"[TSHIDEventTouch] 直发失败: HID client 未创建");
         return;
@@ -480,8 +497,15 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
         NSLog(@"[TSHIDEventTouch] HID 直发 DOWN #%u @(%.0f,%.0f) senderID=0x%llX",
               index, point.x, point.y, (unsigned long long)s_senderID);
     } else if (phase == TSTouchPhaseMoved) {
-        NSLog(@"[TSHIDEventTouch] HID 直发 MOVE #%u @(%.0f,%.0f)",
-              index, point.x, point.y);
+        // MOVE 高频触发, NSLog 是同步 I/O, 高速滑动时逐条打印会拖慢触摸线程,
+        // 节流为每秒最多一条 (帧率/手感不受影响)。
+        static NSTimeInterval s_lastMoveLogTime = 0;
+        NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+        if (now - s_lastMoveLogTime >= 1.0) {
+            s_lastMoveLogTime = now;
+            NSLog(@"[TSHIDEventTouch] HID 直发 MOVE #%u @(%.0f,%.0f)",
+                  index, point.x, point.y);
+        }
     }
 }
 
