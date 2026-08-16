@@ -134,7 +134,8 @@ static CGFloat touchScale(void) {
 // 脚本坐标系方向, 由 screen.init(0/1/2) 设置, 默认 0 (home 在下)。
 // 语义与文档一致: 0=home在下(竖屏) 1=home在右 2=home在左。
 // 设置后, Lua 层触摸/取色/找色的坐标统一按脚本坐标系解释, 引擎在注入/取色前
-// 自动旋转到设备当前实际方向; getScreenSize/findText/appNode 的返回值同样旋转回脚本坐标系。
+// 自动旋转到屏幕物理方向(竖屏/fixedCoordinateSpace) —— 截屏缓冲与 HID 事件均基于该坐标系;
+// findText/appNode 的返回值则是从 UIKit 坐标(设备实际方向)旋转回脚本坐标系。
 static NSInteger s_scriptOrientation = 0;
 
 // 设备当前实际方向: 0=home在下 1=home在右 2=home在左 (由当前窗口方向决定)
@@ -206,12 +207,21 @@ static CGRect tsTransformRect(CGRect r, NSInteger from, NSInteger to, CGSize por
     return CGRectMake(minX, minY, maxX - minX, maxY - minY);
 }
 
-// 脚本坐标系(物理像素) -> 设备实际方向(物理像素): 触摸/取色/找色入口用
+// 脚本坐标系(物理像素) -> 屏幕物理方向(竖屏/fixedCoordinateSpace, 物理像素): 触摸/取色/找色入口用。
+// 注意: 目标方向固定为 0(竖屏), 而不是设备当前实际方向 ——
+//   * 截屏(TSScreenCapture createScreenIOSurface)像素缓冲固定为物理竖屏尺寸, 横屏时只是内容旋转;
+//   * IOHID digitizer 事件坐标按屏幕固定坐标系(fixedCoordinateSpace)归一化解释。
+// 因此脚本坐标必须统一旋转到竖屏物理方向, 与缓冲/事件坐标系对齐; 用 cur 会导致 init(1) 后坐标错位。
 static CGPoint tsScriptToActualPoint(CGPoint p) {
-    return tsTransformPoint(p, s_scriptOrientation, tsCurrentOrientation(), tsPortraitPixelSize());
+    return tsTransformPoint(p, s_scriptOrientation, 0, tsPortraitPixelSize());
 }
 static CGRect tsScriptToActualRect(CGRect r) {
-    return tsTransformRect(r, s_scriptOrientation, tsCurrentOrientation(), tsPortraitPixelSize());
+    return tsTransformRect(r, s_scriptOrientation, 0, tsPortraitPixelSize());
+}
+// buffer(竖屏物理方向, 像素) -> 脚本坐标系(像素): findColor/findColors/findImage 返回值用,
+// 否则 init(1) 下拿到的是截屏缓冲坐标, 直接 click 会二次错位。
+static CGPoint tsBufferToScriptPoint(CGPoint p) {
+    return tsTransformPoint(p, 0, s_scriptOrientation, tsPortraitPixelSize());
 }
 // 设备实际方向(逻辑点) -> 脚本坐标系(逻辑点): findText/appNode 返回值用
 static CGPoint tsActualToScriptPoint(CGPoint p) {
@@ -289,9 +299,10 @@ static int l_global_sleep(lua_State *L) {
 #pragma mark - 屏幕尺寸
 
 static int l_screen_getSize(lua_State *L) {
+    // 返回脚本坐标系下的屏幕物理像素尺寸: 竖屏坐标(0) -> (Wp,Hp); 横屏坐标(1/2) -> (Hp,Wp)。
+    // 只与脚本坐标系方向有关, 与设备实际方向无关。
     CGSize s = screenPixelSize();
-    // 脚本坐标系与当前实际方向横竖屏不同时, 宽高互换 (home在右/在左同为横屏, 尺寸一致)
-    if ((s_scriptOrientation == 0) != (tsCurrentOrientation() == 0)) {
+    if (s_scriptOrientation != 0) {
         s = CGSizeMake(s.height, s.width);
     }
     lua_pushnumber(L, s.width);
@@ -424,7 +435,7 @@ static int l_screen_findColor(lua_State *L) {
         }
     }
 
-    rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 设备实际方向
+    rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) { lua_pushnil(L); return 1; }
     CGSize ss = screenPixelSize();
@@ -432,8 +443,9 @@ static int l_screen_findColor(lua_State *L) {
                                           pixels:px width:w height:h screenSize:ss];
     free(px);
     if (!res) { lua_pushnil(L); return 1; }
-    lua_pushnumber(L, res.point.x);
-    lua_pushnumber(L, res.point.y);
+    CGPoint pt = tsBufferToScriptPoint(res.point);   // buffer坐标 -> 脚本坐标系
+    lua_pushnumber(L, pt.x);
+    lua_pushnumber(L, pt.y);
     return 2;
 }
 
@@ -446,7 +458,7 @@ static int l_screen_findColors(lua_State *L) {
     CGFloat sim = (CGFloat)luaL_optnumber(L, next, 0.9);
     CGFloat offSim = (CGFloat)luaL_optnumber(L, next + 1, sim);
 
-    rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 设备实际方向
+    rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) {
         NSString *err = [TSScreenCapture shared].lastError;
@@ -463,8 +475,9 @@ static int l_screen_findColors(lua_State *L) {
                                               pixels:px width:w height:h screenSize:ss];
     free(px);
     if (!res) { lua_pushnil(L); return 1; }
-    lua_pushnumber(L, res.point.x);
-    lua_pushnumber(L, res.point.y);
+    CGPoint pt = tsBufferToScriptPoint(res.point);   // buffer坐标 -> 脚本坐标系
+    lua_pushnumber(L, pt.x);
+    lua_pushnumber(L, pt.y);
     return 2;
 }
 
@@ -486,7 +499,7 @@ static int l_screen_getColor(lua_State *L) {
         lua_pushinteger(L, 0);
         return 1;
     }
-    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 设备实际方向
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     CGSize ss = screenPixelSize();
     int color = [TSColorFinder getColorAtPoint:sp pixels:px width:w height:h screenSize:ss];
     free(px);
@@ -516,13 +529,14 @@ static int l_screen_findImage(lua_State *L) {
     }
     if (accuracy <= 0 || accuracy > 1) accuracy = 0.8;
 
-    rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 设备实际方向
+    rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     TSTemplateMatchResult *res = [[TSTemplateMatcher shared] findImageAtPath:@(path)
                                                                     accuracy:accuracy
                                                                         rect:rect];
     if (!res) { lua_pushnil(L); return 1; }
-    lua_pushnumber(L, res.center.x);
-    lua_pushnumber(L, res.center.y);
+    CGPoint pt = tsBufferToScriptPoint(res.center);   // buffer坐标 -> 脚本坐标系
+    lua_pushnumber(L, pt.x);
+    lua_pushnumber(L, pt.y);
     return 2;
 }
 
@@ -570,7 +584,7 @@ static int l_touch_tap(lua_State *L) {
     CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 设备实际方向
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     [touch tapAtPoint:CGPointMake(sp.x / sc, sp.y / sc)
              duration:dur
              pressure:pressure radius:radius];
@@ -589,7 +603,7 @@ static int l_touch_down(lua_State *L) {
     CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 设备实际方向
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     [[TSHIDEventTouch shared] touchDownAtPoint:CGPointMake(sp.x / sc, sp.y / sc) index:index
                                       pressure:pressure radius:radius];
     return 0;
@@ -602,7 +616,7 @@ static int l_touch_move(lua_State *L) {
     CGFloat pressure = (CGFloat)luaL_optnumber(L, 4, 1.0);
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
-    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 设备实际方向
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     [[TSHIDEventTouch shared] touchMoveAtPoint:CGPointMake(sp.x / sc, sp.y / sc) index:index
                                       pressure:pressure radius:radius];
     return 0;
@@ -613,7 +627,7 @@ static int l_touch_up(lua_State *L) {
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
     CGFloat sc = touchScale();
-    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 设备实际方向
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     [[TSHIDEventTouch shared] touchUpAtPoint:CGPointMake(sp.x / sc, sp.y / sc) index:index];
     return 0;
 }
@@ -628,7 +642,7 @@ static int l_touch_swipe(lua_State *L) {
     CGFloat pressure = (CGFloat)luaL_optnumber(L, 7, 1.0);
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 8, 0);
     CGFloat sc = touchScale();
-    CGPoint sp1 = tsScriptToActualPoint(CGPointMake(x1, y1));   // 脚本坐标系 -> 设备实际方向
+    CGPoint sp1 = tsScriptToActualPoint(CGPointMake(x1, y1));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     CGPoint sp2 = tsScriptToActualPoint(CGPointMake(x2, y2));
     [[TSHIDEventTouch shared] swipeFromPoint:CGPointMake(sp1.x / sc, sp1.y / sc)
                                      toPoint:CGPointMake(sp2.x / sc, sp2.y / sc)
@@ -647,7 +661,7 @@ static int l_touch_stroke(lua_State *L) {
     if (n < 2 || (n % 2) != 0) { luaL_error(L, "stroke 点表长度必须是偶数 (x1,y1,x2,y2,...)"); return 0; }
 
     int count = n / 2;
-    // 读取所有点（Lua 层为物理像素，先转设备实际方向，再统一除以 scale 转逻辑点）
+    // 读取所有点（Lua 层为物理像素，先转屏幕物理方向，再统一除以 scale 转逻辑点）
     CGFloat sc = touchScale();
     CGFloat pts[256 * 2];
     if (count > 256) count = 256;
@@ -810,8 +824,8 @@ static int l_screen_findText(lua_State *L) {
     if (!img) { lua_pushnil(L); return 1; }
     TSOCRResult *res = [[TSOCREngine shared] findText:@(text) inImage:img];
     if (!res) { lua_pushnil(L); return 1; }
-    // 截屏是设备实际方向, OCR 中心是图像像素(物理像素) -> 旋转回脚本坐标系 (与 screen.init 一致)
-    CGPoint c = tsTransformPoint(res.center, tsCurrentOrientation(), s_scriptOrientation, tsPortraitPixelSize());
+    // 截屏缓冲是竖屏物理方向, OCR 中心是图像像素(物理像素) -> 旋转回脚本坐标系 (与 screen.init 一致)
+    CGPoint c = tsBufferToScriptPoint(res.center);
     lua_pushnumber(L, c.x);
     lua_pushnumber(L, c.y);
     return 2;
