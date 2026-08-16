@@ -70,6 +70,22 @@ static NSString * const kSenderIDBootTimeDefaultsKey = @"TSHIDSenderIDBootTime";
 // senderID 获取成功通知（userInfo 带 senderID），供 Lua 桥接层输出可见日志
 NSString * const TSHIDSenderIDDidChangeNotification = @"TSHIDSenderIDDidChangeNotification";
 
+// ---------- 类扩展（必须置于 C 回调之前） ----------
+// 注意: TSHIDSenderIDCallback 等 C 静态回调会调用 [self _xxx] 私有方法，
+// 编译器按源码顺序处理，若类扩展声明放在回调之后会报
+// "no visible @interface ... declares the selector"（Release 下为硬错误）。
+@interface TSHIDEventTouch ()
+@property (nonatomic, assign) IOHIDEventSystemClientRef client;          // 事件投递 client
+@property (nonatomic, assign) IOHIDEventSystemClientRef senderIDClient;  // senderID 监听 client
+// 当前仍处于按下状态的手指 index 集合，及每个手指的最后位置。
+// 用于 releaseAllTouches 在脚本停止时补发 touchUp，避免幽灵手指。
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *pressedIndexes;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *lastPoints;
+- (void)_setupClient;
+- (void)_setupSenderID;
+- (void)_releaseSenderIDClient;
+@end
+
 // ---------- 私有函数声明 (IOKit 私有/未公开 C 接口) ----------
 extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
 extern void IOHIDEventSystemClientScheduleWithRunLoop(IOHIDEventSystemClientRef client, CFRunLoopRef runLoop, CFStringRef mode);
@@ -268,18 +284,6 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 }
 
 // ---------- 实现 ----------
-
-@interface TSHIDEventTouch ()
-@property (nonatomic, assign) IOHIDEventSystemClientRef client;          // 事件投递 client
-@property (nonatomic, assign) IOHIDEventSystemClientRef senderIDClient;  // senderID 监听 client
-// 当前仍处于按下状态的手指 index 集合，及每个手指的最后位置。
-// 用于 releaseAllTouches 在脚本停止时补发 touchUp，避免幽灵手指。
-@property (nonatomic, strong) NSMutableSet<NSNumber *> *pressedIndexes;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *lastPoints;
-- (void)_setupClient;
-- (void)_setupSenderID;
-- (void)_releaseSenderIDClient;
-@end
 
 @implementation TSHIDEventTouch
 
