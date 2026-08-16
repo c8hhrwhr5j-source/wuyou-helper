@@ -19,10 +19,10 @@ function main()
             log("找到公告关闭按钮点击")
         end
 
-        if getColor(888, 524) == 0xF78210 then
-            click(206, 266)
+        if getColor(586, 959) == 0xB52C29 then
+            click(586, 959)
             sleep(1000)
-            log("找到游戏开始点击")
+            log("找到公告关闭按钮点击1")
         end
     end
 end
@@ -49,6 +49,5 @@ function init(n)
     screen.init(n)   -- 脚本坐标系 0 = home 在下，1 = home 在右，2 = home 在左
 end
 
-init(1) -- HOME 在右
 
 main()
