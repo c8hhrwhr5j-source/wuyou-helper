@@ -1477,9 +1477,8 @@ static void lua_register_all(lua_State *L) {
     // 脚本结束, 关闭音量键控制面板, 避免平时按音量键误弹菜单
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:NO];
     // 停止音量键轮询
-    TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
-    [vm stop];
-    vm.onVolumeKey = nil;
+    [[TSVolumeKeyMonitor shared] stop];
+    [TSVolumeKeyMonitor shared].onVolumeKey = nil;
     lua_log(@"[Lua] 脚本执行结束");
 }
 
