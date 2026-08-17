@@ -27,7 +27,12 @@
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
 #include <mach/vm_map.h>
-#import <Security/Security.h>
+// SecTask 是 iOS 私有 API (无公共头文件), 但符号从 Security.framework 导出, 运行时可用。
+// 与 mach_vm_* 同理手动声明原型即可。用于查询 App 实际生效的 entitlements,
+// 反映内核真正授予的权限 (与签名数据无关)。
+typedef struct __SecTask *SecTaskRef;
+extern SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error);
 
 // csops: 查询进程 CodeDirectory flags (如 CS_PLATFORM_BINARY), 判断进程是否为 platform 进程。
 // iOS 15+ task_for_pid 对 platform 目标(SpringBoard)要求调用者是 platform 进程,
