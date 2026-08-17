@@ -22,6 +22,18 @@ static NSString *const kHUDBundleIdentifier = @"com.trollautotouch.HUDServices";
 static NSString *const kHUDCenterName = @"com.trollautotouch.HUDMessaging";
 static NSString *const kAlertRequestName = @"sysAlertRequest:";
 
+// 运行时获取 CPDistributedMessagingCenter 类 (来自私有框架 AppSupport)。
+// 主 App 未开启 -Wl,-undefined,dynamic_lookup, 直接引用类会产生链接错误,
+// 因此必须通过 NSClassFromString 在运行时查找, 编译期不产生类符号引用。
+static id HUDMessagingCenter(void) {
+    Class cls = NSClassFromString(@"CPDistributedMessagingCenter");
+    if (!cls) {
+        NSLog(@"[TSHUDService] 未找到 CPDistributedMessagingCenter 类");
+        return nil;
+    }
+    return [cls centerNamed:kHUDCenterName];
+}
+
 @interface TSHUDService ()
 - (BOOL)_installWithMobileInstallation:(NSString *)appPath;
 - (NSDictionary *)_sendRequest:(NSDictionary *)userInfo timeout:(NSTimeInterval)timeout;
@@ -172,9 +184,10 @@ static NSString *const kAlertRequestName = @"sysAlertRequest:";
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @try {
-            CPDistributedMessagingCenter *center =
-                [CPDistributedMessagingCenter centerNamed:kHUDCenterName];
-            reply = [center sendMessageAndReceiveReplyName:kAlertRequestName userInfo:userInfo];
+            id center = HUDMessagingCenter();
+            if (center) {
+                reply = [center sendMessageAndReceiveReplyName:kAlertRequestName userInfo:userInfo];
+            }
         } @catch (NSException *exception) {
             NSLog(@"[TSHUDService] 发送弹窗请求异常: %@", exception);
         }
