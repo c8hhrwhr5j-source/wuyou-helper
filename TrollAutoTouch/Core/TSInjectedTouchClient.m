@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sysctl.h>
@@ -424,14 +425,16 @@ extern char **environ;
 
     // 重签 opainject: 恢复 no-sandbox + task_for_pid-allow + system-task-ports 等,
     // 否则被 app spawn 后继承沙箱, task_for_pid(SpringBoard) 被拦截。
-    if (![self _resignBinary:injectorPath withEntitlements:opainjectEnt ldid:ldidPath log:resignLog]) {
+    // --platform-apply: 恢复 CS_PLATFORM_BINARY (TrollStore 重签时可能剥离),
+    // 保证 opainject 以 platform 进程身份 task_for_pid(SpringBoard) 拿到有效 task port。
+    if (![self _resignBinary:injectorPath withEntitlements:opainjectEnt ldid:ldidPath log:resignLog platformApply:YES]) {
         NSLog(@"[TSInjectedTouch] opainject 重签失败");
         _lastErrorStage = @"resign-opainject";
         return NO;
     }
     // 重签 dylib: 确保 AMFI 允许 dlopen (签名有效 + entitlements 完整)。失败不致命。
     if ([fm fileExistsAtPath:injectorEnt]) {
-        if (![self _resignBinary:dylibPath withEntitlements:injectorEnt ldid:ldidPath log:resignLog]) {
+        if (![self _resignBinary:dylibPath withEntitlements:injectorEnt ldid:ldidPath log:resignLog platformApply:NO]) {
             NSLog(@"[TSInjectedTouch] dylib 重签失败 (继续, dlopen 仍可能成功)");
         }
     }
@@ -442,15 +445,24 @@ extern char **environ;
 - (BOOL)_resignBinary:(NSString *)binaryPath
        withEntitlements:(NSString *)entPath
                   ldid:(NSString *)ldidPath
-                   log:(NSString *)logPath {
-    // ldid -S<entitlements> <binary>  (无空格: -S 紧跟 entitlements 文件路径)
+                   log:(NSString *)logPath
+          platformApply:(BOOL)platformApply {
+    // ldid -S<entitlements> [--platform-apply] <binary>
+    //  (无空格: -S 紧跟 entitlements 文件路径)
+    // --platform-apply: 给 CodeDirectory 打 CS_PLATFORM_BINARY, 使目标成为 platform 进程。
+    // 仅 opainject 需要 (被 app spawn 后需要 platform 身份才能 task_for_pid(SpringBoard));
+    // dylib 保持 platform-application entitlement 即可, 无需打 CS_PLATFORM_BINARY。
     NSString *entFlag = [NSString stringWithFormat:@"-S%@", entPath];
-    const char *args[] = {
-        ldidPath.UTF8String,
-        entFlag.UTF8String,
-        binaryPath.UTF8String,
-        NULL
-    };
+    NSMutableArray<NSString *> *argList = [NSMutableArray array];
+    [argList addObject:ldidPath];
+    [argList addObject:entFlag];
+    if (platformApply) [argList addObject:@"--platform-apply"];
+    [argList addObject:binaryPath];
+    char **args = calloc(argList.count + 1, sizeof(char *));
+    for (NSUInteger i = 0; i < argList.count; i++) {
+        args[i] = (char *)argList[i].UTF8String;
+    }
+    args[argList.count] = NULL;
 
     int logFD = open(logPath.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     posix_spawn_file_actions_t actions;
@@ -464,6 +476,7 @@ extern char **environ;
     pid_t child = -1;
     int rc = posix_spawn(&child, ldidPath.UTF8String, logFD >= 0 ? &actions : NULL, NULL,
                          (char *const *)args, environ);
+    free(args);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
         NSLog(@"[TSInjectedTouch] posix_spawn ldid 失败: %d (%s)", rc, strerror(rc));

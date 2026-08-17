@@ -268,14 +268,14 @@ jobs:
           # 子进程会继承 app 沙箱 → sandbox 拦截 task_for_pid(SpringBoard) → opainject
           # 报 "ERROR: Got invalid task port (-1)" (task_for_pid 返回 dead name)。
           # 原版可用的注入器 luaLib 自带 no-sandbox + debugapplications, 这里对齐该权限集。
-          # 签名用 Apple 原生 codesign (adhoc + entitlements), 重签 universal 二进制不会
-          # 破坏 arm64e slice (此前用 ldid 重签才导致 dyld 崩溃、零输出)。
+          # 签名用 Procursus ldid (v2.1.5-procursus7), 支持 arm64e 重签 + --platform-apply
+          # (codesign 不支持 --platform-apply; xerub 老版 ldid 重签才破坏 arm64e slice)。
           # --platform-apply: 让 CodeDirectory 带上 CS_PLATFORM_BINARY, 使 opainject 进程
           # 成为 platform 进程(与 platform-application 权限配合), 兜底应对 task_for_pid
           # 对 platform 目标进程(SpringBoard)的平台进程检查。
           # 注意: 不能用 ent2.xml(仅 5 个 key, 会剥离 system-task-ports 等关键权限)。
           OP_ENT="$PWD/TrollAutoTouch/Resources/opainject.entitlements.xml"
-          if codesign --force --sign - --platform-apply --entitlements "$OP_ENT" "$APP_DST/bin/opainject" 2>/tmp/op_sign.log; then
+          if ldid -S"$OP_ENT" --platform-apply "$APP_DST/bin/opainject" 2>/tmp/op_sign.log; then
             echo "[OK] opainject 已重签 (no-sandbox + debugapplications + platform-apply)"
           elif codesign --force --sign - --entitlements "$OP_ENT" "$APP_DST/bin/opainject" 2>>/tmp/op_sign.log; then
             echo "[OK] opainject 已重签 (no-sandbox + debugapplications, 无 platform-apply)"
@@ -336,23 +336,24 @@ jobs:
           echo "[*] 二进制签名结构:"
           otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
 
-          # 3) 注入: 优先 Apple 原生 codesign (adhoc 签名 + entitlements)。
-          #    codesign 与 Xcode 产物完全兼容, 不存在 ldid 的 plist parser / DER 格式错位问题;
-          #    且用同一工具验证不会出现"写入 DER 读不出 XML"的假阴性。
-          #    TrollStore 安装时会重新签名, 但保留二进制内已嵌入的 entitlements。
+          # 3) 注入: 优先 Procursus ldid (v2.1.5-procursus7) --platform-apply。
+          #    codesign 不支持 --platform-apply (实测报 unrecognized option), 无法用 codesign
+          #    打 CS_PLATFORM_BINARY; 而 Procursus ldid 支持该选项且能正确重签 arm64e slice
+          #    (xerub 老版 ldid 才破坏 arm64e → EBADEXEC)。chained fixups 已在 project.yml
+          #    禁用 (-Wl,-no_fixup_chains), ldid 可正常解析。
           #    --platform-apply: 给 CodeDirectory 打上 CS_PLATFORM_BINARY, 使 app 进程成为
           #    platform 进程 (与 opainject 对齐)。iOS 15+ 上 task_for_pid 对 platform 目标
           #    (SpringBoard) 有平台进程检查: 非 platform 调用者会拿到 dead/null task port,
           #    后续 mach_vm_allocate 报 MACH_SEND_INVALID_DEST (kr=0x10000003), 直接注入必败。
-          if codesign --force --sign - --platform-apply --entitlements /tmp/ent.xml "$BIN" 2>/tmp/codesign.log; then
-            echo "[OK] codesign 注入成功 (adhoc)"
-            SIGN_TOOL=codesign
-          else
-            echo "[!] codesign 失败, 回退 ldid:"
-            echo "    $(cat /tmp/codesign.log)"
-            ldid -S/tmp/ent.xml "$BIN" 2>&1 || { echo "[x] ldid 注入失败, 停止打包"; exit 1; }
-            echo "[OK] ldid 注入成功"
+          if ldid -S/tmp/ent.xml --platform-apply "$BIN" 2>/tmp/ldid_sign.log; then
+            echo "[OK] ldid 注入成功 (entitlements + platform-apply)"
             SIGN_TOOL=ldid
+          else
+            echo "[!] ldid 失败, 回退 codesign (无 platform-apply):"
+            echo "    $(cat /tmp/ldid_sign.log)"
+            codesign --force --sign - --entitlements /tmp/ent.xml "$BIN" 2>&1 || { echo "[x] codesign 注入失败, 停止打包"; exit 1; }
+            echo "[OK] codesign 注入成功 (adhoc, 无 platform-apply)"
+            SIGN_TOOL=codesign
           fi
 
           echo ""
@@ -384,6 +385,24 @@ jobs:
             exit 1
           fi
           echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container / task_for_pid / system-task-ports 全部就位)"
+
+          echo ""
+          echo "=== 验证 CS_PLATFORM_BINARY (platform 身份) ==="
+          CS_FLAGS=$(codesign -dvvv "$BIN" 2>&1 | grep -i "flags=" | head -1)
+          echo "[*] app CodeDirectory flags: ${CS_FLAGS:-未知}"
+          if echo "$CS_FLAGS" | grep -qi "platform"; then
+            echo "[OK] app 已带 CS_PLATFORM_BINARY, 进程将是 platform 身份"
+          else
+            echo "[!] 警告: 未检测到 CS_PLATFORM_BINARY, task_for_pid(SpringBoard) 可能仍会失败"
+            echo "    (ldid --platform-apply 未生效? 检查上方 ldid 签名输出)"
+          fi
+          OP_FLAGS=$(codesign -dvvv "$APP_DST/bin/opainject" 2>&1 | grep -i "flags=" | head -1)
+          echo "[*] opainject CodeDirectory flags: ${OP_FLAGS:-未知}"
+          if echo "$OP_FLAGS" | grep -qi "platform"; then
+            echo "[OK] opainject 已带 CS_PLATFORM_BINARY"
+          else
+            echo "[!] 警告: opainject 未检测到 CS_PLATFORM_BINARY"
+          fi
 
           echo ""
           echo "=== Info.plist ==="
