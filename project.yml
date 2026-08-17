@@ -129,3 +129,28 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO
         CLANG_ENABLE_MODULES: NO
+  # HUD 隐藏服务: 独立 .app, 由主 App 运行时安装并启动,
+  # 通过 CPDistributedMessagingCenter 接收请求, 在任意前台 app 之上弹全局对话框。
+  # build-ipa.sh 会把构建产物 HUDServices.app 嵌入主 App bundle 的 HUD/ 目录。
+  HUDServices:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: HUDServices
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.HUDServices
+        PRODUCT_NAME: HUDServices
+        INFOPLIST_FILE: HUDServices/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        # 私有符号 (CPDistributedMessagingCenter 等) 运行时由 dyld 动态解析
+        OTHER_LDFLAGS: -framework UIKit -framework Foundation -Wl,-undefined,dynamic_lookup -Wl,-no_fixup_chains
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        CLANG_ENABLE_MODULES: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+    entitlements:
+      path: HUDServices/HUDServices.entitlements

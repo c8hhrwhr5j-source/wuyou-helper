@@ -214,6 +214,48 @@ jobs:
           echo "[*] dylib 架构 (必须同时包含 arm64 与 arm64e):"
           lipo -info "$PWD/build/dylib/TSInjectedTouchService.dylib"
 
+          # ── 编译 HUD 服务 (HUDServices, 全局弹窗用) ──
+          # 独立隐藏 app: 运行时由主 App 安装并启动, 在任意前台 app 之上弹对话框。
+          # 同样用 -target + CONFIGURATION_BUILD_DIR (不能搭配 -derivedDataPath)。
+          if ! xcodebuild -project TrollAutoTouch.xcodeproj \
+            -target HUDServices \
+            -configuration Release \
+            -sdk iphoneos \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS="arm64 arm64e" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ENABLE_CHAINED_FIXUPS=NO \
+            CONFIGURATION_BUILD_DIR="$PWD/build/hud" \
+            build > /tmp/hud_build.log 2>&1; then
+            echo "[x] HUD 服务编译失败，完整日志:"
+            tail -80 /tmp/hud_build.log
+            {
+              echo "## HUDServices 编译失败详情"
+              echo ""
+              echo '```'
+              grep -nE "error:|undefined|ld: |clang:|file not found" /tmp/hud_build.log | tail -60
+              echo ""
+              echo "--- 日志尾部 ---"
+              tail -100 /tmp/hud_build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            {
+              git config user.name "ci-bot"
+              git config user.email "ci-bot@users.noreply.github.com"
+              cp /tmp/hud_build.log ./ci-error.log
+              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
+              git add -f ci-error.log
+              git commit -m "ci: save hud build log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+              git push origin ci-debug --force
+            } >/dev/null 2>&1 && echo "[i] HUD 日志已推送到 ci-debug 分支" || echo "[i] HUD 日志推送失败(忽略)"
+            exit 1
+          fi
+          tail -3 /tmp/hud_build.log
+          echo "[OK] HUDServices.app 编译成功"
+          lipo -info "$PWD/build/hud/HUDServices.app/HUDServices" 2>/dev/null || true
+
       - name: Package IPA
         run: |
           set -e
@@ -299,6 +341,43 @@ jobs:
           cp "$PWD/TrollAutoTouch/Resources/injector.entitlements.xml" "$APP_DST/bin/injector.entitlements.xml" 2>/dev/null || true
           echo "[OK] bin/ 内容:"
           ls -la "$APP_DST/bin"
+
+          echo ""
+          echo "=== HUD 服务 (全局弹窗) ==="
+          # 独立隐藏 app: 随主包分发到 HUD/HUDServices.app, 运行时由主 App
+          # 复制出来并用 MobileInstallation 安装, 然后通过 CPDistributedMessagingCenter
+          # 请求它在任意前台 app 之上弹系统对话框 (sys.alert / sys.alertButtons 全局版)。
+          HUD_SRC="$PWD/build/hud/HUDServices.app"
+          HUD_DST="$APP_DST/HUD/HUDServices.app"
+          HUD_ENT="$PWD/HUDServices/HUDServices.entitlements"
+          if [ ! -d "$HUD_SRC" ]; then
+            echo "[x] 未找到 HUDServices.app ($HUD_SRC), 全局弹窗不可用"
+            exit 1
+          fi
+          rm -rf "$APP_DST/HUD"
+          mkdir -p "$APP_DST/HUD"
+          cp -R "$HUD_SRC" "$HUD_DST"
+          HUD_BIN="$HUD_DST/HUDServices"
+          echo "[*] HUD 二进制: $HUD_BIN"
+          lipo -info "$HUD_BIN" || true
+          # 注入 HUD entitlements: platform-application + no-sandbox + 前台激活权限,
+          # 使 HUD 被 MobileInstallation 安装后拥有激活自己/交还前台的权限。
+          if [ -f "$HUD_ENT" ] && ldid -S"$HUD_ENT" --platform-apply "$HUD_BIN" 2>/tmp/hud_sign.log; then
+            echo "[OK] HUD 已注入 entitlements + platform-apply"
+          elif ldid -S"$HUD_ENT" "$HUD_BIN" 2>/tmp/hud_sign.log; then
+            echo "[OK] HUD 已注入 entitlements"
+          else
+            echo "[!] HUD entitlements 注入失败, 全局弹窗可能不可用:"
+            echo "    $(cat /tmp/hud_sign.log)"
+          fi
+          HUD_ENT_EXTRACTED=$(ldid -e "$HUD_BIN" 2>/dev/null || true)
+          if echo "$HUD_ENT_EXTRACTED" | grep -q "platform-application"; then
+            echo "[OK] HUD entitlements 验证通过 (platform-application)"
+          else
+            echo "[!] 警告: HUD entitlements 验证失败"
+          fi
+          echo "[OK] HUD 服务已嵌入: $HUD_DST"
+          ls -la "$HUD_DST"
 
           echo ""
           echo "=== 架构 ==="
@@ -427,7 +506,7 @@ jobs:
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else

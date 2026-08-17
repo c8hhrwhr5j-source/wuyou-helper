@@ -47,6 +47,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "../Common/TSPaths.h"
 #import "../Core/TSInjectedTouchClient.h"
 #import "../Core/TSVolumeKeyMonitor.h"
+#import "../Core/TSHUDService.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -786,15 +787,22 @@ static int l_touch_stroke(lua_State *L) {
 static NSString *TSShowBlockingAlert(NSString *title, NSString *message,
                                      NSArray<NSString *> *buttons, NSTimeInterval timeout) {
     if (!title.length) title = @"提示";
-    if (!buttons.count) buttons = @[@"确定"];
 
-    // App 不在前台时 UIAlertController 无法显示(会静默失败), 直接返回 nil 不阻塞脚本,
-    // 避免脚本在游戏/其他 app 前台时因弹窗不可见而永久卡死。
-    // (全局弹窗能力由后续 HUD 隐藏服务提供, 见 HUDServices 方案)
+    // App 不在前台时 UIAlertController 无法显示(会静默失败)。
+    // 此时走 HUD 隐藏服务: 由独立 HUDServices.app 激活到前台, 在任意 app 之上弹全局窗口。
+    // HUD 不可用(未安装/通信失败)时返回 nil, 避免脚本永久卡死。
+    // 注意: 必须把原始 buttons 传给 HUD, HUD 侧根据"空按钮+timeout"区分自动消失/确定按钮;
+    //       这里不能提前替换为空按钮兜底, 否则会破坏该语义。
     if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-        NSLog(@"[TrollAutoTouch] 弹窗被跳过: App 不在前台 (需要 HUD 服务支持全局弹窗)");
-        return nil;
+        NSLog(@"[TrollAutoTouch] App 不在前台, 使用 HUD 服务弹全局窗口");
+        return [[TSHUDService sharedInstance] showAlertWithTitle:title
+                                                         message:message
+                                                         buttons:buttons
+                                                         timeout:timeout];
     }
+
+    // App 内弹窗: 至少需要一个按钮(永久显示时供手动关闭)
+    if (!buttons.count) buttons = @[@"确定"];
 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSString *picked = nil;
