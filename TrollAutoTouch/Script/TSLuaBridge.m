@@ -61,6 +61,9 @@ static volatile BOOL _pauseRequested = NO;
 @interface TSLuaBridge ()
 - (void)_execute:(NSString *)code filePath:(nullable NSString *)path;
 - (void)_handleVolumeKey;
+- (void)_presentInAppVolumeMenu;
+// App 内音量键控制菜单(注入失败兜底), 脚本结束时需自动关闭
+@property (nonatomic, weak) UIAlertController *volumeMenuAlert;
 @end
 
 @implementation TSLuaBridge {
@@ -1422,7 +1425,7 @@ static void lua_register_all(lua_State *L) {
 
     // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
     // 公开 API, 不依赖注入 SpringBoard)。识别到后:
-    //   注入成功 → 通知 dylib 弹控制菜单; 注入失败 → App 内直接暂停/继续兜底。
+    //   注入成功 → 通知 dylib 弹控制菜单; 注入失败 → App 内弹选择菜单兜底。
     TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
     __weak typeof(self) weakSelf = self;
     vm.onVolumeKey = ^{
@@ -1486,12 +1489,19 @@ static void lua_register_all(lua_State *L) {
     // 停止音量键轮询
     [[TSVolumeKeyMonitor shared] stop];
     [TSVolumeKeyMonitor shared].onVolumeKey = nil;
+    // 脚本结束, 自动关闭 App 内音量键菜单(若仍在显示)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.volumeMenuAlert) {
+            [self.volumeMenuAlert dismissViewControllerAnimated:NO completion:nil];
+            self.volumeMenuAlert = nil;
+        }
+    });
     lua_log(@"[Lua] 脚本执行结束");
 }
 
 // 音量键被按下 (TSVolumeKeyMonitor 轮询回调, 任意线程 → 转主线程):
 //   注入成功 → 让 SpringBoard dylib 弹 暂停/继续·停止·取消 菜单;
-//   注入失败 → App 内直接暂停/继续切换 (不依赖注入的兜底, 日志留痕)。
+//   注入失败 → App 内弹同样的选择菜单 (不依赖注入的兜底, 日志留痕)。
 - (void)_handleVolumeKey {
     dispatch_async(dispatch_get_main_queue(), ^{
         // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略,
@@ -1506,14 +1516,60 @@ static void lua_register_all(lua_State *L) {
             // 注入成功: dylib 校验 s_volumeControlEnabled 后弹菜单
             [client presentVolumeControlPanel];
         } else {
-            // 注入失败兜底: App 内直接暂停/继续切换
-            if (_pauseRequested) {
-                [self resume];
-            } else {
-                [self pause];
-            }
+            // 注入失败兜底: App 内弹选择菜单(暂停/继续 · 停止 · 取消),
+            // 不依赖 SpringBoard 注入, 由用户选择决定动作。
+            [self _presentInAppVolumeMenu];
         }
     });
+}
+
+// App 进程内音量键控制菜单(注入失败时的兜底, 不依赖 dylib 注入):
+// 弹原生 UIAlertController, 按钮为 暂停/继续 · 停止 · 取消,
+// 用户点哪个按钮就执行对应动作 (等价于 dylib 菜单的返回值分发)。
+// 注意: 弹窗只能在本 App 前台时显示; 注入成功时仍走 dylib 全局菜单。
+- (void)_presentInAppVolumeMenu {
+    // 防重复弹出: 菜单显示期间忽略再次按键
+    static BOOL s_menuShowing = NO;
+    if (s_menuShowing) return;
+    s_menuShowing = YES;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"TrollAutoTouch"
+                                                                   message:_pauseRequested ? @"脚本已暂停，请选择操作" : @"脚本运行中，请选择操作"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    // 暂停 ↔ 继续 切换按钮, 标题随当前暂停状态变化
+    NSString *toggleTitle = _pauseRequested ? @"继续" : @"暂停";
+    [alert addAction:[UIAlertAction actionWithTitle:toggleTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        s_menuShowing = NO;
+        if (_pauseRequested) {
+            [self resume];
+        } else {
+            [self pause];
+        }
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"停止" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        s_menuShowing = NO;
+        [self stop];
+        lua_log(@"[音量键] 脚本已停止");
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        s_menuShowing = NO;
+    }]];
+
+    // 找到当前可 present 的顶层控制器(主窗口)
+    NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+    UIWindow *keyWindow = nil;
+    for (UIWindow *w in windows) {
+        if (w.isKeyWindow) { keyWindow = w; break; }
+    }
+    if (!keyWindow) keyWindow = windows.firstObject;
+    UIViewController *top = keyWindow.rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    if (top) {
+        self.volumeMenuAlert = alert;
+        [top presentViewController:alert animated:YES completion:nil];
+    } else {
+        s_menuShowing = NO; // 无可用窗口, 放弃弹窗, 允许下次按键重试
+    }
 }
 
 @end
