@@ -1501,7 +1501,7 @@ static void lua_register_all(lua_State *L) {
 
 // 音量键被按下 (TSVolumeKeyMonitor 轮询回调, 任意线程 → 转主线程):
 //   注入成功 → 让 SpringBoard dylib 弹 暂停/继续·停止·取消 菜单;
-//   注入失败 → App 内弹同样的选择菜单 (不依赖注入的兜底, 日志留痕)。
+//   注入失败 → App 前台弹选择菜单, App 后台(游戏等)直接切换 暂停/继续 (不依赖注入的兜底)。
 - (void)_handleVolumeKey {
     dispatch_async(dispatch_get_main_queue(), ^{
         // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略,
@@ -1515,10 +1515,20 @@ static void lua_register_all(lua_State *L) {
         if ([client isConnected]) {
             // 注入成功: dylib 校验 s_volumeControlEnabled 后弹菜单
             [client presentVolumeControlPanel];
-        } else {
-            // 注入失败兜底: App 内弹选择菜单(暂停/继续 · 停止 · 取消),
-            // 不依赖 SpringBoard 注入, 由用户选择决定动作。
+        } else if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+            // 注入失败兜底 (App 前台): 弹选择菜单(暂停/继续 · 停止 · 取消),
+            // 由用户选择决定动作。
             [self _presentInAppVolumeMenu];
+        } else {
+            // 注入失败兜底 (App 后台, 如游戏/其他 app 在前台):
+            // UIAlertController 无法在后台显示, 直接用音量键切换 暂停/继续,
+            // 避免"按了没反应"。停止需回 TrollAutoTouch 弹菜单操作。
+            if (_pauseRequested) {
+                [self resume];
+                lua_log(@"[音量键] 后台模式: 脚本已继续 (停止请回 TrollAutoTouch 弹菜单选择)");
+            } else {
+                [self pause];
+            }
         }
     });
 }
