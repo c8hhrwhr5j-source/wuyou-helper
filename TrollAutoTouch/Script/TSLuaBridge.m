@@ -37,6 +37,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "TSScreenCapture.h"
 #import "TSColorFinder.h"
 #import "TSHIDEventTouch.h"
+#import "TSAudioKeepAlive.h"
 #import "TSAppManager.h"
 #import "TSKeyboardInjector.h"
 #import "TSTemplateMatcher.h"
@@ -1423,6 +1424,10 @@ static void lua_register_all(lua_State *L) {
     lua_log([NSString stringWithFormat:@"[诊断] 构建 %@ (build %@) | 注入状态: %@",
              ver, build, [[TSInjectedTouchClient shared] statusDescription]]);
 
+    // 后台保活: 用户切到游戏/其他 app 时 App 处于后台, iOS 会挂起后台进程,
+    // 导致音量键轮询与 IOHID 直发触摸停摆。用静音音频播放阻止挂起
+    // (需 Info.plist UIBackgroundModes=audio, 见 project.yml)。
+    [[TSAudioKeepAlive shared] start];
     // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
     // 公开 API, 不依赖注入 SpringBoard)。识别到后:
     //   注入成功 → 通知 dylib 弹控制菜单; 注入失败 → App 内弹选择菜单兜底。
@@ -1489,6 +1494,8 @@ static void lua_register_all(lua_State *L) {
     // 停止音量键轮询
     [[TSVolumeKeyMonitor shared] stop];
     [TSVolumeKeyMonitor shared].onVolumeKey = nil;
+    // 脚本结束, 停止后台静音保活 (App 回到正常后台生命周期)
+    [[TSAudioKeepAlive shared] stop];
     // 脚本结束, 自动关闭 App 内音量键菜单(若仍在显示)
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.volumeMenuAlert) {
