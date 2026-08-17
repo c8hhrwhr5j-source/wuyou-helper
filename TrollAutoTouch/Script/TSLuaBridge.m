@@ -1413,6 +1413,13 @@ static void lua_register_all(lua_State *L) {
     // SpringBoard 侧注入的 dylib 会弹出 暂停/继续·停止·取消 菜单。
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
+    // 诊断信息: 构建版本 + 注入状态。每次跑脚本日志首行即确认包版本与注入链路,
+    // 避免"装了旧包还在看旧日志"的误判 (旧包此处无输出, 注入失败也无详细原因)。
+    NSString *ver   = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
+    NSString *build = [NSBundle mainBundle].infoDictionary[@"CFBundleVersion"] ?: @"?";
+    lua_log([NSString stringWithFormat:@"[诊断] 构建 %@ (build %@) | 注入状态: %@",
+             ver, build, [[TSInjectedTouchClient shared] statusDescription]]);
+
     // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
     // 公开 API, 不依赖注入 SpringBoard)。识别到后:
     //   注入成功 → 通知 dylib 弹控制菜单; 注入失败 → App 内直接暂停/继续兜底。
