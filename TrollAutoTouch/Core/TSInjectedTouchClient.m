@@ -6,6 +6,7 @@
 
 #import "TSInjectedTouchClient.h"
 #import "TSInjectedTouchService.h"
+#import "../Common/TSLogStore.h"
 
 #include <spawn.h>
 #include <sys/socket.h>
@@ -80,6 +81,7 @@ extern char **environ;
     NSString *_directErrorStage;
     int _directErrorErrno;
 }
+- (void)_appendLog:(NSString *)msg;
 @end
 
 @implementation TSInjectedTouchClient
@@ -788,16 +790,32 @@ extern char **environ;
 
 // 启用/禁用音量键控制面板: 脚本运行期间由 TSLuaBridge 自动打开/关闭。
 - (void)setVolumeKeyControlEnabled:(BOOL)enabled {
-    if (![self ensureInjected]) return;
+    NSString *logMsg;
+    if (![self ensureInjected]) {
+        logMsg = @"音量键控制面板: 注入失败, 命令未发送";
+        [self _appendLog:logMsg];
+        return;
+    }
     uint8_t cmd[3] = { TS_TOUCH_MAGIC, TS_CTRL_FLAG,
                        (uint8_t)(enabled ? TS_CTRL_VOLUME_ON : TS_CTRL_VOLUME_OFF) };
     ssize_t n = send(_socketFD, cmd, sizeof(cmd), 0);
     if (n < 0) {
         close(_socketFD);
         _socketFD = -1;
+        logMsg = @"音量键控制面板: 命令发送失败, socket 已断开";
     } else {
-        NSLog(@"[TSInjectedTouch] 音量键控制面板%@", enabled ? @"已启用" : @"已禁用");
+        logMsg = [NSString stringWithFormat:@"音量键控制面板%@ (已通知 SpringBoard)",
+                  enabled ? @"已启用" : @"已禁用"];
+        NSLog(@"[TSInjectedTouch] %@", logMsg);
     }
+    [self _appendLog:logMsg];
+}
+
+// 把注入服务状态写入 app 全局日志 (设置→运行日志 可见), 便于定位问题
+- (void)_appendLog:(NSString *)msg {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[TSLogStore shared] append:msg];
+    });
 }
 
 @end
