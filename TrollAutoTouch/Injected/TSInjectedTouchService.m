@@ -82,8 +82,10 @@ extern void IOHIDEventSystemClientUnscheduleWithRunLoop(IOHIDEventSystemClientRe
 extern int IOHIDEventSystemClientRegisterEventCallback(IOHIDEventSystemClientRef client, void *callback, void *target, void *refcon);
 extern int IOHIDEventSystemClientUnregisterEventCallback(IOHIDEventSystemClientRef client);
 extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
-// 按键(含音量键)事件是 IOHIDEventTypeKeyboard, 需要读取事件类型与按键字段
+// 按键(含音量键)事件是 IOHIDEventTypeKeyboard, 需要读取事件类型与按键字段。
+// IOHIDEventGetType 是公开 API; IOHIDEventGetIntegerValue 是私有 API, 需手动声明。
 extern uint32_t IOHIDEventGetType(IOHIDEventRef event);
+extern uint64_t IOHIDEventGetIntegerValue(IOHIDEventRef event, uint32_t field);
 
 // ZXTouch 兜底 senderID (iPhone 触摸屏标准值, 动态获取前的 fallback)
 #define TS_SENDER_ID_FALLBACK 0x8000000800ULL
