@@ -792,7 +792,10 @@ extern char **environ;
 - (void)setVolumeKeyControlEnabled:(BOOL)enabled {
     NSString *logMsg;
     if (![self ensureInjected]) {
-        logMsg = @"音量键控制面板: 注入失败, 命令未发送";
+        // statusDescription 内含失败阶段 + 错误码 (如 task_for_pid kr=... / dlopen-NULL / opainject 日志尾),
+        // 写进全局日志才能定位注入失败的具体原因。
+        logMsg = [NSString stringWithFormat:@"音量键控制面板: 注入失败, 命令未发送 (%@)",
+                  [self statusDescription]];
         [self _appendLog:logMsg];
         return;
     }
@@ -809,6 +812,24 @@ extern char **environ;
         NSLog(@"[TSInjectedTouch] %@", logMsg);
     }
     [self _appendLog:logMsg];
+}
+
+// 通知 dylib 弹出音量键控制面板 (音量键已由 app 进程内 TSVolumeKeyMonitor 识别)。
+// 调用时机: 音量键被按下。dylib 侧校验 s_volumeControlEnabled 后才真正弹窗。
+- (void)presentVolumeControlPanel {
+    if (![self ensureInjected]) {
+        NSString *msg = [NSString stringWithFormat:@"音量键控制面板: 注入失败, 无法弹菜单 (%@)",
+                         [self statusDescription]];
+        [self _appendLog:msg];
+        return;
+    }
+    uint8_t cmd[3] = { TS_TOUCH_MAGIC, TS_CTRL_FLAG, TS_CTRL_VOLUME_KEY };
+    ssize_t n = send(_socketFD, cmd, sizeof(cmd), 0);
+    if (n < 0) {
+        close(_socketFD);
+        _socketFD = -1;
+        [self _appendLog:@"音量键控制面板: 弹菜单命令发送失败, socket 已断开"];
+    }
 }
 
 // 把注入服务状态写入 app 全局日志 (设置→运行日志 可见), 便于定位问题

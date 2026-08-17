@@ -140,21 +140,9 @@ static void TSSenderIDCallback(void *target, void *refcon, IOHIDServiceRef servi
         s_senderID = sid;
         TSLog(@"已获取真实 senderID: 0x%llX", (unsigned long long)sid);
     }
-
-    // ── 音量键物理按下监听 (HID 层, 不依赖任何通知转发) ──────────────
-    // SpringBoard 自身就是通过 IOHIDEventSystemClient 接收音量键/Home/锁屏键的,
-    // 本进程内独立的 client 同样能收到 keyboard 类型事件。
-    // Consumer Page(0x0C) 上 Volume Up=0xE9, Volume Down=0xEA。
-    uint32_t etype = IOHIDEventGetType(event);
-    if (etype == 3) { // IOHIDEventTypeKeyboard
-        uint64_t usagePage = IOHIDEventGetIntegerValue(event, 0x20001); // kIOHIDEventFieldKeyboardUsagePage
-        uint64_t usage    = IOHIDEventGetIntegerValue(event, 0x20002); // kIOHIDEventFieldKeyboardUsage
-        if (usagePage == 0x0C && (usage == 0xE9 || usage == 0xEA)) {
-            uint64_t down = IOHIDEventGetIntegerValue(event, 0x20004); // kIOHIDEventFieldKeyboardDown
-            TSLog(@"HID 音量键事件: usage=0x%llX down=%llu", usage, down);
-            if (down != 0) TSVolumeKeyDidFire();
-        }
-    }
+    // 注意: 音量键识别已移至 app 进程内 (TSVolumeKeyMonitor 轮询 AVAudioSession.outputVolume,
+    // 不依赖注入/私有 API)。dylib 只负责收到 TS_CTRL_VOLUME_KEY 命令后弹控制面板,
+    // 避免两条通道重复触发弹窗。
 }
 
 // 注册监听: 必须挂在 SpringBoard 主 RunLoop (SpringBoard 主线程一直在跑)。
@@ -278,6 +266,10 @@ static void TSHandleClient(int fd) {
                 s_volumeControlEnabled = NO;
                 s_scriptPaused = NO;
                 TSLog(@"音量键控制面板已禁用");
+            } else if (cmd == TS_CTRL_VOLUME_KEY) {
+                // 音量键由 app 进程内 TSVolumeKeyMonitor 识别, 这里只负责弹菜单。
+                TSLog(@"收到音量键命令, 弹控制面板 (启用=%d)", s_volumeControlEnabled);
+                TSVolumeKeyDidFire();
             } else {
                 TSLog(@"未知控制命令: %d", cmd);
             }
@@ -392,35 +384,13 @@ static void TSPresentControlAlert(void) {
 }
 
 // 音量键触发回调: 仅脚本运行期间(音量键控制已启用)响应, 任意线程 → 主线程弹面板。
+// 由 app 进程内的 TSVolumeKeyMonitor 识别到音量键后发 TS_CTRL_VOLUME_KEY 命令触发。
 static void TSVolumeKeyDidFire(void) {
     TSLog(@"音量键触发, 控制面板启用状态=%d", s_volumeControlEnabled);
     if (!s_volumeControlEnabled) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         TSPresentControlAlert();
     });
-}
-
-// 注册音量键监听:
-//   主要手段: HID 层 IOHIDEventSystemClient 回调直接识别物理按键按下 (见 TSSenderIDCallback),
-//   不依赖任何系统通知转发, 最可靠。
-//   辅助手段: 以下两个私有 NSNotification 也一并监听, 作为不同 iOS 版本上的兜底:
-//   1. AVSystemController_SystemVolumeDidChangeNotification: 音量变化广播 (mediaremoted 转发)。
-//   2. AVSystemController_VolumeButtonDownNotification: iOS 16+ 的按键按下通知。
-//   注意: 这两个通知需要进程内有活跃的 Audio/MediaRemote 连接才会被转发, SpringBoard
-//   进程内不一定收得到, 所以它们只是辅助; 事件是否收到会在 /tmp/ts_touch.log 留痕。
-static void TSStartVolumeKeyMonitor(void) {
-    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-    [nc addObserverForName:@"AVSystemController_SystemVolumeDidChangeNotification"
-                    object:nil queue:nil usingBlock:^(NSNotification *note) {
-                        TSLog(@"收到通知: AVSystemController_SystemVolumeDidChangeNotification");
-                        TSVolumeKeyDidFire();
-                    }];
-    [nc addObserverForName:@"AVSystemController_VolumeButtonDownNotification"
-                    object:nil queue:nil usingBlock:^(NSNotification *note) {
-                        TSLog(@"收到通知: AVSystemController_VolumeButtonDownNotification");
-                        TSVolumeKeyDidFire();
-                    }];
-    TSLog(@"音量键控制监听已注册 (HID 物理按键 + 通知兜底)");
 }
 
 #pragma mark - dylib 入口
@@ -432,7 +402,6 @@ static void TSInjectedTouchInit(void) {
     [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/ts_touch.log" error:NULL];
     TSLog(@"触摸服务 dylib 已加载到进程: %@", [NSProcessInfo processInfo].processName);
     TSStartSenderIDMonitor();
-    TSStartVolumeKeyMonitor();
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         TSRunServer();
     });

@@ -34,6 +34,7 @@
 #define TS_CTRL_FLAG          0xF0
 #define TS_CTRL_VOLUME_ON     0x01   // 启用音量键控制面板(脚本运行时由 app 打开)
 #define TS_CTRL_VOLUME_OFF    0x02   // 禁用音量键控制面板(脚本结束/停止时关闭)
+#define TS_CTRL_VOLUME_KEY    0x03   // 音量键已被按下 -> 弹出控制面板 (音量键识别在 app 进程内完成)
 
 // ── 控制事件 (dylib -> app) ─────────────────────────────────────────
 // 独立 magic 0x55 区分方向:

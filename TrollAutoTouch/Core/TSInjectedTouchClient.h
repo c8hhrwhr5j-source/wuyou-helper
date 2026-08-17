@@ -36,6 +36,11 @@ typedef void (^TSControlEventHandler)(uint8_t event);
 /// dylib 会弹出 暂停/继续·停止·取消 系统级菜单。
 - (void)setVolumeKeyControlEnabled:(BOOL)enabled;
 
+/// 通知 SpringBoard 侧 dylib 弹出音量键控制面板。
+/// 音量键识别在 app 进程内完成 (TSVolumeKeyMonitor 轮询 outputVolume),
+/// 识别到后调用本方法让 dylib 弹菜单 (注入失败时由 Lua 桥在 app 内直接暂停/继续兜底)。
+- (void)presentVolumeControlPanel;
+
 /// 控制事件回调: 用户在音量键菜单选择 暂停/继续/停止 时触发 (主线程)
 @property (nonatomic, copy, nullable) TSControlEventHandler controlEventHandler;
 

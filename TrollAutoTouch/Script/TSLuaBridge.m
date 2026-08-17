@@ -45,6 +45,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "TSOCREngine.h"
 #import "../Common/TSPaths.h"
 #import "../Core/TSInjectedTouchClient.h"
+#import "../Core/TSVolumeKeyMonitor.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -59,6 +60,7 @@ static volatile BOOL _pauseRequested = NO;
 
 @interface TSLuaBridge ()
 - (void)_execute:(NSString *)code filePath:(nullable NSString *)path;
+- (void)_handleVolumeKey;
 @end
 
 @implementation TSLuaBridge {
@@ -1411,6 +1413,16 @@ static void lua_register_all(lua_State *L) {
     // SpringBoard 侧注入的 dylib 会弹出 暂停/继续·停止·取消 菜单。
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
+    // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
+    // 公开 API, 不依赖注入 SpringBoard)。识别到后:
+    //   注入成功 → 通知 dylib 弹控制菜单; 注入失败 → App 内直接暂停/继续兜底。
+    TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
+    __weak typeof(self) weakSelf = self;
+    vm.onVolumeKey = ^{
+        [weakSelf _handleVolumeKey];
+    };
+    [vm start];
+
     lua_State *L = luaL_newstate();
     if (!L) {
         lua_log(@"[Lua] 创建 Lua 状态失败");
@@ -1464,7 +1476,38 @@ static void lua_register_all(lua_State *L) {
     self.isRunning = NO;
     // 脚本结束, 关闭音量键控制面板, 避免平时按音量键误弹菜单
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:NO];
+    // 停止音量键轮询
+    TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
+    [vm stop];
+    vm.onVolumeKey = nil;
     lua_log(@"[Lua] 脚本执行结束");
+}
+
+// 音量键被按下 (TSVolumeKeyMonitor 轮询回调, 任意线程 → 转主线程):
+//   注入成功 → 让 SpringBoard dylib 弹 暂停/继续·停止·取消 菜单;
+//   注入失败 → App 内直接暂停/继续切换 (不依赖注入的兜底, 日志留痕)。
+- (void)_handleVolumeKey {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略,
+        // 与 dylib 侧 TSPresentControlAlert 的防抖形成双保险。
+        static NSTimeInterval s_lastKeyAt = 0;
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if ((now - s_lastKeyAt) < 0.8) return;
+        s_lastKeyAt = now;
+
+        TSInjectedTouchClient *client = [TSInjectedTouchClient shared];
+        if ([client isConnected]) {
+            // 注入成功: dylib 校验 s_volumeControlEnabled 后弹菜单
+            [client presentVolumeControlPanel];
+        } else {
+            // 注入失败兜底: App 内直接暂停/继续切换
+            if (_pauseRequested) {
+                [self resume];
+            } else {
+                [self pause];
+            }
+        }
+    });
 }
 
 @end
