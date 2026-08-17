@@ -21,11 +21,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sysctl.h>
+#include <sys/utsname.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/thread_act.h>
 #include <mach/arm/thread_status.h>
 #include <mach/vm_map.h>
+#import <Security/Security.h>
+
+// csops: 查询进程 CodeDirectory flags (如 CS_PLATFORM_BINARY), 判断进程是否为 platform 进程。
+// iOS 15+ task_for_pid 对 platform 目标(SpringBoard)要求调用者是 platform 进程,
+// 否则返回 dead/null task port → mach_vm_allocate 报 MACH_SEND_INVALID_DEST。
+// csops 是私有 API 但符号从 libsystem 导出, 与 mach_vm_* 同理运行时可用。
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#define TS_CS_OPS_STATUS 0
+#define TS_CS_PLATFORM_BINARY 0x4000000
 
 // mach_vm_* 不在 iOS 公共头文件中 (mach_vm.h 会 #error "unsupported"),
 // 但函数在共享缓存中导出, 运行时可调用。手动声明原型即可。
@@ -80,6 +90,10 @@ extern char **environ;
     // 直接注入真正失败在哪一步 (task_for_pid / vm_alloc / thread_create / dlopen)。
     NSString *_directErrorStage;
     int _directErrorErrno;
+    // task_for_pid 返回的 task port 值。iOS 15+ 对权限不足的调用者会返回
+    // dead name (0xffffffff MACH_PORT_DEAD) 或空 port 而 kr 仍为 KERN_SUCCESS,
+    // 后续所有 mach_vm_* 都会报 MACH_SEND_INVALID_DEST。记录该值用于诊断。
+    mach_port_t _lastTaskPort;
 }
 - (void)_appendLog:(NSString *)msg;
 @end
@@ -148,8 +162,16 @@ extern char **environ;
                 [stage hasPrefix:@"thread_"] ||
                 [stage hasPrefix:@"find-"] ||
                 [stage hasPrefix:@"dlsym-"]) {
-                return [NSString stringWithFormat:@"注入失败(直接注入 [%@] kr=%d: %s)",
-                        stage, errn, mach_error_string((kern_return_t)errn)];
+                // task port 为 dead name(0xffffffff)/空(0) 时, iOS 15+ 的 task_for_pid
+                // 对权限不足调用者会伪装成功但返回无效 port, 后续 vm_* 全报 MACH_SEND_INVALID_DEST。
+                // 显式标注, 避免用户把无效 port 当成有效签名数据。
+                NSString *portHint = @"";
+                if (_lastTaskPort == 0 || _lastTaskPort == MACH_PORT_DEAD) {
+                    portHint = [NSString stringWithFormat:@" (task port=0x%x 无效, app 未拿到 SpringBoard 的有效 task port: 权限/平台进程身份不足)",
+                                (unsigned int)_lastTaskPort];
+                }
+                return [NSString stringWithFormat:@"注入失败(直接注入 [%@] kr=%d: %s%@)",
+                        stage, errn, mach_error_string((kern_return_t)errn), portHint];
             }
             return [NSString stringWithFormat:@"注入失败(无法注入 SpringBoard, [%@] errno=%d)", stage, errn];
         } else if (stage != nil) {
@@ -186,6 +208,89 @@ extern char **environ;
         return @"已注入但未连接";
     }
     return [NSString stringWithFormat:@"已注入 SpringBoard(pid=%d), socket 已连接", _springBoardPid];
+}
+
+// 注入失败的完整诊断 (写进运行日志, 用户无需看系统日志/Filza 即可定位):
+// 设备型号/iOS/架构 + 进程是否 platform (CS_PLATFORM_BINARY) + 实际生效的
+// entitlements (SecTask, 与签名数据无关, 反映内核真正授予的权限) + opainject 日志尾。
+- (NSString *)_injectionDiagnostics {
+    NSMutableString *s = [NSMutableString string];
+
+    // 设备 + iOS + 架构
+    struct utsname un;
+    NSString *machine = (uname(&un) == 0) ? [NSString stringWithUTF8String:un.machine] : @"?";
+    NSString *iosVer = [[UIDevice currentDevice] systemVersion] ?: @"?";
+    NSString *arch = @"?";
+    if (sizeof(void *) == 8) {
+        uint32_t cputype = 0;
+        size_t sz = sizeof(cputype);
+        int mib[2] = {CTL_HW, HW_MACHINE_ARCH};
+        if (sysctl(mib, 2, NULL, &sz, NULL, 0) == 0) {
+            char buf[64] = {0};
+            if (sysctl(mib, 2, buf, &sz, NULL, 0) == 0) arch = [NSString stringWithUTF8String:buf];
+        }
+    }
+    [s appendFormat:@"设备: %@ | iOS %@ | arch %@\n", machine, iosVer, arch];
+
+    // 进程是否 platform (CS_PLATFORM_BINARY)
+    uint32_t csflags = 0;
+    if (csops(getpid(), TS_CS_OPS_STATUS, &csflags, sizeof(csflags)) == 0) {
+        BOOL plat = (csflags & TS_CS_PLATFORM_BINARY) != 0;
+        [s appendFormat:@"本进程 platform 身份: %@ (csflags=0x%x)\n", plat ? @"是" : @"否", csflags];
+    } else {
+        [s appendFormat:@"本进程 platform 身份: 查询失败(errno=%d)\n", errno];
+    }
+
+    // 实际生效的 entitlements (SecTask 反映内核真正授予的权限)
+    NSArray<NSString *> *keys = @[@"task_for_pid-allow",
+                                  @"com.apple.system-task-ports",
+                                  @"com.apple.system-task-ports.control",
+                                  @"platform-application",
+                                  @"com.apple.private.security.no-sandbox",
+                                  @"com.apple.springboard.debugapplications"];
+    SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+    if (task) {
+        NSMutableArray<NSString *> *on = [NSMutableArray array];
+        NSMutableArray<NSString *> *off = [NSMutableArray array];
+        for (NSString *k in keys) {
+            CFTypeRef v = SecTaskCopyValueForEntitlement(task, (__bridge CFStringRef)k, NULL);
+            if (v) {
+                [on addObject:k];
+                CFRelease(v);
+            } else {
+                [off addObject:k];
+            }
+        }
+        CFRelease(task);
+        [s appendFormat:@"实际生效 entitlements:\n  YES: %@\n  NO : %@\n",
+         [on componentsJoinedByString:@", "],
+         [off componentsJoinedByString:@", "]];
+    } else {
+        [s appendString:@"实际生效 entitlements: SecTask 查询失败\n"];
+    }
+
+    // task port 状态 (直接注入过才有值)
+    [s appendFormat:@"task_for_pid 返回 port: 0x%x%@\n",
+     (unsigned int)_lastTaskPort,
+     (_lastTaskPort == 0) ? @" (=0, 无效)" :
+     (_lastTaskPort == MACH_PORT_DEAD) ? @" (=MACH_PORT_DEAD, 无效)" : @""];
+
+    // opainject.log 尾部 (fallback 失败时最有用的证据)
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *logPath = [docs stringByAppendingPathComponent:@"bin/opainject.log"];
+    NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
+    if (out.length > 0) {
+        NSArray<NSString *> *lines = [out componentsSeparatedByString:@"\n"];
+        NSUInteger from = lines.count > 6 ? lines.count - 6 : 0;
+        NSString *tail = [[[lines subarrayWithRange:NSMakeRange(from, lines.count - from)]
+                           componentsJoinedByString:@"\n"]
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (tail.length > 0) [s appendFormat:@"opainject.log 尾部:\n%@\n", tail];
+    } else {
+        [s appendString:@"opainject.log: (不存在/为空)\n"];
+    }
+
+    return [NSString stringWithString:s];
 }
 
 #pragma mark - SpringBoard pid
@@ -395,6 +500,7 @@ extern char **environ;
         return NO;
     }
     NSLog(@"[TSInjectedTouch] task_for_pid 成功: task=0x%x, pid=%d", task, pid);
+    _lastTaskPort = task;
 
     // 2. 准备 dylib 路径
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -759,6 +865,10 @@ extern char **environ;
 
     NSLog(@"[TSInjectedTouch] 所有注入方式均失败");
     _injectFailed = YES;
+    // 完整诊断写进运行日志: 设备/iOS/架构 + platform 身份 + 实际生效 entitlements
+    // + task port 值 + opainject 日志尾。用户无需系统日志/Filza 即可定位失败根因。
+    NSString *diag = [self _injectionDiagnostics];
+    [self _appendLog:[NSString stringWithFormat:@"[注入诊断]\n%@", diag]];
     return NO;
 }
 

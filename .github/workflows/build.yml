@@ -340,7 +340,11 @@ jobs:
           #    codesign 与 Xcode 产物完全兼容, 不存在 ldid 的 plist parser / DER 格式错位问题;
           #    且用同一工具验证不会出现"写入 DER 读不出 XML"的假阴性。
           #    TrollStore 安装时会重新签名, 但保留二进制内已嵌入的 entitlements。
-          if codesign --force --sign - --entitlements /tmp/ent.xml "$BIN" 2>/tmp/codesign.log; then
+          #    --platform-apply: 给 CodeDirectory 打上 CS_PLATFORM_BINARY, 使 app 进程成为
+          #    platform 进程 (与 opainject 对齐)。iOS 15+ 上 task_for_pid 对 platform 目标
+          #    (SpringBoard) 有平台进程检查: 非 platform 调用者会拿到 dead/null task port,
+          #    后续 mach_vm_allocate 报 MACH_SEND_INVALID_DEST (kr=0x10000003), 直接注入必败。
+          if codesign --force --sign - --platform-apply --entitlements /tmp/ent.xml "$BIN" 2>/tmp/codesign.log; then
             echo "[OK] codesign 注入成功 (adhoc)"
             SIGN_TOOL=codesign
           else
@@ -362,7 +366,7 @@ jobs:
           echo "$EXTRACTED" > /tmp/ent_check.xml
           echo "[*] 注入工具: ${SIGN_TOOL}, 提取 entitlements: $(wc -c < /tmp/ent_check.xml) bytes"
           MISSING=0
-          for KEY in "com.apple.private.security.no-sandbox" "platform-application" "com.apple.private.tcc.allow" "keychain-access-groups" "com.apple.private.security.container-manager"; do
+          for KEY in "com.apple.private.security.no-sandbox" "platform-application" "com.apple.private.tcc.allow" "keychain-access-groups" "com.apple.private.security.container-manager" "task_for_pid-allow" "com.apple.system-task-ports"; do
             if grep -q "$KEY" /tmp/ent_check.xml; then
               echo "[OK] $KEY"
             else
@@ -379,7 +383,7 @@ jobs:
             codesign --verify --deep --strict "$APP_DST" 2>&1 || true
             exit 1
           fi
-          echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container 全部就位)"
+          echo "[OK] entitlements 注入验证通过 (no-sandbox / platform-application / TCC / keychain / container / task_for_pid / system-task-ports 全部就位)"
 
           echo ""
           echo "=== Info.plist ==="
