@@ -44,22 +44,22 @@ static BOOL _luaPausedByButton = NO;
 
     // 音量键控制面板事件: 在任意 app(游戏)前台按音量键,
     // SpringBoard 侧注入的 dylib 弹菜单, 用户选择后经 TCP 回调到这里。
-    __weak typeof(self) ws = self;
+    __weak typeof(self) ws2 = self;
     [TSInjectedTouchClient shared].controlEventHandler = ^(uint8_t event) {
         if (event == TS_EVENT_PAUSE) {
             _luaPausedByButton = YES;
             [[TSLuaBridge shared] pause];
-            [ws _log:@"[音量键] 脚本已暂停"];
+            [ws2 _log:@"[音量键] 脚本已暂停"];
         } else if (event == TS_EVENT_RESUME) {
             _luaPausedByButton = NO;
             [[TSLuaBridge shared] resume];
-            [ws _log:@"[音量键] 脚本已继续"];
+            [ws2 _log:@"[音量键] 脚本已继续"];
         } else if (event == TS_EVENT_STOP) {
             _luaPausedByButton = NO;
             [[TSLuaBridge shared] stop];
             [[TSScriptEngine shared] stop];
             [[TSHUDWindow shared] setScriptRunning:NO];
-            [ws _log:@"[音量键] 脚本已停止"];
+            [ws2 _log:@"[音量键] 脚本已停止"];
         }
     };
 
