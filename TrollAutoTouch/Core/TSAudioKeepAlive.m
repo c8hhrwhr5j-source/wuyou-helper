@@ -44,13 +44,16 @@
         _engine = [AVAudioEngine new];
         _player = [AVAudioPlayerNode new];
         [_engine attachNode:_player];
-        AVAudioFormat *fmt = [[AVAudioFormat alloc] initWithStandardFormatWithSampleRate:44100 channels:1];
+        AVAudioFormat *fmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                              sampleRate:44100
+                                                                channels:1
+                                                             interleaved:NO];
         [_engine connect:_player to:_engine.mainMixerNode format:fmt];
 
         // 0.1 秒静音 buffer, 循环播放 (不产生声音, 只维持后台音频运行状态)
         AVAudioPCMBuffer *buf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:fmt frameCapacity:4410];
         buf.frameLength = 4410;
-        memset(buf.floatChannelData[0], 0, 4410 * sizeof(float));
+        memset((void *)buf.floatChannelData[0], 0, 4410 * sizeof(float));
         [_player scheduleBuffer:buf atTime:nil options:AVAudioPlayerNodeBufferLoops completionHandler:nil];
 
         if (![_engine startAndReturnError:&err]) {
