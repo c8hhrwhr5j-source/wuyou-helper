@@ -22,6 +22,8 @@
 #import "TSToolExecutor.h"
 #import "TSLuaBridge.h"
 #import "TSPaths.h"
+#import "Core/TSInjectedTouchClient.h"
+#import "Injected/TSInjectedTouchService.h"
 
 @interface ViewController () <TSLogDelegate, TSWebControlDelegate>
 @property (nonatomic, strong) UITextView *logView;
@@ -31,11 +33,35 @@
 
 @implementation ViewController
 
+// "暂停 Lua"按钮的暂停/继续状态 (音量键面板也会同步更新它)
+static BOOL _luaPausedByButton = NO;
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.08 blue:0.12 alpha:1.0];
     [self _buildUI];
     [self _log:@"TrollAutoTouch v2.0 已启动。"];
+
+    // 音量键控制面板事件: 在任意 app(游戏)前台按音量键,
+    // SpringBoard 侧注入的 dylib 弹菜单, 用户选择后经 TCP 回调到这里。
+    __weak typeof(self) ws = self;
+    [TSInjectedTouchClient shared].controlEventHandler = ^(uint8_t event) {
+        if (event == TS_EVENT_PAUSE) {
+            _luaPausedByButton = YES;
+            [[TSLuaBridge shared] pause];
+            [ws _log:@"[音量键] 脚本已暂停"];
+        } else if (event == TS_EVENT_RESUME) {
+            _luaPausedByButton = NO;
+            [[TSLuaBridge shared] resume];
+            [ws _log:@"[音量键] 脚本已继续"];
+        } else if (event == TS_EVENT_STOP) {
+            _luaPausedByButton = NO;
+            [[TSLuaBridge shared] stop];
+            [[TSScriptEngine shared] stop];
+            [[TSHUDWindow shared] setScriptRunning:NO];
+            [ws _log:@"[音量键] 脚本已停止"];
+        }
+    };
 
     // 设置 HUD 操作回调
     __weak typeof(self) ws = self;
@@ -65,6 +91,7 @@
         @"运行 Lua",     @"停止 Lua",
         @"显示 HUD",     @"隐藏 HUD",
         @"启动守护",     @"Shell 执行",
+        @"暂停 Lua",
     ];
 
     for (NSUInteger i = 0; i < titles.count; i++) {
@@ -124,6 +151,7 @@
         case 15: [[TSHUDWindow shared] hide]; break;
         case 16: [self _startDaemon]; break;
         case 17: [self _testShell]; break;
+        case 18: [self _pauseLuaScript]; break;
     }
 }
 
@@ -304,6 +332,24 @@
 - (void)_stopLuaScript {
     [[TSLuaBridge shared] stop];
     [self _log:@"[Lua] 已请求停止"];
+}
+
+// 暂停/继续切换 (主界面按钮)。脚本运行期间也可按音量键呼出控制面板。
+- (void)_pauseLuaScript {
+    TSLuaBridge *lua = [TSLuaBridge shared];
+    if (!lua.isRunning) {
+        [self _log:@"[Lua] 当前没有脚本在运行"];
+        return;
+    }
+    if (_luaPausedByButton) {
+        [lua resume];
+        _luaPausedByButton = NO;
+        [self _log:@"[Lua] 已继续"];
+    } else {
+        [lua pause];
+        _luaPausedByButton = YES;
+        [self _log:@"[Lua] 已暂停 (脚本运行期间按音量键可呼出控制面板)"];
+    }
 }
 
 - (void)_startServer {

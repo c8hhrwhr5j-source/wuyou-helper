@@ -44,6 +44,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "TSDeviceInfo.h"
 #import "TSOCREngine.h"
 #import "../Common/TSPaths.h"
+#import "../Core/TSInjectedTouchClient.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -52,6 +53,9 @@ static void _pushNSObjectToLua(lua_State *L, id obj);
 // 必须用 volatile + 无锁赋值，绝不能放在 @synchronized(self) 里——
 // 否则脚本运行期间 Lua 线程持有 self 锁, 主线程 stop 抢锁会永久阻塞, 应用卡死。
 static volatile BOOL _stopRequested = NO;
+// 暂停标志: 由音量键控制面板/主界面"暂停"按钮设置。
+// 与 _stopRequested 一样跨线程, 必须 volatile + 无锁赋值。
+static volatile BOOL _pauseRequested = NO;
 
 @interface TSLuaBridge ()
 - (void)_execute:(NSString *)code filePath:(nullable NSString *)path;
@@ -293,6 +297,11 @@ static int l_global_mSleep(lua_State *L) {
             double chunk = MIN(remaining, 0.05);
             usleep((useconds_t)(chunk * 1000000));
             remaining -= chunk;
+            if (_pauseRequested && !_stopRequested) {
+                while (_pauseRequested && !_stopRequested) {
+                    usleep(50 * 1000);
+                }
+            }
             if (_stopRequested) {
                 return luaL_error(L, "脚本已被停止");
             }
@@ -312,6 +321,11 @@ static int l_global_sleep(lua_State *L) {
             double chunk = MIN(remaining, 0.05);
             usleep((useconds_t)(chunk * 1000000));
             remaining -= chunk;
+            if (_pauseRequested && !_stopRequested) {
+                while (_pauseRequested && !_stopRequested) {
+                    usleep(50 * 1000);
+                }
+            }
             if (_stopRequested) {
                 return luaL_error(L, "脚本已被停止");
             }
@@ -357,6 +371,14 @@ static int l_screen_init(lua_State *L) {
 /// 这样即使脚本是死循环(如 while true do end，不调用 mSleep/sleep)，
 /// 点击"停止"后也能被 lua_pcall 的 longjmp 中断，而不是无限跑下去。
 static void luaStopHook(lua_State *L, lua_Debug *ar) {
+    if (_pauseRequested && !_stopRequested) {
+        // 暂停: 阻塞 Lua 线程直到 resume 或 stop。
+        // Lua 线程阻塞不影响触摸注入(触摸走独立 TCP 链路到 SpringBoard),
+        // 也不影响主线程(停止按钮/音量键面板事件在主线程处理)。
+        while (_pauseRequested && !_stopRequested) {
+            usleep(50 * 1000);
+        }
+    }
     if (_stopRequested) {
         // 先移除钩子再抛错，避免 longjmp 后重复进入钩子导致二次错误
         lua_sethook(L, NULL, 0, 0);
@@ -1365,10 +1387,29 @@ static void lua_register_all(lua_State *L) {
     });
 }
 
+// 暂停当前脚本: 设置标志, Lua 线程在指令钩子/mSleep 处阻塞等待。
+- (void)pause {
+    if (!self.isRunning) return;
+    _pauseRequested = YES;
+    // 补发未抬起的触摸, 避免脚本停在拖动/按下中途留下"幽灵手指"
+    [[TSHIDEventTouch shared] releaseAllTouches];
+    lua_log(@"[Lua] 脚本已暂停 (再次按音量键可继续/停止)");
+}
+
+// 恢复被暂停的脚本
+- (void)resume {
+    _pauseRequested = NO;
+    lua_log(@"[Lua] 脚本已继续");
+}
+
 - (void)_execute:(NSString *)code filePath:(NSString *)path {
     _stopRequested = NO;
+    _pauseRequested = NO;
     self.runningPath = path;
     self.isRunning = YES;
+    // 脚本运行期间启用音量键控制面板: 在任意 app(游戏)前台按音量键,
+    // SpringBoard 侧注入的 dylib 会弹出 暂停/继续·停止·取消 菜单。
+    [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
     lua_State *L = luaL_newstate();
     if (!L) {
@@ -1418,8 +1459,11 @@ static void lua_register_all(lua_State *L) {
     [[TSHIDEventTouch shared] releaseAllTouches];
 
     _stopRequested = NO;
+    _pauseRequested = NO;
     self.runningPath = nil;
     self.isRunning = NO;
+    // 脚本结束, 关闭音量键控制面板, 避免平时按音量键误弹菜单
+    [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:NO];
     lua_log(@"[Lua] 脚本执行结束");
 }
 

@@ -28,4 +28,19 @@
 #define TS_TOUCH_TYPE_MOVE     1
 #define TS_TOUCH_TYPE_UP       2
 
+// ── 控制命令 (app -> dylib) ─────────────────────────────────────────
+// count 字段使用保留值 TS_CTRL_FLAG 标识控制包(而非触摸包):
+//   [0]=TS_TOUCH_MAGIC  [1]=TS_CTRL_FLAG  [2]=cmd
+#define TS_CTRL_FLAG          0xF0
+#define TS_CTRL_VOLUME_ON     0x01   // 启用音量键控制面板(脚本运行时由 app 打开)
+#define TS_CTRL_VOLUME_OFF    0x02   // 禁用音量键控制面板(脚本结束/停止时关闭)
+
+// ── 控制事件 (dylib -> app) ─────────────────────────────────────────
+// 独立 magic 0x55 区分方向:
+//   [0]=TS_EVENT_MAGIC  [1]=0x01  [2]=event
+#define TS_EVENT_MAGIC        0x55
+#define TS_EVENT_PAUSE        0x01   // 用户在面板选择"暂停"
+#define TS_EVENT_RESUME       0x02   // 用户在面板选择"继续"
+#define TS_EVENT_STOP         0x03   // 用户在面板选择"停止"
+
 #endif /* TSInjectedTouchService_h */

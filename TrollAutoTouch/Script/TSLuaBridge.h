@@ -48,6 +48,12 @@ FOUNDATION_EXPORT NSNotificationName const TSLuaRunningStateChangedNotification;
 /// 请求停止当前脚本(脚本下一次调用 mSleep/sleep 时抛出错误中断)
 - (void)stop;
 
+/// 暂停当前脚本(线程阻塞在指令钩子/mSleep 处, 可随时 resume 或 stop)
+- (void)pause;
+
+/// 恢复被 pause 暂停的脚本
+- (void)resume;
+
 @end
 
 NS_ASSUME_NONNULL_END

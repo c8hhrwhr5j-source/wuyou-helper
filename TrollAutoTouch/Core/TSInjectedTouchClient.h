@@ -17,6 +17,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// 控制事件回调 (主线程)。event 取 TSInjectedTouchService.h 中的
+/// TS_EVENT_PAUSE / TS_EVENT_RESUME / TS_EVENT_STOP。
+typedef void (^TSControlEventHandler)(uint8_t event);
+
 @interface TSInjectedTouchClient : NSObject
 
 + (instancetype)shared;
@@ -26,6 +30,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 发送单指触摸指令 (point 为逻辑点, 内部归一化为 0~1)
 - (void)sendTouchType:(uint8_t)type index:(uint8_t)index point:(CGPoint)point;
+
+/// 启用/禁用音量键控制面板 (脚本运行时启用, 结束后禁用)。
+/// 启用后, 在任意 app (如游戏) 前台按下音量键, SpringBoard 侧注入的
+/// dylib 会弹出 暂停/继续·停止·取消 系统级菜单。
+- (void)setVolumeKeyControlEnabled:(BOOL)enabled;
+
+/// 控制事件回调: 用户在音量键菜单选择 暂停/继续/停止 时触发 (主线程)
+@property (nonatomic, copy, nullable) TSControlEventHandler controlEventHandler;
 
 /// 当前注入/连接状态描述 (供日志与调试)
 @property (nonatomic, readonly) BOOL isConnected;

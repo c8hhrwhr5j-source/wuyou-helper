@@ -665,7 +665,37 @@ extern char **environ;
     }
     _socketFD = fd;
     NSLog(@"[TSInjectedTouch] socket 已连接 127.0.0.1:%d", TS_TOUCH_PORT);
+    [self _startControlReader];
     return YES;
+}
+
+// 后台线程读取 SpringBoard 侧推送的控制事件 (暂停/继续/停止), 在主线程回调。
+// 只读不回写, 与触摸发送线程共用同一 fd 是安全的 (socket 全双工)。
+- (void)_startControlReader {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        uint8_t buf[3];
+        while (_socketFD >= 0) {
+            size_t got = 0;
+            BOOL closed = NO;
+            while (got < 3 && _socketFD >= 0) {
+                ssize_t n = recv(_socketFD, buf + got, 3 - got, 0);
+                if (n < 0) {
+                    // 1s 接收超时 (connectSocket 设置了 SO_RCVTIMEO) → 重新轮询
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    break;
+                }
+                if (n == 0) { closed = YES; break; }
+                got += (size_t)n;
+            }
+            if (closed) break;
+            if (got != 3) continue;
+            if (buf[0] != TS_EVENT_MAGIC || buf[1] != 0x01) continue;
+            uint8_t ev = buf[2];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.controlEventHandler) self.controlEventHandler(ev);
+            });
+        }
+    });
 }
 
 - (BOOL)ensureInjected {
@@ -753,6 +783,20 @@ extern char **environ;
         // 连接断开, 关闭以便下次重连
         close(_socketFD);
         _socketFD = -1;
+    }
+}
+
+// 启用/禁用音量键控制面板: 脚本运行期间由 TSLuaBridge 自动打开/关闭。
+- (void)setVolumeKeyControlEnabled:(BOOL)enabled {
+    if (![self ensureInjected]) return;
+    uint8_t cmd[3] = { TS_TOUCH_MAGIC, TS_CTRL_FLAG,
+                       (uint8_t)(enabled ? TS_CTRL_VOLUME_ON : TS_CTRL_VOLUME_OFF) };
+    ssize_t n = send(_socketFD, cmd, sizeof(cmd), 0);
+    if (n < 0) {
+        close(_socketFD);
+        _socketFD = -1;
+    } else {
+        NSLog(@"[TSInjectedTouch] 音量键控制面板%@", enabled ? @"已启用" : @"已禁用");
     }
 }
 

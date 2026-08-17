@@ -27,6 +27,7 @@
 //  协议见 TSInjectedTouchService.h（坐标在 app 端已归一化为 0~1）。
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -37,6 +38,9 @@
 #import <errno.h>
 #import <stdint.h>
 #import "TSInjectedTouchService.h"
+
+// UIKit 符号说明: 本 dylib 链接时使用 -Wl,-undefined,dynamic_lookup,
+// UIKit 符号在运行时由宿主进程(SpringBoard, 已加载 UIKit)解析, 无需显式链接。
 
 // ---------- IOHID 私有符号声明 (SpringBoard 进程内由 dyld 运行时解析) ----------
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -84,6 +88,15 @@ extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client
 
 static IOHIDEventSystemClientRef s_client = NULL;
 static uint64_t s_senderID = 0;
+
+// ── 音量键控制面板状态 ──────────────────────────────────────────────
+// s_clientFD: 当前 app 连接的 socket (控制事件回写通道)。
+//   注意: TSHandleClient 在独立线程处理, 与弹窗回调线程不同, 用 volatile 保证可见性。
+static volatile int  s_clientFD = -1;
+static volatile BOOL s_volumeControlEnabled = NO;  // 脚本运行期间才响应音量键
+static volatile BOOL s_scriptPaused = NO;         // 面板"暂停/继续"按钮切换
+static UIWindow        *s_controlWindow = nil;    // 承载控制面板的系统级窗口
+static UIAlertController *s_presentedAlert = nil;
 
 #pragma mark - 文件日志 (SpringBoard 内 NSLog 用户看不到, 写入 /tmp 供 app 读回定位)
 
@@ -207,12 +220,48 @@ static ssize_t TSRecvFull(int fd, void *buf, size_t len) {
     return (ssize_t)got;
 }
 
+// 通知 app 端控制事件 (dylib -> app)。暂停/继续/停止面板按钮点击时调用。
+static void TSNotifyApp(uint8_t event) {
+    int fd = s_clientFD;
+    if (fd < 0) {
+        TSLog(@"控制事件 %d 未发送: 当前无 app 连接", event);
+        return;
+    }
+    uint8_t pkt[3] = { TS_EVENT_MAGIC, 0x01, event };
+    ssize_t n = send(fd, pkt, 3, MSG_NOSIGNAL);
+    if (n < 0) {
+        TSLog(@"控制事件 %d 发送失败: %s", event, strerror(errno));
+    } else {
+        TSLog(@"已通知 app 控制事件: %d", event);
+    }
+}
+
 static void TSHandleClient(int fd) {
+    s_clientFD = fd;   // 记录当前 app 连接, 供控制事件回写
     uint8_t header[2];
     while (1) {
         if (TSRecvFull(fd, header, 2) != 2) break;
         if (header[0] != TS_TOUCH_MAGIC) break;
         int count = header[1];
+
+        if (count == TS_CTRL_FLAG) {
+            // 控制命令包: [0]=magic [1]=TS_CTRL_FLAG [2]=cmd
+            uint8_t cmd = 0;
+            if (TSRecvFull(fd, &cmd, 1) != 1) break;
+            if (cmd == TS_CTRL_VOLUME_ON) {
+                s_volumeControlEnabled = YES;
+                s_scriptPaused = NO;
+                TSLog(@"音量键控制面板已启用");
+            } else if (cmd == TS_CTRL_VOLUME_OFF) {
+                s_volumeControlEnabled = NO;
+                s_scriptPaused = NO;
+                TSLog(@"音量键控制面板已禁用");
+            } else {
+                TSLog(@"未知控制命令: %d", cmd);
+            }
+            continue;
+        }
+
         if (count < 1 || count > TS_TOUCH_MAX_FINGERS) break;
 
         int cmdLen = count * TS_TOUCH_PER_FINGER;
@@ -234,6 +283,7 @@ static void TSHandleClient(int fd) {
         }
         free(cmd);
     }
+    if (s_clientFD == fd) s_clientFD = -1;
     close(fd);
 }
 
@@ -271,6 +321,80 @@ static void TSRunServer(void) {
     }
 }
 
+#pragma mark - 音量键控制面板 (在 SpringBoard 进程内弹出系统级菜单)
+
+// 关闭面板: 隐藏承载窗口并清引用。
+static void TSDismissControlAlert(void) {
+    s_presentedAlert = nil;
+    UIWindow *w = s_controlWindow;
+    s_controlWindow = nil;
+    [w setHidden:YES];
+}
+
+// 弹出 暂停/继续 · 停止 · 取消 面板。必须在 SpringBoard 主线程调用。
+static void TSPresentControlAlert(void) {
+    static NSTimeInterval s_lastShown = 0;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (s_presentedAlert != nil) return;   // 已在显示中, 不再重复弹出
+    if ((now - s_lastShown) < 1.0) return; // 1s 防抖 (音量变化通知 + 按键通知会双触发)
+    s_lastShown = now;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"TrollAutoTouch"
+                                                                   message:s_scriptPaused ? @"脚本已暂停，请选择操作" : @"脚本运行中，请选择操作"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    NSString *toggleTitle = s_scriptPaused ? @"继续" : @"暂停";
+    uint8_t   toggleEvent = s_scriptPaused ? TS_EVENT_RESUME : TS_EVENT_PAUSE;
+    [alert addAction:[UIAlertAction actionWithTitle:toggleTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        s_scriptPaused = !s_scriptPaused;
+        TSNotifyApp(toggleEvent);
+        TSDismissControlAlert();
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"停止" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        s_scriptPaused = NO;
+        TSNotifyApp(TS_EVENT_STOP);
+        TSDismissControlAlert();
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
+        TSDismissControlAlert();
+    }]];
+    s_presentedAlert = alert;
+
+    // 自建 UIWindow 承载 (windowLevel 2000 = 原 UIWindowLevelAlert 的数值,
+    // iOS13+ 该常量已废弃但数值不变), 确保盖过游戏/任意 app 界面。
+    UIWindow *win = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    win.windowLevel = 2000.0;
+    win.rootViewController = [UIViewController new];
+    [win makeKeyAndVisible];
+    s_controlWindow = win;
+    [win.rootViewController presentViewController:alert animated:YES completion:nil];
+}
+
+// 音量键触发回调: 仅脚本运行期间(音量键控制已启用)响应, 任意线程 → 主线程弹面板。
+static void TSVolumeKeyDidFire(void) {
+    if (!s_volumeControlEnabled) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TSPresentControlAlert();
+    });
+}
+
+// 注册音量键监听 (两种通知都监听, 防抖在 TSPresentControlAlert 内):
+//   1. AVSystemController_SystemVolumeDidChangeNotification: 全 iOS 版本可用,
+//      按音量键会改变系统音量并广播此通知 (由 mediaremoted 发出, 所有进程可收)。
+//   2. AVSystemController_VolumeButtonDownNotification: iOS 16+ 才有的独立按键
+//      通知, 收到时音量可能尚未变化, 作为双保险。
+static void TSStartVolumeKeyMonitor(void) {
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:@"AVSystemController_SystemVolumeDidChangeNotification"
+                    object:nil queue:nil usingBlock:^(NSNotification *note) {
+                        TSVolumeKeyDidFire();
+                    }];
+    [nc addObserverForName:@"AVSystemController_VolumeButtonDownNotification"
+                    object:nil queue:nil usingBlock:^(NSNotification *note) {
+                        TSVolumeKeyDidFire();
+                    }];
+    TSLog(@"音量键控制监听已注册");
+}
+
 #pragma mark - dylib 入口
 
 // dlopen 成功后由 dyld 自动调用
@@ -280,6 +404,7 @@ static void TSInjectedTouchInit(void) {
     [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/ts_touch.log" error:NULL];
     TSLog(@"触摸服务 dylib 已加载到进程: %@", [NSProcessInfo processInfo].processName);
     TSStartSenderIDMonitor();
+    TSStartVolumeKeyMonitor();
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         TSRunServer();
     });
