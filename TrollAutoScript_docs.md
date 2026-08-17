@@ -1801,7 +1801,8 @@ print(str.random(1, 100))
 
 | 函数 | 说明 |
 |------|------|
-| `sys.alert(title, msg)` | 提示框 |
+| `sys.alert(提示内容, [显示时间], [标题])` | 提示框：`显示时间>0` 自动消失；`=0` 永久显示带"确定"按钮 |
+| `sys.alertButtons(提示内容, {按钮...}, [标题], [显示时间])` | 带按钮提示框，返回用户点击的按钮文本；超时返回 `nil` |
 | `sys.palyAudio(path)` | 播放音频文件 |
 | `sys.availableMemory()` | 系统剩余内存 |
 | `sys.processUsedMemory()` | 进程使用内存 |

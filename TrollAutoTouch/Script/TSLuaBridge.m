@@ -775,6 +775,159 @@ static int l_touch_stroke(lua_State *L) {
 
 #pragma mark - 设备/系统
 
+// ────────────────────────── 弹窗 (sys.alert / sys.alertButtons) ──────────────────────────
+// 阻塞式弹窗: 在 Lua 后台线程调用, 主线程弹 UIAlertController 并等待用户点击。
+//   title/message  弹窗标题与内容
+//   buttons        按钮文本数组; 为空时仅显示"确定"(供永久显示场景手动关闭)
+//   timeout        显示时间(秒): >0 超时自动关闭; 0 永久显示直到点击
+// 返回: 用户点击的按钮文本; 超时或被脚本停止时返回 nil。
+// 线程模型: Lua 脚本在 _luaQueue 后台串行队列执行, 因此这里可以安全阻塞等待;
+//   主线程负责 present/dismiss 与收集点击结果, 不会互相死锁。
+static NSString *TSShowBlockingAlert(NSString *title, NSString *message,
+                                     NSArray<NSString *> *buttons, NSTimeInterval timeout) {
+    if (!title.length) title = @"提示";
+    if (!buttons.count) buttons = @[@"确定"];
+
+    // App 不在前台时 UIAlertController 无法显示(会静默失败), 直接返回 nil 不阻塞脚本,
+    // 避免脚本在游戏/其他 app 前台时因弹窗不可见而永久卡死。
+    // (全局弹窗能力由后续 HUD 隐藏服务提供, 见 HUDServices 方案)
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+        NSLog(@"[TrollAutoTouch] 弹窗被跳过: App 不在前台 (需要 HUD 服务支持全局弹窗)");
+        return nil;
+    }
+
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSString *picked = nil;
+    __block BOOL finished = NO;
+    __block UIAlertController *alert = nil;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 找到当前可 present 的顶层控制器(主窗口), 与 _presentInAppVolumeMenu 一致
+        NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+        UIWindow *keyWindow = nil;
+        for (UIWindow *w in windows) {
+            if (w.isKeyWindow) { keyWindow = w; break; }
+        }
+        if (!keyWindow) keyWindow = windows.firstObject;
+        UIViewController *top = keyWindow.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+        if (!top) {
+            // 无可用窗口(如 App 后台), 直接结束等待, 避免 Lua 永久卡死
+            finished = YES;
+            dispatch_semaphore_signal(sem);
+            return;
+        }
+
+        alert = [UIAlertController alertControllerWithTitle:title
+                                                    message:message
+                                             preferredStyle:UIAlertControllerStyleAlert];
+        for (NSString *btn in buttons) {
+            UIAlertActionStyle style = UIAlertActionStyleDefault;
+            if ([btn isEqualToString:@"取消"]) style = UIAlertActionStyleCancel;
+            [alert addAction:[UIAlertAction actionWithTitle:btn style:style handler:^(UIAlertAction *action) {
+                picked = btn;
+                finished = YES;
+                dispatch_semaphore_signal(sem);
+            }]];
+        }
+        [top presentViewController:alert animated:YES completion:nil];
+
+        // 超时自动关闭
+        if (timeout > 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (!finished) {
+                    finished = YES;
+                    [alert dismissViewControllerAnimated:YES completion:nil];
+                    dispatch_semaphore_signal(sem);
+                }
+            });
+        }
+    });
+
+    // Lua 线程等待: 分段等待并检查停止标志, 保证点"停止"后弹窗立即关闭、脚本可中断
+    while (!finished && !_stopRequested) {
+        if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) == 0) {
+            break;  // 用户点击或超时, 已收到信号
+        }
+    }
+    if (!finished && _stopRequested) {
+        // 脚本被停止: 强制关闭弹窗
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [alert dismissViewControllerAnimated:NO completion:nil];
+        });
+    }
+    return picked;
+}
+
+// sys.alert(提示内容, [显示时间], [标题])
+//   显示时间 >0: 自动消失(无按钮); 显示时间 =0: 永久显示, 带"确定"按钮。
+//   兼容原版 TrollAutoScript 的 sys.alert 语义。
+static int l_sys_alert(lua_State *L) {
+    size_t mlen = 0;
+    const char *msg = luaL_checklstring(L, 1, &mlen);
+    NSString *message = luaToNSString(msg, mlen);
+
+    double timeout = 0;
+    if (lua_type(L, 2) == LUA_TNUMBER) timeout = lua_tonumber(L, 2);
+
+    NSString *title = @"提示";
+    if (lua_type(L, 3) == LUA_TSTRING) {
+        size_t tlen = 0;
+        const char *t = lua_tolstring(L, 3, &tlen);
+        title = luaToNSString(t, tlen);
+    }
+
+    // 超时>0 时纯展示自动消失; timeout=0 永久显示, 提供"确定"按钮供用户关闭
+    NSArray<NSString *> *buttons = (timeout > 0) ? @[] : @[@"确定"];
+    TSShowBlockingAlert(title, message, buttons, timeout);
+    return 0;
+}
+
+// sys.alertButtons(提示内容, {按钮1, 按钮2, ...}, [标题], [显示时间])
+//   带按钮的提示框: 阻塞脚本直到用户点击某个按钮, 返回该按钮的文本。
+//   显示时间 >0: 超时未点击自动关闭并返回 nil; 显示时间 =0: 永久等待用户点击。
+static int l_sys_alertButtons(lua_State *L) {
+    size_t mlen = 0;
+    const char *msg = luaL_checklstring(L, 1, &mlen);
+    NSString *message = luaToNSString(msg, mlen);
+
+    // 参数2: 按钮表
+    luaL_checktype(L, 2, LUA_TTABLE);
+    NSMutableArray<NSString *> *buttons = [NSMutableArray array];
+    lua_pushnil(L);
+    while (lua_next(L, 2) != 0) {
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t blen = 0;
+            const char *b = lua_tolstring(L, -1, &blen);
+            [buttons addObject:luaToNSString(b, blen)];
+        }
+        lua_pop(L, 1);
+    }
+    if (!buttons.count) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    NSString *title = @"提示";
+    if (lua_type(L, 3) == LUA_TSTRING) {
+        size_t tlen = 0;
+        const char *t = lua_tolstring(L, 3, &tlen);
+        title = luaToNSString(t, tlen);
+    }
+
+    double timeout = 0;
+    if (lua_type(L, 4) == LUA_TNUMBER) timeout = lua_tonumber(L, 4);
+
+    NSString *picked = TSShowBlockingAlert(title, message, buttons, timeout);
+    if (picked) {
+        lua_pushstring(L, picked.UTF8String);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
 static int l_sys_info(lua_State *L) {
     NSDictionary *info = [[TSDeviceInfo shared] fullInfo];
     _pushNSObjectToLua(L, info);
@@ -1254,12 +1407,14 @@ static void lua_register_all(lua_State *L) {
 
     // ── sys 模块 ──
     static const luaL_Reg sysLib[] = {
-        {"info",       l_sys_info},
-        {"osVersion",  l_sys_osVersion},
-        {"model",      l_sys_model},
-        {"screenSize", l_sys_screenSize},
-        {"getIP",      l_sys_getIP},
-        {"battery",    l_sys_battery},
+        {"info",        l_sys_info},
+        {"osVersion",   l_sys_osVersion},
+        {"model",       l_sys_model},
+        {"screenSize",  l_sys_screenSize},
+        {"getIP",       l_sys_getIP},
+        {"battery",     l_sys_battery},
+        {"alert",       l_sys_alert},
+        {"alertButtons",l_sys_alertButtons},
         {NULL, NULL}
     };
     luaL_newlib(L, sysLib);
