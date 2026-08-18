@@ -24,6 +24,26 @@
 // 足以盖住所有前台 app 的窗口。
 static const double kSBSHostingWindowLevel = 10000.0;
 
+// 全屏透明宿主窗口子类:
+// 透明区域必须穿透到下层窗口 (hitTest 返回 nil),
+// 否则这个 windowLevel 高于主 UI 的透明全屏窗口会吞掉所有触摸,
+// 导致主 App 界面"点击任何地方都无反应"。
+// 仅当命中弹窗内容 (HUDCustomAlertView 及其子视图) 时才消费触摸,
+// 与 TSHUDWindow (悬浮窗) 的 hitTest 穿透逻辑保持一致。
+@interface TSHUDHostWindow : UIWindow
+@end
+
+@implementation TSHUDHostWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // 命中窗口自身或根视图(透明背景, 无弹窗) → 穿透给下层窗口
+    if (hit == self || hit == self.rootViewController.view) {
+        return nil;
+    }
+    return hit;
+}
+@end
+
 @implementation TSHUDHost {
     UIWindow *_window;
     UIViewController *_rootVC;
@@ -80,7 +100,8 @@ static void HUDLog(NSString *fmt, ...) {
 
     @try {
         // 全屏透明窗口 (windowLevel 抬高, 确保可见; 不抢主 App 的 key window)
-        _window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        // 使用 TSHUDHostWindow 子类: 透明区域 hitTest 穿透, 不拦截主界面触摸
+        _window = [[TSHUDHostWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         _window.windowLevel = UIWindowLevelStatusBar + 100;
         _window.backgroundColor = [UIColor clearColor];
 
