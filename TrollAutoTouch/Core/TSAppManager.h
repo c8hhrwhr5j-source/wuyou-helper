@@ -25,6 +25,13 @@ NS_ASSUME_NONNULL_BEGIN
 @interface TSAppManager : NSObject
 + (instancetype)shared;
 
+// ── 权限探测 ──────────────────────────────────────
+/// 查询某 entitlement 是否实际生效 (SecTask, 反映内核真正授予的权限)
++ (BOOL)hasEffectiveEntitlement:(NSString *)entitlement;
+/// MobileInstallation 私有 API 是否安全可用 (需 platform 身份 + Helper 权限,
+/// TrollStore 2.x 下为 NO, 直接调用会崩溃)
++ (BOOL)canUseMobileInstallation;
+
 // ── 前台应用 ──────────────────────────────────────
 - (pid_t)     frontPid;
 - (nullable NSString *)frontBid;         // 如 "com.tencent.xin"

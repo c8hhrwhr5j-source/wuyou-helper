@@ -72,7 +72,7 @@ targets:
       path: TrollAutoTouch/Info.plist
       properties:
         CFBundleDisplayName: TrollAutoTouch
-        CFBundleVersion: "9"
+        CFBundleVersion: "10"
         CFBundleShortVersionString: "9.9.9"
         # 后台保活: 脚本运行期间用静音音频播放阻止 App 被挂起,
         # 保证切到游戏/其他 app 后音量键轮询与 IOHID 直发触摸仍可用

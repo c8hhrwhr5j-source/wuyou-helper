@@ -3,7 +3,9 @@
 //
 //  架构 (与原版 TrollAutoScript 的 HUDServices 一致):
 //  主 App ──(CPDistributedMessagingCenter)──> HUDServices (独立隐藏 app)
-//    1. 主 App 把随包分发的 HUD/HUDServices.app 复制出来并用 MobileInstallation 安装
+//    1. 主 App 把随包分发的 HUD/HUDServices.app 复制出来并安装
+//       (经 TSAppManager, 内部探测 MobileInstallation 权限: 未生效时
+//        自动跳过该私有 API 以免崩溃, 回退 LSApplicationWorkspace)
 //    2. 启动 HUD (LSApplicationWorkspace / SBSLaunchApplicationWithIdentifier)
 //    3. 通过 CPDistributedMessagingCenter 发送 "sysAlertRequest:" 消息
 //    4. HUD 把自己激活到前台, 在高 windowLevel 窗口上 present UIAlertController
@@ -35,7 +37,6 @@ static id HUDMessagingCenter(void) {
 }
 
 @interface TSHUDService ()
-- (BOOL)_installWithMobileInstallation:(NSString *)appPath;
 - (NSDictionary *)_sendRequest:(NSDictionary *)userInfo timeout:(NSTimeInterval)timeout;
 @end
 
@@ -57,6 +58,15 @@ static id HUDMessagingCenter(void) {
 }
 
 - (BOOL)installHUD {
+    // 安装节流: 失败后 30 秒内不重复尝试 (音量键连按时避免反复复制/安装)
+    static NSTimeInterval s_lastAttempt = 0;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if ((now - s_lastAttempt) < 30) {
+        NSLog(@"[TSHUDService] 距上次安装尝试不足 30s, 跳过 (节流)");
+        return NO;
+    }
+    s_lastAttempt = now;
+
     // 1. 定位随主包分发的 HUD/HUDServices.app
     NSString *sourcePath = [[NSBundle mainBundle] pathForResource:@"HUDServices"
                                                           ofType:@"app"
@@ -76,48 +86,19 @@ static id HUDMessagingCenter(void) {
         return NO;
     }
 
-    // 3. 用 MobileInstallation 注册安装 (InstallForLaunchServices 变体优先)
-    if ([self _installWithMobileInstallation:destPath]) {
-        NSLog(@"[TSHUDService] HUD 安装成功: %@", destPath);
-        return YES;
-    }
-
-    // 4. 回退: LSApplicationWorkspace 直接注册
+    // 3. 经 TSAppManager 安装。注意: 不能直接调 MobileInstallation 私有 API ——
+    //    该 API 要求调用者实际拥有 MobileInstallationHelper 权限, 而
+    //    iOS 15.5+ 的 TrollStore 无法授予 platform 身份, 无权限直接调用
+    //    会崩溃 (此前线上版本正是因此闪退)。TSAppManager 内部会用
+    //    canUseMobileInstallation 探测, 未生效时自动回退 LSApplicationWorkspace
+    //    (不崩溃, 失败仅返回 NO)。
     BOOL ok = [[TSAppManager shared] installIPA:destPath];
-    NSLog(@"[TSHUDService] HUD 安装(%@): %d", ok ? @"LSWorkspace" : @"失败", ok);
-    return ok;
-}
-
-- (BOOL)_installWithMobileInstallation:(NSString *)appPath {
-    static void (*installForLS)(NSString *, NSDictionary *, void (^)(NSDictionary *)) = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        void *handle = dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation",
-                              RTLD_LAZY);
-        if (handle) {
-            installForLS = dlsym(handle, "MobileInstallationInstallForLaunchServices");
-        }
-    });
-    if (!installForLS) {
-        return NO;
+    if (ok) {
+        NSLog(@"[TSHUDService] HUD 安装成功: %@", destPath);
+    } else {
+        NSLog(@"[TSHUDService] HUD 安装失败 (MobileInstallation 权限不可用, 已安全回退)");
     }
-
-    __block BOOL success = NO;
-    __block BOOL finished = NO;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-
-    installForLS(appPath, @{}, ^(NSDictionary *result) {
-        if (result[@"Success"] || result[@"Error"] == nil) {
-            success = YES;
-        } else {
-            NSLog(@"[TSHUDService] MobileInstallation 返回错误: %@", result[@"Error"]);
-        }
-        finished = YES;
-        dispatch_semaphore_signal(sem);
-    });
-
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
-    return finished && success;
+    return ok;
 }
 
 - (BOOL)ensureHUDRunning {

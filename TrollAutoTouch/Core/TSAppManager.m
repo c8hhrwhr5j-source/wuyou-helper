@@ -12,6 +12,14 @@
 #import <sys/sysctl.h>
 #import <signal.h>
 
+// SecTask 是 iOS 私有 API (无公共头文件), 符号从 Security.framework 导出。
+// 用于查询 App 实际生效的 entitlements —— 与签名数据无关, 反映内核真正授予
+// 的权限。iOS 15.5+ 的 TrollStore 无法授予 platform 身份, 因此 com.apple.private.*
+// 等私有权限即使写在签名里也不会生效, 直接调用 MobileInstallation 会崩溃。
+typedef struct __SecTask *SecTaskRef;
+extern SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error);
+
 // proc_pidpath 是 macOS 私有 API，iOS SDK 无对应头文件，手动声明
 #ifndef PROC_PIDPATHINFO_MAXSIZE
 #define PROC_PIDPATHINFO_MAXSIZE 4096
@@ -115,6 +123,28 @@ static void _loadMobileInstallation(void) {
     return m;
 }
 
+// 查询某 entitlement 是否实际生效 (SecTask 反映内核真正授予的权限,
+// 非 platform 进程的 com.apple.private.* 权限即使写在签名里也返回 NO)。
++ (BOOL)hasEffectiveEntitlement:(NSString *)entitlement {
+    if (!entitlement.length) return NO;
+    SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+    if (!task) return NO;
+    CFTypeRef value = SecTaskCopyValueForEntitlement(task, (__bridge CFStringRef)entitlement, NULL);
+    BOOL has = (value != NULL);
+    if (value) CFRelease(value);
+    CFRelease(task);
+    return has;
+}
+
+// MobileInstallation 私有 API (dlopen 的 C 函数) 要求调用者实际拥有
+// MobileInstallationHelper 权限。非 platform 进程 (如 iOS 15.5+ TrollStore
+// 安装的 app) 即使签名里写了该 entitlement 也不会生效, 直接调用会因 XPC
+// 连接被拒而崩溃。调用前必须用本方法探测, 未生效时改用 LSApplicationWorkspace。
++ (BOOL)canUseMobileInstallation {
+    return [self hasEffectiveEntitlement:@"platform-application"]
+        && [self hasEffectiveEntitlement:@"com.apple.private.MobileInstallationHelperService.allowed"];
+}
+
 - (instancetype)init {
     self = [super init];
     if (self) {
@@ -203,9 +233,9 @@ static void _loadMobileInstallation(void) {
     info.bundleId = bundleId;
     info.pid = [self pidForBundleId:bundleId];
 
-    // 通过 MobileInstallation 获取详细信息
+    // 通过 MobileInstallation 获取详细信息 (权限未生效时跳过, 避免崩溃)
     _loadMobileInstallation();
-    if (_MobileInstallationLookup) {
+    if ([TSAppManager canUseMobileInstallation] && _MobileInstallationLookup) {
         CFDictionaryRef dict = NULL;
         CFStringRef bid = (__bridge CFStringRef)bundleId;
         CFDictionaryRef opts = (__bridge CFDictionaryRef)@{};
@@ -319,9 +349,9 @@ static void _loadMobileInstallation(void) {
             @selector(uninstallApplication:withOptions:), bundleId, nil);
     }
 
-    // 回退：MobileInstallation
+    // 回退：MobileInstallation (仅权限实际生效时可用, 否则会崩溃)
     _loadMobileInstallation();
-    if (_MobileInstallationUninstall) {
+    if ([TSAppManager canUseMobileInstallation] && _MobileInstallationUninstall) {
         CFStringRef bid = (__bridge CFStringRef)bundleId;
         return _MobileInstallationUninstall(bid, (__bridge CFDictionaryRef)@{}, NULL) == 0;
     }
@@ -332,15 +362,18 @@ static void _loadMobileInstallation(void) {
 - (BOOL)installIPA:(NSString *)ipaPath {
     if (![[NSFileManager defaultManager] fileExistsAtPath:ipaPath]) return NO;
 
-    // 优先用 MobileInstallation（更可靠）
+    // 优先用 MobileInstallation（更可靠）。注意: 该私有 API 要求调用者实际
+    // 拥有 MobileInstallationHelper 权限; 非 platform 进程 (TrollStore 2.x)
+    // 直接调用会崩溃, 因此必须先经 canUseMobileInstallation 探测。
     _loadMobileInstallation();
-    if (_MobileInstallationInstall) {
+    if ([TSAppManager canUseMobileInstallation] && _MobileInstallationInstall) {
         CFStringRef path = (__bridge CFStringRef)ipaPath;
         int ret = _MobileInstallationInstall(path, (__bridge CFDictionaryRef)@{}, NULL, NULL);
-        return ret == 0;
+        if (ret == 0) return YES;
     }
 
-    // 回退：LSApplicationWorkspace
+    // 回退：LSApplicationWorkspace (不依赖 MobileInstallation 权限,
+    // 失败仅返回 NO, 不会崩溃)
     _loadLSApplicationWorkspace();
     if (_LSApplicationWorkspace_install) {
         return _LSApplicationWorkspace_install(_workspace,
