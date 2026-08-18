@@ -1,6 +1,6 @@
 //
 //  HUDCustomAlertView.m
-//  HUDServices
+//  TrollAutoTouch
 //
 //  自绘弹窗视图实现: 全屏半透明遮罩 + 居中深色圆角卡片。
 //  卡片内含标题/内容/按钮; 按钮点击或超时后自动淡出移除并回调结果。

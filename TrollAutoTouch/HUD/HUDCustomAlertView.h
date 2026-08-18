@@ -1,12 +1,12 @@
 //
 //  HUDCustomAlertView.h
-//  HUDServices
+//  TrollAutoTouch
 //
-//  自绘弹窗视图: 在 HUD 系统级托管窗口上显示的自定义 UI 弹窗画面,
+//  自绘弹窗视图: 在 TSHUDHost 系统级托管窗口上显示的自定义 UI 弹窗画面,
 //  替代系统 UIAlertController。标题/内容/1~N 按钮/超时自动消失,
 //  视觉样式完全自控 (深色圆角卡片, 类似游戏内 UI)。
 //
-//  线程模型: 视图本身在主线程使用; HUDAlertPresenter 负责后台线程阻塞等待。
+//  线程模型: 视图本身在主线程使用; TSHUDHost 负责后台线程阻塞等待。
 //
 
 #import <UIKit/UIKit.h>

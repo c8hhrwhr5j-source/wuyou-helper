@@ -9,6 +9,7 @@
 #import "AppDelegate.h"
 #import "MainTabBarController.h"
 #import "HUD/TSHUDWindow.h"
+#import "HUD/TSHUDHost.h"
 #import "Core/TSDaemonManager.h"
 #import "Common/TSPaths.h"
 
@@ -32,6 +33,11 @@
 
     // ── 启动核心服务（悬浮窗默认关闭，用户手动开启）──
     [[TSDaemonManager shared] startAll];
+
+    // ── 预热进程内 HUD 宿主（单 App 架构）──
+    // 提前创建全屏透明窗口并注册 SBS 系统级托管, 使脚本音量键弹窗/
+    // 阻塞确认等全局弹窗即时可用; 失败仅降级, 不影响主流程。
+    [[TSHUDHost shared] start];
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;

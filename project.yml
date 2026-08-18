@@ -21,9 +21,12 @@ settings:
     # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
     # -Wl,-no_fixup_chains: 禁用 chained fixups（与 ENABLE_CHAINED_FIXUPS=NO 配套），
     # 兼容 Procursus ldid / TrollStore 注入 entitlements。
+    # -Wl,-undefined,dynamic_lookup: 进程内 HUD 宿主的私有符号
+    # (SBSAccessibilityWindowHostingController 等) 运行时由 dyld 动态解析
+    # (与 TSInjectedTouchService 相同策略; 不产生私有框架链接依赖)。
     # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
     #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework Security -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -Wl,-no_fixup_chains
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework Security -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
 targets:
   TrollAutoTouch:
     type: application
@@ -129,28 +132,9 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO
         CLANG_ENABLE_MODULES: NO
-  # HUD 隐藏服务: 独立 .app, 由主 App 运行时安装并启动,
-  # 通过 CPDistributedMessagingCenter 接收请求, 在任意前台 app 之上弹全局对话框。
-  # build-ipa.sh 会把构建产物 HUDServices.app 嵌入主 App bundle 的 HUD/ 目录。
-  HUDServices:
-    type: application
-    platform: iOS
-    deploymentTarget: "15.0"
-    sources:
-      - path: HUDServices
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.HUDServices
-        PRODUCT_NAME: HUDServices
-        INFOPLIST_FILE: HUDServices/Info.plist
-        GENERATE_INFOPLIST_FILE: NO
-        # 私有符号 (CPDistributedMessagingCenter 等) 运行时由 dyld 动态解析
-        OTHER_LDFLAGS: -framework UIKit -framework Foundation -Wl,-undefined,dynamic_lookup -Wl,-no_fixup_chains
-        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        ENABLE_BITCODE: NO
-        CLANG_ENABLE_MODULES: NO
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGNING_REQUIRED: NO
-    entitlements:
-      path: HUDServices/HUDServices.entitlements
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 注意: 旧版 HUDServices 独立 app (双 App tipa) 已废弃移除。
+  # HUD 全局弹窗现在由主 App 进程内完成 (TSHUDHost + SBSAccessibilityWindowHostingController),
+  # 不再需要独立 target / CPDistributedMessagingCenter / TrollStore 多 app 安装。
+  # 桌面只显示 TrollAutoTouch 一个图标。
+  # ─────────────────────────────────────────────────────────────────────────────

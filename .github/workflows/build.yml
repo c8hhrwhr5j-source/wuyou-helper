@@ -214,47 +214,10 @@ jobs:
           echo "[*] dylib 架构 (必须同时包含 arm64 与 arm64e):"
           lipo -info "$PWD/build/dylib/TSInjectedTouchService.dylib"
 
-          # ── 编译 HUD 服务 (HUDServices, 全局弹窗用) ──
-          # 独立隐藏 app: 运行时由主 App 安装并启动, 在任意前台 app 之上弹对话框。
-          # 同样用 -target + CONFIGURATION_BUILD_DIR (不能搭配 -derivedDataPath)。
-          if ! xcodebuild -project TrollAutoTouch.xcodeproj \
-            -target HUDServices \
-            -configuration Release \
-            -sdk iphoneos \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS="arm64 arm64e" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ENABLE_CHAINED_FIXUPS=NO \
-            CONFIGURATION_BUILD_DIR="$PWD/build/hud" \
-            build > /tmp/hud_build.log 2>&1; then
-            echo "[x] HUD 服务编译失败，完整日志:"
-            tail -80 /tmp/hud_build.log
-            {
-              echo "## HUDServices 编译失败详情"
-              echo ""
-              echo '```'
-              grep -nE "error:|undefined|ld: |clang:|file not found" /tmp/hud_build.log | tail -60
-              echo ""
-              echo "--- 日志尾部 ---"
-              tail -100 /tmp/hud_build.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            {
-              git config user.name "ci-bot"
-              git config user.email "ci-bot@users.noreply.github.com"
-              cp /tmp/hud_build.log ./ci-error.log
-              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
-              git add -f ci-error.log
-              git commit -m "ci: save hud build log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
-              git push origin ci-debug --force
-            } >/dev/null 2>&1 && echo "[i] HUD 日志已推送到 ci-debug 分支" || echo "[i] HUD 日志推送失败(忽略)"
-            exit 1
-          fi
-          tail -3 /tmp/hud_build.log
-          echo "[OK] HUDServices.app 编译成功"
-          lipo -info "$PWD/build/hud/HUDServices.app/HUDServices" 2>/dev/null || true
+          # ── HUD 全局弹窗: 单 App 架构 ──
+          # HUD 宿主已并入主 App 进程内 (TSHUDHost + SBSAccessibilityWindowHostingController,
+          # 见 TrollAutoTouch/HUD/), 不再编译独立 HUDServices.app。
+          echo "[OK] HUD 宿主已随主 App 编译 (进程内, 无独立 app)"
 
       - name: Package IPA
         run: |
@@ -343,78 +306,12 @@ jobs:
           ls -la "$APP_DST/bin"
 
           echo ""
-          echo "=== HUD 服务 (全局弹窗) ==="
-          # 独立隐藏 app: 通过 CPDistributedMessagingCenter 接收请求, 在任意前台
-          # app 之上弹系统对话框 (sys.alert / sys.alertButtons 全局版)。
-          # 部署架构 (TrollStore 2.x): HUD 作为独立 app 放进 tipa 根 Payload/ 下,
-          # TrollStore 安装 tipa 时会把它与 TrollAutoTouch 一并注册到 LaunchServices
-          # (多 app tipa, 与官方 TrollStore.tipa 同机制)。主 App 运行时只需启动它,
-          # 不再现场安装 —— iOS 15.5+ TrollStore 无 platform 身份, MobileInstallation
-          # 私有 API 的 XPC 连接会被拒绝; LSApplicationWorkspace installApplication:
-          # 又只接受 .ipa 不接受裸 .app 目录, 现场安装必然失败。
-          # 同时保留嵌入主 bundle 的 HUD/HUDServices.app 作后备 (palera1n 越狱等
-          # MobileInstallation 权限生效的设备仍可由主 App 现场安装)。
-          HUD_SRC="$PWD/build/hud/HUDServices.app"
-          HUD_ENT="/tmp/hud_ent.xml"
-          if [ ! -d "$HUD_SRC" ]; then
-            echo "[x] 未找到 HUDServices.app ($HUD_SRC), 全局弹窗不可用"
-            exit 1
-          fi
-          # CI checkout 出来的 entitlements 文件可能被破坏(空 dict, 与主 app 同坑):
-          # ldid -e 提取会得到空 dict 导致"验证失败"。从 git 对象恢复; 失败时回退
-          # 文件系统路径 (本地开发)。
-          if ! git show HEAD:HUDServices/HUDServices.entitlements > "$HUD_ENT" 2>/dev/null \
-             || ! grep -q "<dict>" "$HUD_ENT"; then
-            cp -f "$PWD/HUDServices/HUDServices.entitlements" "$HUD_ENT"
-          fi
-          echo "[*] HUD entitlements 来源: $(wc -c < "$HUD_ENT") bytes"
-          HUD_PAYLOAD_DST="$PWD/build/Payload/HUDServices.app"
-          HUD_EMBED_DST="$APP_DST/HUD/HUDServices.app"
-          rm -rf "$HUD_PAYLOAD_DST" "$APP_DST/HUD"
-          cp -R "$HUD_SRC" "$HUD_PAYLOAD_DST"
-          mkdir -p "$APP_DST/HUD"
-          cp -R "$HUD_SRC" "$HUD_EMBED_DST"
-          echo "[OK] HUD 已放置: tipa 根 Payload/HUDServices.app (TrollStore 多 app 安装) + 主 bundle HUD/ (后备)"
-          for HUD_BIN in "$HUD_PAYLOAD_DST/HUDServices" "$HUD_EMBED_DST/HUDServices"; do
-            echo "[*] HUD 二进制: $HUD_BIN"
-            lipo -info "$HUD_BIN" || true
-            # 注入 HUD entitlements: platform-application + no-sandbox + 前台激活权限,
-            # 使 HUD 拥有激活自己/交还前台/托管系统级窗口的权限。
-            if ldid -S"$HUD_ENT" --platform-apply "$HUD_BIN" 2>/tmp/hud_sign.log; then
-              echo "[OK] HUD 已注入 entitlements + platform-apply"
-            elif ldid -S"$HUD_ENT" "$HUD_BIN" 2>>/tmp/hud_sign.log; then
-              echo "[OK] HUD 已注入 entitlements (无 platform-apply)"
-            elif codesign --force --sign - --entitlements "$HUD_ENT" "$HUD_BIN" 2>>/tmp/hud_sign.log; then
-              echo "[OK] HUD 已注入 entitlements (codesign, 无 platform-apply)"
-            else
-              echo "[!] HUD entitlements 注入失败, 全局弹窗可能不可用:"
-              echo "    $(cat /tmp/hud_sign.log)"
-            fi
-            HUD_ENT_EXTRACTED=$(ldid -e "$HUD_BIN" 2>/dev/null || true)
-            if echo "$HUD_ENT_EXTRACTED" | grep -q "platform-application"; then
-              echo "[OK] HUD entitlements 验证通过 (platform-application + 完整权限): $HUD_BIN"
-              HUD_ENT_STATUS="OK"
-            elif echo "$HUD_ENT_EXTRACTED" | grep -q "no-sandbox"; then
-              echo "[OK] HUD entitlements 验证通过 (no-sandbox 已注入): $HUD_BIN"
-              HUD_ENT_STATUS="OK"
-            else
-              echo "[!] 警告: HUD entitlements 验证失败: $HUD_BIN"
-              HUD_ENT_STATUS="FAILED"
-            fi
-          done
-          ls -la "$HUD_PAYLOAD_DST" "$HUD_EMBED_DST"
-          HUD_ARCHS=$(lipo -info "$HUD_PAYLOAD_DST/HUDServices" 2>/dev/null | sed 's/^[^:]*: //' || echo "未知")
-          HUD_SIZE=$(stat -f%z "$HUD_PAYLOAD_DST/HUDServices" 2>/dev/null || stat -c%s "$HUD_PAYLOAD_DST/HUDServices" 2>/dev/null || echo "?")
-          {
-            echo ""
-            echo "### HUD 服务 (全局弹窗) 构建结果"
-            echo ""
-            echo "- 部署: \`Payload/HUDServices.app\` (TrollStore 多 app 安装) + \`Payload/TrollAutoTouch.app/HUD/HUDServices.app\` (后备)"
-            echo "- 大小: $HUD_SIZE bytes"
-            echo "- 架构: \`$HUD_ARCHS\`"
-            echo "- entitlements 注入 + platform-apply: \`$HUD_ENT_STATUS\`"
-            echo "- 关键 entitlement: \`platform-application\` / \`no-sandbox\` / \`frontboard.launchapplications\` / \`springboard.activate\` / \`springboard.accessibility-window-hosting\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "=== HUD 全局弹窗 ==="
+          # 单 App 架构: HUD 宿主已并入主 App 进程内
+          # (TSHUDHost + SBSAccessibilityWindowHostingController, 见 TrollAutoTouch/HUD/)。
+          # 主 App entitlements 已含 com.apple.springboard.accessibility-window-hosting,
+          # 不再有独立 HUDServices.app, 桌面只显示 TrollAutoTouch 一个图标。
+          echo "[OK] HUD 宿主随主 App 打包 (进程内, 无独立 app)"
 
           echo ""
           echo "=== 架构 ==="
@@ -543,7 +440,7 @@ jobs:
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/HUDServices.app/HUDServices" "Payload/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else
@@ -551,6 +448,20 @@ jobs:
               MISSING_IPA=1
             fi
           done
+          # 单 App 自检: tipa 必须只含 Payload/TrollAutoTouch.app (桌面单图标),
+          # 不允许再出现 HUDServices.app / 其它顶层 .app。
+          APP_COUNT=$(grep -cE '^   Payload/[^/]+\.app/$' /tmp/ipa_contents.txt || true)
+          echo "[*] Payload 顶层 .app 数量: $APP_COUNT (必须为 1)"
+          if [ "$APP_COUNT" != "1" ]; then
+            echo "[x] 顶层 .app 数量异常 (应为 1, 当前 $APP_COUNT), 停止"
+            MISSING_IPA=1
+          fi
+          if grep -q "HUDServices" /tmp/ipa_contents.txt; then
+            echo "[x] IPA 中不应再包含 HUDServices (双 App 已废弃)"
+            MISSING_IPA=1
+          else
+            echo "[OK] 未包含 HUDServices (单 App 架构正确)"
+          fi
           if [ "$MISSING_IPA" = "1" ]; then
             echo "[x] IPA 内容不完整, 停止"
             exit 1

@@ -791,12 +791,13 @@ static NSString *TSShowBlockingAlert(NSString *title, NSString *message,
     if (!title.length) title = @"提示";
 
     // App 不在前台时 UIAlertController 无法显示(会静默失败)。
-    // 此时走 HUD 隐藏服务: 由独立 HUDServices.app 激活到前台, 在任意 app 之上弹全局窗口。
-    // HUD 不可用(未安装/通信失败)时返回 nil, 避免脚本永久卡死。
+    // 此时走进程内 HUD 宿主: TSHUDHost 自建全屏透明窗口并经 SBS 系统级托管,
+    // 在任意 app 之上弹自绘全局窗口; 托管未就绪且 App 不在前台时立即返回 nil,
+    // 避免脚本永久卡死。
     // 注意: 必须把原始 buttons 传给 HUD, HUD 侧根据"空按钮+timeout"区分自动消失/确定按钮;
     //       这里不能提前替换为空按钮兜底, 否则会破坏该语义。
     if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-        NSLog(@"[TrollAutoTouch] App 不在前台, 使用 HUD 服务弹全局窗口");
+        NSLog(@"[TrollAutoTouch] App 不在前台, 使用进程内 HUD 宿主弹全局窗口");
         return [[TSHUDService sharedInstance] showAlertWithTitle:title
                                                          message:message
                                                          buttons:buttons
@@ -1583,24 +1584,11 @@ static void lua_register_all(lua_State *L) {
     // 注入失败时 App 前台弹菜单兜底, 后台(游戏在前台)走 HUD 系统级弹窗。
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
-    // 预热 HUD 服务: 新版 tipa 内含 HUD Services 独立 app, 由 TrollStore 一并
-    // 安装注册 (多 app tipa)。这里只做检测+启动; 若用户装的是旧版 tipa
-    // (不含 HUD Services), 无法现场安装 (TrollStore 2 无 platform 身份),
-    // 提示重装即可, 不阻塞脚本。
+    // 预热 HUD 宿主 (单 App 架构): 提前创建全屏透明窗口并注册 SBS 系统级托管,
+    // 使首次音量键弹窗即时可用; 失败不阻塞脚本 (弹窗会回退前台可见/静默切换)。
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        if (![[TSHUDService sharedInstance] isHUDInstalled]) {
-            lua_log(@"[HUD] 未检测到 HUD Services (旧版 tipa? 请用 TrollStore 重新安装最新版, 内含 HUD 服务)");
-            if (![[TSHUDService sharedInstance] installHUD]) {
-                lua_log(@"[HUD] HUD 服务不可用, 音量键弹窗将回退静默切换");
-                return;
-            }
-            lua_log(@"[HUD] HUD 服务已就绪");
-        }
-        if (![[TSHUDService sharedInstance] ensureHUDRunning]) {
-            lua_log(@"[HUD] HUD 服务启动失败, 音量键弹窗将回退静默切换");
-            return;
-        }
-        lua_log(@"[HUD] HUD 服务已就绪 (全局弹窗可用)");
+        [[TSHUDService sharedInstance] warmUp];
+        lua_log(@"[HUD] 进程内 HUD 宿主已就绪 (全局弹窗可用)");
     });
 
     // 诊断信息: 构建版本 + 注入状态。每次跑脚本日志首行即确认包版本与注入链路,
@@ -1722,11 +1710,10 @@ static void lua_register_all(lua_State *L) {
 }
 
 // 注入失败 + App 后台时的音量键控制菜单:
-// 通过 HUDServices 的系统级窗口 (SBSAccessibilityWindowHostingController 托管)
+// 通过进程内 HUD 宿主 (TSHUDHost, SBSAccessibilityWindowHostingController 托管)
 // 弹出 暂停/继续 · 停止 · 取消 菜单, 覆盖游戏等前台 app, 与 dylib 菜单等价。
-// HUD 随新版 tipa 由 TrollStore 安装注册; 未注册时无法现场安装, 提示重装;
-// 安装/启动/通信任一失败则回退静默切换, 保证"按了有反应"。脚本启动时会
-// 后台预热 HUD, 因此正常情况下按音量键时 HUD 已就绪, 弹窗秒开。
+// 托管未就绪时 showAlertWithTitle: 立即返回 nil, 回退静默切换, 保证"按了有反应"。
+// 脚本启动时会后台预热 HUD, 因此正常情况下按音量键时宿主已就绪, 弹窗秒开。
 - (void)_presentBackgroundVolumeMenu {
     static BOOL s_hudMenuShowing = NO;
     if (s_hudMenuShowing) return; // 菜单显示期间忽略再次按键
@@ -1737,16 +1724,8 @@ static void lua_register_all(lua_State *L) {
     lua_log(@"[音量键] 后台模式: 尝试 HUD 全局弹窗");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程;
-        // 先确保 HUD 已安装并运行(首次自动安装+启动, 可能耗时数秒), 失败立即回退。
-        BOOL installed = [[TSHUDService sharedInstance] isHUDInstalled];
-        if (![[TSHUDService sharedInstance] ensureHUDRunning]) {
-            lua_log([NSString stringWithFormat:@"[音量键] HUD 启动失败 (已安装=%d), 回退静默切换", installed]);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                s_hudMenuShowing = NO;
-                [self _togglePauseBackground];
-            });
-            return;
-        }
+        // 进程内宿主未托管到系统级且 App 不在前台时, showAlertWithTitle: 立即
+        // 返回 nil, 由下方统一回退静默切换, 保证"按了有反应"。
         // timeout=0 表示永久显示直到点击。
         NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
                                                                      message:message
