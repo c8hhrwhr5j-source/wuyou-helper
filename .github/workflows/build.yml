@@ -373,11 +373,25 @@ jobs:
           HUD_ENT_EXTRACTED=$(ldid -e "$HUD_BIN" 2>/dev/null || true)
           if echo "$HUD_ENT_EXTRACTED" | grep -q "platform-application"; then
             echo "[OK] HUD entitlements 验证通过 (platform-application)"
+            HUD_ENT_STATUS="OK"
           else
             echo "[!] 警告: HUD entitlements 验证失败"
+            HUD_ENT_STATUS="FAILED"
           fi
           echo "[OK] HUD 服务已嵌入: $HUD_DST"
           ls -la "$HUD_DST"
+          HUD_ARCHS=$(lipo -info "$HUD_BIN" 2>/dev/null | sed 's/^[^:]*: //' || echo "未知")
+          HUD_SIZE=$(stat -f%z "$HUD_BIN" 2>/dev/null || stat -c%s "$HUD_BIN" 2>/dev/null || echo "?")
+          {
+            echo ""
+            echo "### HUD 服务 (全局弹窗) 构建结果"
+            echo ""
+            echo "- 二进制: \`Payload/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices\`"
+            echo "- 大小: $HUD_SIZE bytes"
+            echo "- 架构: \`$HUD_ARCHS\`"
+            echo "- entitlements 注入 + platform-apply: \`$HUD_ENT_STATUS\`"
+            echo "- 关键 entitlement: \`platform-application\` / \`no-sandbox\` / \`frontboard.launchapplications\` / \`springboard.activate\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           echo ""
           echo "=== 架构 ==="
