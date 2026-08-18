@@ -64,6 +64,8 @@ static volatile BOOL _pauseRequested = NO;
 - (void)_execute:(NSString *)code filePath:(nullable NSString *)path;
 - (void)_handleVolumeKey;
 - (void)_presentInAppVolumeMenu;
+- (void)_presentBackgroundVolumeMenu;
+- (void)_togglePauseBackground;
 // App 内音量键控制菜单(注入失败兜底), 脚本结束时需自动关闭
 @property (nonatomic, weak) UIAlertController *volumeMenuAlert;
 @end
@@ -1577,7 +1579,8 @@ static void lua_register_all(lua_State *L) {
     self.runningPath = path;
     self.isRunning = YES;
     // 脚本运行期间启用音量键控制面板: 在任意 app(游戏)前台按音量键,
-    // SpringBoard 侧注入的 dylib 会弹出 暂停/继续·停止·取消 菜单。
+    // 注入成功时 SpringBoard 侧 dylib 弹 暂停/继续·停止·取消 菜单;
+    // 注入失败时 App 前台弹菜单兜底, 后台(游戏在前台)走 HUD 系统级弹窗。
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
     // 诊断信息: 构建版本 + 注入状态。每次跑脚本日志首行即确认包版本与注入链路,
@@ -1671,7 +1674,8 @@ static void lua_register_all(lua_State *L) {
 
 // 音量键被按下 (TSVolumeKeyMonitor 轮询回调, 任意线程 → 转主线程):
 //   注入成功 → 让 SpringBoard dylib 弹 暂停/继续·停止·取消 菜单;
-//   注入失败 → App 前台弹选择菜单, App 后台(游戏等)直接切换 暂停/继续 (不依赖注入的兜底)。
+//   注入失败 → App 前台弹选择菜单; App 后台(游戏等)走 HUD 系统级弹窗
+//              (SBSAccessibilityWindowHostingController 托管, 可覆盖游戏)。
 - (void)_handleVolumeKey {
     dispatch_async(dispatch_get_main_queue(), ^{
         // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略,
@@ -1691,16 +1695,62 @@ static void lua_register_all(lua_State *L) {
             [self _presentInAppVolumeMenu];
         } else {
             // 注入失败兜底 (App 后台, 如游戏/其他 app 在前台):
-            // UIAlertController 无法在后台显示, 直接用音量键切换 暂停/继续,
-            // 避免"按了没反应"。停止需回 TrollAutoTouch 弹菜单操作。
-            if (_pauseRequested) {
-                [self resume];
-                lua_log(@"[音量键] 后台模式: 脚本已继续 (停止请回 TrollAutoTouch 弹菜单选择)");
-            } else {
-                [self pause];
-            }
+            // UIAlertController 无法在后台显示, 改用 HUD 系统级弹窗。
+            [self _presentBackgroundVolumeMenu];
         }
     });
+}
+
+// 注入失败 + App 后台时的音量键控制菜单:
+// 通过 HUDServices 的系统级窗口 (SBSAccessibilityWindowHostingController 托管)
+// 弹出 暂停/继续 · 停止 · 取消 菜单, 覆盖游戏等前台 app, 与 dylib 菜单等价。
+// HUD 不可用(未安装/通信失败)时回退静默切换, 保证"按了有反应"。
+- (void)_presentBackgroundVolumeMenu {
+    static BOOL s_hudMenuShowing = NO;
+    if (s_hudMenuShowing) return; // 菜单显示期间忽略再次按键
+    // HUD 未安装: 直接回退静默切换 (首次安装可能耗时数十秒, 不能让音量键无响应)
+    if (![[TSHUDService sharedInstance] isHUDInstalled]) {
+        [self _togglePauseBackground];
+        return;
+    }
+    s_hudMenuShowing = YES;
+
+    NSString *toggleTitle = _pauseRequested ? @"继续" : @"暂停";
+    NSString *message = _pauseRequested ? @"脚本已暂停，请选择操作" : @"脚本运行中，请选择操作";
+    lua_log(@"[音量键] 后台模式: 通过 HUD 弹控制菜单");
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程;
+        // timeout=0 表示永久显示直到点击。
+        NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
+                                                                     message:message
+                                                                     buttons:@[toggleTitle, @"停止", @"取消"]
+                                                                     timeout:0];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            s_hudMenuShowing = NO;
+            if ([clicked isEqualToString:@"停止"]) {
+                [self stop];
+                lua_log(@"[音量键] 脚本已停止");
+            } else if ([clicked isEqualToString:@"继续"]) {
+                [self resume];
+            } else if ([clicked isEqualToString:@"暂停"]) {
+                [self pause];
+            } else {
+                // HUD 不可用/无响应(超时返回 nil): 回退静默切换
+                lua_log(@"[音量键] HUD 弹窗不可用, 回退静默切换");
+                [self _togglePauseBackground];
+            }
+        });
+    });
+}
+
+// HUD 也不可用时的最后兜底: 静默切换 暂停/继续 (与旧版行为一致)
+- (void)_togglePauseBackground {
+    if (_pauseRequested) {
+        [self resume];
+        lua_log(@"[音量键] 后台模式: 脚本已继续 (停止请回 TrollAutoTouch 弹菜单选择)");
+    } else {
+        [self pause];
+    }
 }
 
 // App 进程内音量键控制菜单(注入失败时的兜底, 不依赖 dylib 注入):
