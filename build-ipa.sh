@@ -233,13 +233,21 @@ case "$MODE" in
     cp -R "$HUD_APP" "$PAYLOAD/HUDServices.app"
     mkdir -p "$PAYLOAD/TrollAutoTouch.app/HUD"
     cp -R "$HUD_APP" "$PAYLOAD/TrollAutoTouch.app/HUD/HUDServices.app"
-    if command -v ldid >/dev/null 2>&1; then
+    HUD_ENT="$ROOT/HUDServices/HUDServices.entitlements"
+    if [ -f "$HUD_ENT" ]; then
       for BIN in "$PAYLOAD/HUDServices.app/HUDServices" "$PAYLOAD/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices"; do
-        ldid -S"$ROOT/HUDServices/HUDServices.entitlements" --platform-apply "$BIN" \
-          && echo "[OK] HUD entitlements 已注入: $BIN"
+        if command -v ldid >/dev/null 2>&1 && ldid -S"$HUD_ENT" --platform-apply "$BIN" 2>/dev/null; then
+          echo "[OK] HUD entitlements 已注入 (platform-apply): $BIN"
+        elif command -v ldid >/dev/null 2>&1 && ldid -S"$HUD_ENT" "$BIN" 2>/dev/null; then
+          echo "[OK] HUD entitlements 已注入: $BIN"
+        elif codesign --force --sign - --entitlements "$HUD_ENT" "$BIN" 2>/dev/null; then
+          echo "[OK] HUD entitlements 已注入 (codesign): $BIN"
+        else
+          echo "[!] HUD entitlements 注入失败: $BIN"
+        fi
       done
     else
-      echo "[!] 未找到 ldid, HUD entitlements 未注入 (全局弹窗可能不可用)"
+      echo "[!] 未找到 HUD entitlements ($HUD_ENT), 跳过注入"
     fi
     echo "[OK] HUD 已放置: tipa 根 Payload/HUDServices.app + 主 bundle HUD/ (后备)"
     ;;

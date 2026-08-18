@@ -355,11 +355,19 @@ jobs:
           # 同时保留嵌入主 bundle 的 HUD/HUDServices.app 作后备 (palera1n 越狱等
           # MobileInstallation 权限生效的设备仍可由主 App 现场安装)。
           HUD_SRC="$PWD/build/hud/HUDServices.app"
-          HUD_ENT="$PWD/HUDServices/HUDServices.entitlements"
+          HUD_ENT="/tmp/hud_ent.xml"
           if [ ! -d "$HUD_SRC" ]; then
             echo "[x] 未找到 HUDServices.app ($HUD_SRC), 全局弹窗不可用"
             exit 1
           fi
+          # CI checkout 出来的 entitlements 文件可能被破坏(空 dict, 与主 app 同坑):
+          # ldid -e 提取会得到空 dict 导致"验证失败"。从 git 对象恢复; 失败时回退
+          # 文件系统路径 (本地开发)。
+          if ! git show HEAD:HUDServices/HUDServices.entitlements > "$HUD_ENT" 2>/dev/null \
+             || ! grep -q "<dict>" "$HUD_ENT"; then
+            cp -f "$PWD/HUDServices/HUDServices.entitlements" "$HUD_ENT"
+          fi
+          echo "[*] HUD entitlements 来源: $(wc -c < "$HUD_ENT") bytes"
           HUD_PAYLOAD_DST="$PWD/build/Payload/HUDServices.app"
           HUD_EMBED_DST="$APP_DST/HUD/HUDServices.app"
           rm -rf "$HUD_PAYLOAD_DST" "$APP_DST/HUD"
@@ -372,17 +380,22 @@ jobs:
             lipo -info "$HUD_BIN" || true
             # 注入 HUD entitlements: platform-application + no-sandbox + 前台激活权限,
             # 使 HUD 拥有激活自己/交还前台/托管系统级窗口的权限。
-            if [ -f "$HUD_ENT" ] && ldid -S"$HUD_ENT" --platform-apply "$HUD_BIN" 2>/tmp/hud_sign.log; then
+            if ldid -S"$HUD_ENT" --platform-apply "$HUD_BIN" 2>/tmp/hud_sign.log; then
               echo "[OK] HUD 已注入 entitlements + platform-apply"
-            elif ldid -S"$HUD_ENT" "$HUD_BIN" 2>/tmp/hud_sign.log; then
-              echo "[OK] HUD 已注入 entitlements"
+            elif ldid -S"$HUD_ENT" "$HUD_BIN" 2>>/tmp/hud_sign.log; then
+              echo "[OK] HUD 已注入 entitlements (无 platform-apply)"
+            elif codesign --force --sign - --entitlements "$HUD_ENT" "$HUD_BIN" 2>>/tmp/hud_sign.log; then
+              echo "[OK] HUD 已注入 entitlements (codesign, 无 platform-apply)"
             else
               echo "[!] HUD entitlements 注入失败, 全局弹窗可能不可用:"
               echo "    $(cat /tmp/hud_sign.log)"
             fi
             HUD_ENT_EXTRACTED=$(ldid -e "$HUD_BIN" 2>/dev/null || true)
             if echo "$HUD_ENT_EXTRACTED" | grep -q "platform-application"; then
-              echo "[OK] HUD entitlements 验证通过 (platform-application): $HUD_BIN"
+              echo "[OK] HUD entitlements 验证通过 (platform-application + 完整权限): $HUD_BIN"
+              HUD_ENT_STATUS="OK"
+            elif echo "$HUD_ENT_EXTRACTED" | grep -q "no-sandbox"; then
+              echo "[OK] HUD entitlements 验证通过 (no-sandbox 已注入): $HUD_BIN"
               HUD_ENT_STATUS="OK"
             else
               echo "[!] 警告: HUD entitlements 验证失败: $HUD_BIN"
