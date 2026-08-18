@@ -204,6 +204,44 @@ case "$MODE" in
 
     prepare_icons "$PAYLOAD/TrollAutoTouch.app"
     sign_copy_entitlements "$PAYLOAD/TrollAutoTouch.app"
+
+    # ── HUD 服务 (全局弹窗): 编译 HUDServices.app 并放入 tipa 根 Payload/ ──
+    # 部署架构 (TrollStore 2.x): HUD 作为独立 app 随 tipa 由 TrollStore 一并
+    # 安装注册 (多 app tipa, 与官方 TrollStore.tipa 同机制)。iOS 15.5+ TrollStore
+    # 无 platform 身份, 主 App 运行时无法现场安装 .app, 因此必须由 TrollStore
+    # 直接安装注册。同时嵌入主 bundle HUD/ 作后备 (越狱设备 MobileInstallation
+    # 可用时仍可现场安装)。
+    echo "[*] 编译 HUD 服务 (HUDServices)"
+    xcodebuild -project "$ROOT/TrollAutoTouch.xcodeproj" \
+      -target HUDServices \
+      -configuration Release \
+      -sdk iphoneos \
+      ARCHS="arm64 arm64e" \
+      ONLY_ACTIVE_ARCH=NO \
+      CODE_SIGNING_ALLOWED=NO \
+      CODE_SIGNING_REQUIRED=NO \
+      CODE_SIGN_IDENTITY="" \
+      CONFIGURATION_BUILD_DIR="$BUILD_DIR/hud" \
+      build > /tmp/hud_build.log 2>&1 || {
+        echo "[x] HUD 服务编译失败，完整日志:"
+        tail -80 /tmp/hud_build.log
+        exit 1
+      }
+    HUD_APP="$(find "$BUILD_DIR/hud" -name 'HUDServices.app' -type d | head -1)"
+    [ -z "$HUD_APP" ] && { echo "[x] 未找到 HUDServices.app"; exit 1; }
+    rm -rf "$PAYLOAD/HUDServices.app" "$PAYLOAD/TrollAutoTouch.app/HUD"
+    cp -R "$HUD_APP" "$PAYLOAD/HUDServices.app"
+    mkdir -p "$PAYLOAD/TrollAutoTouch.app/HUD"
+    cp -R "$HUD_APP" "$PAYLOAD/TrollAutoTouch.app/HUD/HUDServices.app"
+    if command -v ldid >/dev/null 2>&1; then
+      for BIN in "$PAYLOAD/HUDServices.app/HUDServices" "$PAYLOAD/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices"; do
+        ldid -S"$ROOT/HUDServices/HUDServices.entitlements" --platform-apply "$BIN" \
+          && echo "[OK] HUD entitlements 已注入: $BIN"
+      done
+    else
+      echo "[!] 未找到 ldid, HUD entitlements 未注入 (全局弹窗可能不可用)"
+    fi
+    echo "[OK] HUD 已放置: tipa 根 Payload/HUDServices.app + 主 bundle HUD/ (后备)"
     ;;
   payload)
     APP="${2:-}"

@@ -32,7 +32,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// HUD 是否已安装
 - (BOOL)isHUDInstalled;
 
-/// 安装 HUD 服务 (从主 bundle 提取并注册到 LaunchServices)
+/// 确保 HUD 服务可用 (TrollStore 多 app tipa 已随包注册时直接复用;
+/// 老设备/越狱且 MobileInstallation 权限生效时回退现场安装)
 - (BOOL)installHUD;
 
 /// 启动 HUD 服务 (若未运行)

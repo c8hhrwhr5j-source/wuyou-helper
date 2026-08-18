@@ -344,53 +344,63 @@ jobs:
 
           echo ""
           echo "=== HUD 服务 (全局弹窗) ==="
-          # 独立隐藏 app: 随主包分发到 HUD/HUDServices.app, 运行时由主 App
-          # 复制出来并用 MobileInstallation 安装, 然后通过 CPDistributedMessagingCenter
-          # 请求它在任意前台 app 之上弹系统对话框 (sys.alert / sys.alertButtons 全局版)。
+          # 独立隐藏 app: 通过 CPDistributedMessagingCenter 接收请求, 在任意前台
+          # app 之上弹系统对话框 (sys.alert / sys.alertButtons 全局版)。
+          # 部署架构 (TrollStore 2.x): HUD 作为独立 app 放进 tipa 根 Payload/ 下,
+          # TrollStore 安装 tipa 时会把它与 TrollAutoTouch 一并注册到 LaunchServices
+          # (多 app tipa, 与官方 TrollStore.tipa 同机制)。主 App 运行时只需启动它,
+          # 不再现场安装 —— iOS 15.5+ TrollStore 无 platform 身份, MobileInstallation
+          # 私有 API 的 XPC 连接会被拒绝; LSApplicationWorkspace installApplication:
+          # 又只接受 .ipa 不接受裸 .app 目录, 现场安装必然失败。
+          # 同时保留嵌入主 bundle 的 HUD/HUDServices.app 作后备 (palera1n 越狱等
+          # MobileInstallation 权限生效的设备仍可由主 App 现场安装)。
           HUD_SRC="$PWD/build/hud/HUDServices.app"
-          HUD_DST="$APP_DST/HUD/HUDServices.app"
           HUD_ENT="$PWD/HUDServices/HUDServices.entitlements"
           if [ ! -d "$HUD_SRC" ]; then
             echo "[x] 未找到 HUDServices.app ($HUD_SRC), 全局弹窗不可用"
             exit 1
           fi
-          rm -rf "$APP_DST/HUD"
+          HUD_PAYLOAD_DST="$PWD/build/Payload/HUDServices.app"
+          HUD_EMBED_DST="$APP_DST/HUD/HUDServices.app"
+          rm -rf "$HUD_PAYLOAD_DST" "$APP_DST/HUD"
+          cp -R "$HUD_SRC" "$HUD_PAYLOAD_DST"
           mkdir -p "$APP_DST/HUD"
-          cp -R "$HUD_SRC" "$HUD_DST"
-          HUD_BIN="$HUD_DST/HUDServices"
-          echo "[*] HUD 二进制: $HUD_BIN"
-          lipo -info "$HUD_BIN" || true
-          # 注入 HUD entitlements: platform-application + no-sandbox + 前台激活权限,
-          # 使 HUD 被 MobileInstallation 安装后拥有激活自己/交还前台的权限。
-          if [ -f "$HUD_ENT" ] && ldid -S"$HUD_ENT" --platform-apply "$HUD_BIN" 2>/tmp/hud_sign.log; then
-            echo "[OK] HUD 已注入 entitlements + platform-apply"
-          elif ldid -S"$HUD_ENT" "$HUD_BIN" 2>/tmp/hud_sign.log; then
-            echo "[OK] HUD 已注入 entitlements"
-          else
-            echo "[!] HUD entitlements 注入失败, 全局弹窗可能不可用:"
-            echo "    $(cat /tmp/hud_sign.log)"
-          fi
-          HUD_ENT_EXTRACTED=$(ldid -e "$HUD_BIN" 2>/dev/null || true)
-          if echo "$HUD_ENT_EXTRACTED" | grep -q "platform-application"; then
-            echo "[OK] HUD entitlements 验证通过 (platform-application)"
-            HUD_ENT_STATUS="OK"
-          else
-            echo "[!] 警告: HUD entitlements 验证失败"
-            HUD_ENT_STATUS="FAILED"
-          fi
-          echo "[OK] HUD 服务已嵌入: $HUD_DST"
-          ls -la "$HUD_DST"
-          HUD_ARCHS=$(lipo -info "$HUD_BIN" 2>/dev/null | sed 's/^[^:]*: //' || echo "未知")
-          HUD_SIZE=$(stat -f%z "$HUD_BIN" 2>/dev/null || stat -c%s "$HUD_BIN" 2>/dev/null || echo "?")
+          cp -R "$HUD_SRC" "$HUD_EMBED_DST"
+          echo "[OK] HUD 已放置: tipa 根 Payload/HUDServices.app (TrollStore 多 app 安装) + 主 bundle HUD/ (后备)"
+          for HUD_BIN in "$HUD_PAYLOAD_DST/HUDServices" "$HUD_EMBED_DST/HUDServices"; do
+            echo "[*] HUD 二进制: $HUD_BIN"
+            lipo -info "$HUD_BIN" || true
+            # 注入 HUD entitlements: platform-application + no-sandbox + 前台激活权限,
+            # 使 HUD 拥有激活自己/交还前台/托管系统级窗口的权限。
+            if [ -f "$HUD_ENT" ] && ldid -S"$HUD_ENT" --platform-apply "$HUD_BIN" 2>/tmp/hud_sign.log; then
+              echo "[OK] HUD 已注入 entitlements + platform-apply"
+            elif ldid -S"$HUD_ENT" "$HUD_BIN" 2>/tmp/hud_sign.log; then
+              echo "[OK] HUD 已注入 entitlements"
+            else
+              echo "[!] HUD entitlements 注入失败, 全局弹窗可能不可用:"
+              echo "    $(cat /tmp/hud_sign.log)"
+            fi
+            HUD_ENT_EXTRACTED=$(ldid -e "$HUD_BIN" 2>/dev/null || true)
+            if echo "$HUD_ENT_EXTRACTED" | grep -q "platform-application"; then
+              echo "[OK] HUD entitlements 验证通过 (platform-application): $HUD_BIN"
+              HUD_ENT_STATUS="OK"
+            else
+              echo "[!] 警告: HUD entitlements 验证失败: $HUD_BIN"
+              HUD_ENT_STATUS="FAILED"
+            fi
+          done
+          ls -la "$HUD_PAYLOAD_DST" "$HUD_EMBED_DST"
+          HUD_ARCHS=$(lipo -info "$HUD_PAYLOAD_DST/HUDServices" 2>/dev/null | sed 's/^[^:]*: //' || echo "未知")
+          HUD_SIZE=$(stat -f%z "$HUD_PAYLOAD_DST/HUDServices" 2>/dev/null || stat -c%s "$HUD_PAYLOAD_DST/HUDServices" 2>/dev/null || echo "?")
           {
             echo ""
             echo "### HUD 服务 (全局弹窗) 构建结果"
             echo ""
-            echo "- 二进制: \`Payload/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices\`"
+            echo "- 部署: \`Payload/HUDServices.app\` (TrollStore 多 app 安装) + \`Payload/TrollAutoTouch.app/HUD/HUDServices.app\` (后备)"
             echo "- 大小: $HUD_SIZE bytes"
             echo "- 架构: \`$HUD_ARCHS\`"
             echo "- entitlements 注入 + platform-apply: \`$HUD_ENT_STATUS\`"
-            echo "- 关键 entitlement: \`platform-application\` / \`no-sandbox\` / \`frontboard.launchapplications\` / \`springboard.activate\`"
+            echo "- 关键 entitlement: \`platform-application\` / \`no-sandbox\` / \`frontboard.launchapplications\` / \`springboard.activate\` / \`springboard.accessibility-window-hosting\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo ""
@@ -520,7 +530,7 @@ jobs:
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/HUDServices.app/HUDServices" "Payload/TrollAutoTouch.app/HUD/HUDServices.app/HUDServices"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else

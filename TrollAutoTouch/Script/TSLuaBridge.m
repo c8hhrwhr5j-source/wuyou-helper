@@ -1583,17 +1583,18 @@ static void lua_register_all(lua_State *L) {
     // 注入失败时 App 前台弹菜单兜底, 后台(游戏在前台)走 HUD 系统级弹窗。
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
-    // 预热 HUD 服务: 首次使用时需把随包分发的 HUD/HUDServices.app 安装到
-    // 系统并后台启动(可能耗时 10-30 秒), 提前在后台完成, 这样用户在游戏里
-    // 按音量键时 HUD 已就绪, 弹窗秒开; 否则第一次按键会现场安装造成卡顿。
+    // 预热 HUD 服务: 新版 tipa 内含 HUD Services 独立 app, 由 TrollStore 一并
+    // 安装注册 (多 app tipa)。这里只做检测+启动; 若用户装的是旧版 tipa
+    // (不含 HUD Services), 无法现场安装 (TrollStore 2 无 platform 身份),
+    // 提示重装即可, 不阻塞脚本。
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         if (![[TSHUDService sharedInstance] isHUDInstalled]) {
-            lua_log(@"[HUD] 首次使用: 正在后台安装 HUD 服务... (仅需一次)");
+            lua_log(@"[HUD] 未检测到 HUD Services (旧版 tipa? 请用 TrollStore 重新安装最新版, 内含 HUD 服务)");
             if (![[TSHUDService sharedInstance] installHUD]) {
-                lua_log(@"[HUD] HUD 服务安装失败, 音量键弹窗将回退静默切换");
+                lua_log(@"[HUD] HUD 服务不可用, 音量键弹窗将回退静默切换");
                 return;
             }
-            lua_log(@"[HUD] HUD 服务安装完成");
+            lua_log(@"[HUD] HUD 服务已就绪");
         }
         if (![[TSHUDService sharedInstance] ensureHUDRunning]) {
             lua_log(@"[HUD] HUD 服务启动失败, 音量键弹窗将回退静默切换");
@@ -1723,9 +1724,9 @@ static void lua_register_all(lua_State *L) {
 // 注入失败 + App 后台时的音量键控制菜单:
 // 通过 HUDServices 的系统级窗口 (SBSAccessibilityWindowHostingController 托管)
 // 弹出 暂停/继续 · 停止 · 取消 菜单, 覆盖游戏等前台 app, 与 dylib 菜单等价。
-// HUD 未安装时由 ensureHUDRunning 自动安装(首次较慢); 安装/启动/通信
-// 任一失败则回退静默切换, 保证"按了有反应"。脚本启动时会后台预热 HUD,
-// 因此正常情况下按音量键时 HUD 已就绪, 弹窗秒开。
+// HUD 随新版 tipa 由 TrollStore 安装注册; 未注册时无法现场安装, 提示重装;
+// 安装/启动/通信任一失败则回退静默切换, 保证"按了有反应"。脚本启动时会
+// 后台预热 HUD, 因此正常情况下按音量键时 HUD 已就绪, 弹窗秒开。
 - (void)_presentBackgroundVolumeMenu {
     static BOOL s_hudMenuShowing = NO;
     if (s_hudMenuShowing) return; // 菜单显示期间忽略再次按键
@@ -1733,7 +1734,7 @@ static void lua_register_all(lua_State *L) {
 
     NSString *toggleTitle = _pauseRequested ? @"继续" : @"暂停";
     NSString *message = _pauseRequested ? @"脚本已暂停，请选择操作" : @"脚本运行中，请选择操作";
-    lua_log(@"[音量键] 后台模式: 尝试 HUD 全局弹窗 (首次会自动安装 HUD 服务)");
+    lua_log(@"[音量键] 后台模式: 尝试 HUD 全局弹窗");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程;
         // 先确保 HUD 已安装并运行(首次自动安装+启动, 可能耗时数秒), 失败立即回退。

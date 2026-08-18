@@ -3,9 +3,11 @@
 //
 //  架构 (与原版 TrollAutoScript 的 HUDServices 一致):
 //  主 App ──(CPDistributedMessagingCenter)──> HUDServices (独立隐藏 app)
-//    1. 主 App 把随包分发的 HUD/HUDServices.app 复制出来并安装
-//       (经 TSAppManager, 内部探测 MobileInstallation 权限: 未生效时
-//        自动跳过该私有 API 以免崩溃, 回退 LSApplicationWorkspace)
+//    1. HUD 作为独立 app 随 tipa 一起由 TrollStore 安装注册 (多 app tipa,
+//       与官方 TrollStore.tipa 同机制) —— iOS 15.5+ TrollStore 无 platform
+//       身份, 主 App 运行时无法现场安装 .app (MobileInstallation XPC 被拒,
+//       LSApplicationWorkspace 又不接受裸 .app 目录), TrollStore 自装是
+//       唯一可靠途径; 老设备/越狱环境仍保留 MobileInstallation 现场安装后备
 //    2. 启动 HUD (LSApplicationWorkspace / SBSLaunchApplicationWithIdentifier)
 //    3. 通过 CPDistributedMessagingCenter 发送 "sysAlertRequest:" 消息
 //    4. HUD 把自己激活到前台, 在高 windowLevel 窗口上 present UIAlertController
@@ -58,6 +60,14 @@ static id HUDMessagingCenter(void) {
 }
 
 - (BOOL)installHUD {
+    // 新架构 (TrollStore 2.x 多 app tipa): HUD 已作为独立 app 随 tipa 由
+    // TrollStore 安装注册到 LaunchServices, 这里直接复用即可。这也说明
+    // 用户当前装的 tipa 已包含 HUD Services。
+    if ([self isHUDInstalled]) {
+        NSLog(@"[TSHUDService] HUD 已被 TrollStore 安装注册, 直接复用");
+        return YES;
+    }
+
     // 安装节流: 失败后 30 秒内不重复尝试 (音量键连按时避免反复复制/安装)
     static NSTimeInterval s_lastAttempt = 0;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -67,7 +77,19 @@ static id HUDMessagingCenter(void) {
     }
     s_lastAttempt = now;
 
-    // 1. 定位随主包分发的 HUD/HUDServices.app
+    // 未注册到 LaunchServices: 说明用户装的是旧版 tipa (不含 HUD Services)。
+    // 现场安装不可行 —— iOS 15.5+ TrollStore 无 platform 身份, MobileInstallation
+    // 私有 API 的 XPC 连接会被拒绝 (直接调用甚至崩溃); LSApplicationWorkspace
+    // installApplication: 只接受 .ipa 文件, 不接受裸 .app 目录。唯一可靠途径是
+    // 用 TrollStore 重新安装最新 tipa (内含 HUD Services 独立 app)。
+    if (![TSAppManager canUseMobileInstallation]) {
+        NSLog(@"[TSHUDService] HUD 未安装且 MobileInstallation 权限不可用, 现场安装不可行。"
+              @"请用 TrollStore 重新安装最新 tipa (内含 HUD Services 独立 app), 重装后重启本 App。");
+        return NO;
+    }
+
+    // 后备 (仅限 MobileInstallation 权限实际生效的设备: palera1n 越狱等):
+    // 复制随包分发的 HUD/HUDServices.app 并经 TSAppManager 安装。
     NSString *sourcePath = [[NSBundle mainBundle] pathForResource:@"HUDServices"
                                                           ofType:@"app"
                                                      inDirectory:@"HUD"];
@@ -75,8 +97,6 @@ static id HUDMessagingCenter(void) {
         NSLog(@"[TSHUDService] 主 bundle 中未找到 HUD/HUDServices.app (%@)", sourcePath);
         return NO;
     }
-
-    // 2. 复制到本 App 数据容器 (no-sandbox 下可写)
     NSString *docDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
     NSString *destPath = [docDir stringByAppendingPathComponent:@"HUDServices.app"];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -85,18 +105,11 @@ static id HUDMessagingCenter(void) {
         NSLog(@"[TSHUDService] 复制 HUD.app 到 %@ 失败", destPath);
         return NO;
     }
-
-    // 3. 经 TSAppManager 安装。注意: 不能直接调 MobileInstallation 私有 API ——
-    //    该 API 要求调用者实际拥有 MobileInstallationHelper 权限, 而
-    //    iOS 15.5+ 的 TrollStore 无法授予 platform 身份, 无权限直接调用
-    //    会崩溃 (此前线上版本正是因此闪退)。TSAppManager 内部会用
-    //    canUseMobileInstallation 探测, 未生效时自动回退 LSApplicationWorkspace
-    //    (不崩溃, 失败仅返回 NO)。
     BOOL ok = [[TSAppManager shared] installIPA:destPath];
     if (ok) {
         NSLog(@"[TSHUDService] HUD 安装成功: %@", destPath);
     } else {
-        NSLog(@"[TSHUDService] HUD 安装失败 (MobileInstallation 权限不可用, 已安全回退)");
+        NSLog(@"[TSHUDService] HUD 现场安装失败 (MobileInstallation 不可用), 请改用 TrollStore 安装最新 tipa");
     }
     return ok;
 }
