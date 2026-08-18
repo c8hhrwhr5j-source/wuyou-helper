@@ -127,6 +127,10 @@ static id HUDMessagingCenter(void) {
             return NO;
         }
     }
+    // 已在运行则直接复用, 避免重复 SBS launch 与额外等待 (音量键连按时秒弹窗)
+    if ([[TSAppManager shared] isRunning:kHUDBundleIdentifier]) {
+        return YES;
+    }
     // 后台启动 HUD (suspended=YES, 不抢前台)。HUD 通过
     // SBSAccessibilityWindowHostingController 把窗口托管到系统级,
     // 在后台即可显示全局弹窗, 无需位于前台。

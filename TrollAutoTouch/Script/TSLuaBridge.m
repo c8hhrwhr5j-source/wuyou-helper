@@ -1583,6 +1583,25 @@ static void lua_register_all(lua_State *L) {
     // 注入失败时 App 前台弹菜单兜底, 后台(游戏在前台)走 HUD 系统级弹窗。
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
+    // 预热 HUD 服务: 首次使用时需把随包分发的 HUD/HUDServices.app 安装到
+    // 系统并后台启动(可能耗时 10-30 秒), 提前在后台完成, 这样用户在游戏里
+    // 按音量键时 HUD 已就绪, 弹窗秒开; 否则第一次按键会现场安装造成卡顿。
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        if (![[TSHUDService sharedInstance] isHUDInstalled]) {
+            lua_log(@"[HUD] 首次使用: 正在后台安装 HUD 服务... (仅需一次)");
+            if (![[TSHUDService sharedInstance] installHUD]) {
+                lua_log(@"[HUD] HUD 服务安装失败, 音量键弹窗将回退静默切换");
+                return;
+            }
+            lua_log(@"[HUD] HUD 服务安装完成");
+        }
+        if (![[TSHUDService sharedInstance] ensureHUDRunning]) {
+            lua_log(@"[HUD] HUD 服务启动失败, 音量键弹窗将回退静默切换");
+            return;
+        }
+        lua_log(@"[HUD] HUD 服务已就绪 (全局弹窗可用)");
+    });
+
     // 诊断信息: 构建版本 + 注入状态。每次跑脚本日志首行即确认包版本与注入链路,
     // 避免"装了旧包还在看旧日志"的误判 (旧包此处无输出, 注入失败也无详细原因)。
     NSString *ver   = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
@@ -1704,22 +1723,29 @@ static void lua_register_all(lua_State *L) {
 // 注入失败 + App 后台时的音量键控制菜单:
 // 通过 HUDServices 的系统级窗口 (SBSAccessibilityWindowHostingController 托管)
 // 弹出 暂停/继续 · 停止 · 取消 菜单, 覆盖游戏等前台 app, 与 dylib 菜单等价。
-// HUD 不可用(未安装/通信失败)时回退静默切换, 保证"按了有反应"。
+// HUD 未安装时由 ensureHUDRunning 自动安装(首次较慢); 安装/启动/通信
+// 任一失败则回退静默切换, 保证"按了有反应"。脚本启动时会后台预热 HUD,
+// 因此正常情况下按音量键时 HUD 已就绪, 弹窗秒开。
 - (void)_presentBackgroundVolumeMenu {
     static BOOL s_hudMenuShowing = NO;
     if (s_hudMenuShowing) return; // 菜单显示期间忽略再次按键
-    // HUD 未安装: 直接回退静默切换 (首次安装可能耗时数十秒, 不能让音量键无响应)
-    if (![[TSHUDService sharedInstance] isHUDInstalled]) {
-        [self _togglePauseBackground];
-        return;
-    }
     s_hudMenuShowing = YES;
 
     NSString *toggleTitle = _pauseRequested ? @"继续" : @"暂停";
     NSString *message = _pauseRequested ? @"脚本已暂停，请选择操作" : @"脚本运行中，请选择操作";
-    lua_log(@"[音量键] 后台模式: 通过 HUD 弹控制菜单");
+    lua_log(@"[音量键] 后台模式: 尝试 HUD 全局弹窗 (首次会自动安装 HUD 服务)");
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程;
+        // 先确保 HUD 已安装并运行(首次自动安装+启动, 可能耗时数秒), 失败立即回退。
+        BOOL installed = [[TSHUDService sharedInstance] isHUDInstalled];
+        if (![[TSHUDService sharedInstance] ensureHUDRunning]) {
+            lua_log([NSString stringWithFormat:@"[音量键] HUD 启动失败 (已安装=%d), 回退静默切换", installed]);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                s_hudMenuShowing = NO;
+                [self _togglePauseBackground];
+            });
+            return;
+        }
         // timeout=0 表示永久显示直到点击。
         NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
                                                                      message:message
