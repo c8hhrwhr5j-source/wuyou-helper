@@ -127,11 +127,14 @@ static id HUDMessagingCenter(void) {
             return NO;
         }
     }
-    // 每次请求都激活 HUD: 对未运行进程=启动; 对后台挂起进程=恢复运行并带到前台。
-    // 激活后 HUD 才处于前台并运行 runloop, 才能处理消息中心的弹窗请求。
-    if (![[TSAppManager shared] openApp:kHUDBundleIdentifier]) {
-        NSLog(@"[TSHUDService] 启动/激活 HUD 失败");
-        return NO;
+    // 后台启动 HUD (suspended=YES, 不抢前台)。HUD 通过
+    // SBSAccessibilityWindowHostingController 把窗口托管到系统级,
+    // 在后台即可显示全局弹窗, 无需位于前台。
+    if (![[TSAppManager shared] launchAppInBackground:kHUDBundleIdentifier]) {
+        NSLog(@"[TSHUDService] 后台启动 HUD 失败, 回退前台启动");
+        if (![[TSAppManager shared] openApp:kHUDBundleIdentifier]) {
+            return NO;
+        }
     }
     // 等待 HUD 完成启动与消息中心注册 (首次启动较慢)
     usleep(600000);
@@ -149,7 +152,8 @@ static id HUDMessagingCenter(void) {
         return nil;
     }
 
-    // 记录当前前台 app, 弹窗结束后由 HUD 交还前台
+    // 记录当前前台 app: HUD 仅在系统级托管失败的兜底路径下,
+    // 才会把自己激活到前台, 此时弹窗结束后需交还前台。
     NSString *frontBid = [[TSAppManager shared] frontBid];
     if ([frontBid isEqualToString:kHUDBundleIdentifier]) {
         frontBid = nil;

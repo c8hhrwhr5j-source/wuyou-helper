@@ -284,6 +284,17 @@ static void _loadMobileInstallation(void) {
     return NO;
 }
 
+- (BOOL)launchAppInBackground:(NSString *)bundleId {
+    // SpringBoardServices: 第三个参数 suspended=YES, 进程启动但不激活到前台
+    _loadSpringBoardServices();
+    if (_SBSLaunchApplicationWithIdentifier && _SBSSpringBoardServerPort) {
+        mach_port_t port = _SBSSpringBoardServerPort();
+        return _SBSLaunchApplicationWithIdentifier(port, (__bridge CFStringRef)bundleId, true) == 0;
+    }
+    // 回退: 前台启动
+    return [self openApp:bundleId];
+}
+
 - (BOOL)closeApp:(NSString *)bundleId {
     pid_t pid = [self pidForBundleId:bundleId];
     if (pid <= 0) return NO;

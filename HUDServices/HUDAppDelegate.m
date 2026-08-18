@@ -15,14 +15,23 @@
 #import "HUDAlertPresenter.h"
 #import "HUDSystem.h"
 #import "HUDServicesPrivate.h"
+#import <QuartzCore/QuartzCore.h>
 
 static NSString *const kHUDCenterName = @"com.trollautotouch.HUDMessaging";
 static NSString *const kAlertRequestName = @"sysAlertRequest:";
 
+// 系统级窗口托管层级: 高于普通 app 内容(UIWindowLevelAlert 为 2000),
+// 足以盖住所有前台 app 的窗口。
+static const double kSBSHostingWindowLevel = 10000.0;
+
 @implementation HUDAppDelegate {
     CPDistributedMessagingCenter *_center;
     HUDAlertPresenter *_alertPresenter;
-    dispatch_semaphore_t _activationSem;
+    // iOS 15+: 通过 SBSAccessibilityWindowHostingController 把本进程窗口的
+    // CAContext 注册到 SpringBoard 的 accessibility 窗口层, 实现
+    // "不依赖 app 前台" 的系统级弹窗 (逆向自 AutoGoRunner/agoverlayd)。
+    SBSAccessibilityWindowHostingController *_sbsHostingCtrl;
+    unsigned _registeredContextId;
 }
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
@@ -47,14 +56,48 @@ static NSString *const kAlertRequestName = @"sysAlertRequest:";
         [self->_center runServerOnCurrentThread];
     });
 
+    // iOS 15+: 把窗口注册到 SpringBoard 的 accessibility 窗口层
+    // (makeKeyAndVisible 后 layer 需一轮 runloop 才绑定 CAContext, 故延迟重试)
+    [self _registerAccessibilityHostingWithRetryCount:10];
+
     return YES;
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
-    if (_activationSem) {
-        dispatch_semaphore_signal(_activationSem);
-        _activationSem = nil;
+    // app 激活后 window 的 CAContext 可能重建 (contextId 变化), 重新注册
+    [self _registerAccessibilityHostingWithRetryCount:10];
+}
+
+#pragma mark - 系统级窗口托管 (SBSAccessibilityWindowHostingController)
+
+- (BOOL)_registerAccessibilityHostingWithRetryCount:(NSInteger)retryCount {
+    if (retryCount <= 0) return NO;
+
+    unsigned ctxId = (unsigned)[self.window.layer contextId];
+    if (ctxId == 0) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            __strong typeof(self) self = weakSelf;
+            if (self) {
+                [self _registerAccessibilityHostingWithRetryCount:retryCount - 1];
+            }
+        });
+        return NO;
     }
+
+    if (_registeredContextId == ctxId) return YES; // 已注册
+
+    if (!_sbsHostingCtrl) {
+        _sbsHostingCtrl = [[SBSAccessibilityWindowHostingController alloc] init];
+    }
+    if (_registeredContextId != 0) {
+        [_sbsHostingCtrl unregisterWindowWithContextID:_registeredContextId];
+    }
+    [_sbsHostingCtrl registerWindowWithContextID:ctxId atLevel:kSBSHostingWindowLevel];
+    _registeredContextId = ctxId;
+    NSLog(@"[HUDServices] accessibility window hosting registered: contextId=%u", ctxId);
+    return YES;
 }
 
 #pragma mark - 弹窗请求处理 (后台线程)
@@ -66,22 +109,22 @@ static NSString *const kAlertRequestName = @"sysAlertRequest:";
     NSTimeInterval timeout = [userInfo[@"timeout"] doubleValue];
     NSString *previousApp = userInfo[@"previousApp"];
 
-    // 若 HUD 不在前台, 激活自己并等待前台就绪
-    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-        _activationSem = dispatch_semaphore_create(0);
+    // 窗口已通过 SBSAccessibilityWindowHostingController 托管到系统级,
+    // 无论 HUD 是否在前台都能显示弹窗, 无需再激活自己抢前台。
+    // 兜底: 若托管未就绪(contextId 未注册成功), 回退到激活前台保证弹窗可见。
+    BOOL needForegroundFallback = (_registeredContextId == 0 &&
+        [UIApplication sharedApplication].applicationState != UIApplicationStateActive);
+    if (needForegroundFallback) {
         [HUDSystem launchApplicationWithIdentifier:[[NSBundle mainBundle] bundleIdentifier]];
-        dispatch_semaphore_wait(_activationSem,
-                                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)));
     }
 
-    // 展示对话框并等待用户点击 / 超时
     NSString *result = [_alertPresenter presentAlertWithTitle:title
                                                       message:message
                                                       buttons:buttons
                                                       timeout:timeout];
 
-    // 弹窗结束, 把前台交还给之前的 app
-    if (previousApp.length > 0) {
+    // fallback 路径(激活过前台): 弹窗结束后交还前台
+    if (needForegroundFallback && previousApp.length > 0) {
         [HUDSystem launchApplicationWithIdentifier:previousApp];
     }
 

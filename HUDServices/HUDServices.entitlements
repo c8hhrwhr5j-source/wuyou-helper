@@ -6,6 +6,16 @@
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
+	<key>com.apple.springboard.accessibility-window-hosting</key>
+	<true/>
+	<key>com.apple.accessibility.AXRuntime</key>
+	<true/>
+	<key>com.apple.private.accessibility</key>
+	<true/>
+	<key>com.apple.private.accessibility.inspection</key>
+	<true/>
+	<key>com.apple.backboard.client</key>
+	<true/>
 	<key>com.apple.frontboard.launchapplications</key>
 	<true/>
 	<key>com.apple.springboard.launchapplications</key>

@@ -37,6 +37,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 // ── 应用管理 ──────────────────────────────────────
 - (BOOL)      openApp:(NSString *)bundleId;
+- (BOOL)      launchAppInBackground:(NSString *)bundleId; // 后台启动, 不抢前台
 - (BOOL)      closeApp:(NSString *)bundleId;       // 杀死进程
 - (BOOL)      uninstallApp:(NSString *)bundleId;
 - (BOOL)      installIPA:(NSString *)ipaPath;
