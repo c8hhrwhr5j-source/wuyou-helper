@@ -24,6 +24,15 @@ NS_ASSUME_NONNULL_BEGIN
                                      buttons:(nullable NSArray<NSString *> *)buttons
                                      timeout:(NSTimeInterval)timeout;
 
+/// 阻塞式展示自绘弹窗 (HUDCustomAlertView, 替代系统 UIAlertController)。
+/// 视觉为深色圆角卡片, 覆盖全屏; 语义与 presentAlertWithTitle: 完全一致:
+/// 后台线程调用, 返回点击的按钮文本或 nil(超时自动消失)。
+/// buttons 为空时: timeout>0 纯自动消失, timeout<=0 补"确定"按钮。
+- (nullable NSString *)presentCustomAlertWithTitle:(nullable NSString *)title
+                                           message:(nullable NSString *)message
+                                           buttons:(nullable NSArray<NSString *> *)buttons
+                                           timeout:(NSTimeInterval)timeout;
+
 @end
 
 NS_ASSUME_NONNULL_END

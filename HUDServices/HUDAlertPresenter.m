@@ -6,6 +6,7 @@
 //
 
 #import "HUDAlertPresenter.h"
+#import "HUDCustomAlertView.h"
 
 @implementation HUDAlertPresenter {
     __weak UIViewController *_presenter;
@@ -69,6 +70,49 @@
                 }
             });
         }
+    });
+
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    return result;
+}
+
+// 自绘弹窗: 用 HUDCustomAlertView 替代系统 UIAlertController。
+// 展示在 presenter 的 view 上 (HUD 窗口已通过 SBSAccessibilityWindowHostingController
+// 托管到系统级, 该视图会覆盖在任意前台 app 之上)。
+- (NSString *)presentCustomAlertWithTitle:(NSString *)title
+                                  message:(NSString *)message
+                                  buttons:(NSArray<NSString *> *)buttons
+                                  timeout:(NSTimeInterval)timeout {
+    if (!_presenter) {
+        return nil;
+    }
+
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSString *result = nil;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 按钮兜底语义与 UIAlertController 版本一致:
+        // 显式按钮优先; 空按钮 + timeout>0 纯自动消失; 空按钮 + 永久显示 -> 确定
+        NSArray *buttonTitles;
+        if (buttons && buttons.count > 0) {
+            buttonTitles = buttons;
+        } else if (timeout > 0) {
+            buttonTitles = @[];
+        } else {
+            buttonTitles = @[@"确定"];
+        }
+
+        HUDCustomAlertView *alertView = [[HUDCustomAlertView alloc]
+                                         initWithTitle:title
+                                               message:message
+                                               buttons:buttonTitles
+                                               timeout:timeout
+                                              onResult:^(NSString *_Nullable clicked) {
+            result = clicked;
+            dispatch_semaphore_signal(sem);
+        }];
+        [self->_presenter.view addSubview:alertView];
+        [alertView show];
     });
 
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);

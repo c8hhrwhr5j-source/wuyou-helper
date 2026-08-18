@@ -118,10 +118,10 @@ static const double kSBSHostingWindowLevel = 10000.0;
         [HUDSystem launchApplicationWithIdentifier:[[NSBundle mainBundle] bundleIdentifier]];
     }
 
-    NSString *result = [_alertPresenter presentAlertWithTitle:title
-                                                      message:message
-                                                      buttons:buttons
-                                                      timeout:timeout];
+    NSString *result = [_alertPresenter presentCustomAlertWithTitle:title
+                                                            message:message
+                                                            buttons:buttons
+                                                            timeout:timeout];
 
     // fallback 路径(激活过前台): 弹窗结束后交还前台
     if (needForegroundFallback && previousApp.length > 0) {
