@@ -450,7 +450,10 @@ jobs:
           done
           # 单 App 自检: tipa 必须只含 Payload/TrollAutoTouch.app (桌面单图标),
           # 不允许再出现 HUDServices.app / 其它顶层 .app。
-          APP_COUNT=$(grep -cE '^   Payload/[^/]+\.app/$' /tmp/ipa_contents.txt || true)
+          # 注意: unzip -l 输出的目录行形如
+          #   "         0  08-18-2026 12:44   Payload/TrollAutoTouch.app/"
+          # 行首是长度+日期字段, 因此不能锚定行首, 只能匹配行尾 ".app/"。
+          APP_COUNT=$(grep -cE 'Payload/[^/]+\.app/$' /tmp/ipa_contents.txt || true)
           echo "[*] Payload 顶层 .app 数量: $APP_COUNT (必须为 1)"
           if [ "$APP_COUNT" != "1" ]; then
             echo "[x] 顶层 .app 数量异常 (应为 1, 当前 $APP_COUNT), 停止"
