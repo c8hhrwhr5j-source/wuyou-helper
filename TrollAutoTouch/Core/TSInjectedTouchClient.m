@@ -102,6 +102,12 @@ extern char **environ;
     mach_port_t _lastTaskPort;
 }
 - (void)_appendLog:(NSString *)msg;
+// 检查二进制当前签名中是否已带指定 entitlement (用 ldid -e 提取判断)。
+// TrollStore 安装时会把 CI 注入的 entitlements 用 CoreTrust 信任的签名保留下来,
+// 此时已带完整权限且拥有 platform 身份, 不应再用 ldid 重签覆盖。
+- (BOOL)_binaryHasEntitlements:(NSString *)binaryPath
+                      contains:(NSString *)key
+                          ldid:(NSString *)ldidPath;
 @end
 
 @implementation TSInjectedTouchClient
@@ -243,6 +249,21 @@ extern char **environ;
     if (csops(getpid(), TS_CS_OPS_STATUS, &csflags, sizeof(csflags)) == 0) {
         BOOL plat = (csflags & TS_CS_PLATFORM_BINARY) != 0;
         [s appendFormat:@"本进程 platform 身份: %@ (csflags=0x%x)\n", plat ? @"是" : @"否", csflags];
+        if (!plat) {
+            // iOS 15+ 的 task_for_pid 对 platform 目标(SpringBoard)要求调用者也是
+            // platform 进程 (CS_PLATFORM_BINARY), 仅 entitlement 不足以通过。
+            // 授予 CS_PLATFORM_BINARY 只有两条途径:
+            //   1. Apple 信任链签名 (只有 CoreTrust 1 漏洞能伪造, 但 iOS 15.5+ 已修复,
+            //      且 iOS 上无法直接利用) — 即 iOS 14~15.4.1 时代 TrollStore 的能力;
+            //   2. 越狱 (如 palera1n, checkm8 对 A9/iPhone6s 有效)。
+            // TrollStore 2.x (CoreTrust 2, iOS 15.5+) 官方明确"无法获得 platform 身份",
+            // 换签名方式/重新安装都无法解决, 因此:
+            [s appendString:@"  → 判定: 非 platform 进程, 无法 task_for_pid(SpringBoard), 注入必败。\n"];
+            [s appendString:@"  → 此限制为系统级: iOS 15.5+ 的 TrollStore 无法授予 platform 身份\n"];
+            [s appendString:@"    (TrollStore 官方已确认该限制)。重装/换签名方式均无效。\n"];
+            [s appendString:@"  → 可选出路: ① palera1n 越狱 (iPhone 6s/A9 支持, 越狱后有\n"];
+            [s appendString:@"    platform 身份, 注入可用); ② 退回 iOS 14~15.4.1 设备。\n"];
+        }
     } else {
         [s appendFormat:@"本进程 platform 身份: 查询失败(errno=%d)\n", errno];
     }
@@ -423,18 +444,32 @@ extern char **environ;
         return NO;
     }
 
-    // 重签 opainject: 恢复 no-sandbox + task_for_pid-allow + system-task-ports 等,
-    // 否则被 app spawn 后继承沙箱, task_for_pid(SpringBoard) 被拦截。
-    // --platform-apply: 恢复 CS_PLATFORM_BINARY (TrollStore 重签时可能剥离),
-    // 保证 opainject 以 platform 进程身份 task_for_pid(SpringBoard) 拿到有效 task port。
-    if (![self _resignBinary:injectorPath withEntitlements:opainjectEnt ldid:ldidPath log:resignLog platformApply:YES]) {
-        NSLog(@"[TSInjectedTouch] opainject 重签失败");
-        _lastErrorStage = @"resign-opainject";
-        return NO;
+    // 重签 opainject 前先检查当前签名, 决定是否真的需要重签:
+    // - TrollStore 安装时会保留 CI 注入的完整 entitlements, 并用其 CoreTrust 信任的
+    //   签名重新签发 → opainject 已带 no-sandbox + platform-application 等, 同时拥有
+    //   CS_PLATFORM_BINARY platform 身份。此时绝不能再用 ldid 重签: Procursus ldid
+    //   的 ad-hoc 签名在 iOS 15.8+ 上不会被 AMFI 授予 CS_PLATFORM_BINARY (实测
+    //   csflags 无该位), 重签反而会破坏 TrollStore 的 platform 身份, 使 opainject
+    //   无法 task_for_pid(SpringBoard)。
+    // - 若缺失 (侧载/直装场景), 才用 ldid --platform-apply 重签兜底。
+    BOOL hasNoSandbox = [self _binaryHasEntitlements:injectorPath contains:@"no-sandbox" ldid:ldidPath];
+    BOOL hasPlatform  = [self _binaryHasEntitlements:injectorPath contains:@"platform-application" ldid:ldidPath];
+    if (hasNoSandbox && hasPlatform) {
+        NSLog(@"[TSInjectedTouch] opainject 已带完整 entitlements (TrollStore 签名), 跳过重签以保留 platform 身份");
+    } else {
+        NSLog(@"[TSInjectedTouch] opainject 缺少关键 entitlements (no-sandbox=%d platform=%d), ldid 重签兜底", hasNoSandbox, hasPlatform);
+        if (![self _resignBinary:injectorPath withEntitlements:opainjectEnt ldid:ldidPath log:resignLog platformApply:YES]) {
+            NSLog(@"[TSInjectedTouch] opainject 重签失败");
+            _lastErrorStage = @"resign-opainject";
+            return NO;
+        }
     }
-    // 重签 dylib: 确保 AMFI 允许 dlopen (签名有效 + entitlements 完整)。失败不致命。
+    // 重签 dylib: 同理, 已带完整 entitlements 则保留原签名 (TrollStore 签名可被
+    // AMFI 正常 dlopen); 缺失才用 ldid 重签兜底。失败不致命。
     if ([fm fileExistsAtPath:injectorEnt]) {
-        if (![self _resignBinary:dylibPath withEntitlements:injectorEnt ldid:ldidPath log:resignLog platformApply:NO]) {
+        if ([self _binaryHasEntitlements:dylibPath contains:@"platform-application" ldid:ldidPath]) {
+            NSLog(@"[TSInjectedTouch] dylib 已带完整 entitlements, 跳过重签");
+        } else if (![self _resignBinary:dylibPath withEntitlements:injectorEnt ldid:ldidPath log:resignLog platformApply:NO]) {
             NSLog(@"[TSInjectedTouch] dylib 重签失败 (继续, dlopen 仍可能成功)");
         }
     }
@@ -492,6 +527,48 @@ extern char **environ;
     NSString *out = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:NULL];
     NSLog(@"[TSInjectedTouch] ldid 重签 %@ exit=%d 输出=%@", binaryPath.lastPathComponent, exitCode, out.length > 0 ? out : @"(无)");
     return (WIFEXITED(status) && exitCode == 0);
+}
+
+// 用 ldid -e 提取二进制当前签名中的 entitlements, 判断是否已带指定 key。
+// 已带 → 说明签名由 TrollStore (CoreTrust) 签发并保留了完整权限,
+//        应保留该签名 (ldid 重签会破坏 platform 身份, 见 resignBinaries 注释)。
+- (BOOL)_binaryHasEntitlements:(NSString *)binaryPath
+                      contains:(NSString *)key
+                          ldid:(NSString *)ldidPath {
+    if (!ldidPath.length || !binaryPath.length || !key.length) return NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:binaryPath]) return NO;
+
+    NSString *outPath = [binaryPath stringByAppendingString:@".ents"];
+    NSString *errPath = [binaryPath stringByAppendingString:@".ents.err"];
+    const char *ldidC = ldidPath.UTF8String;
+    const char *args[] = {ldidC, "-e", binaryPath.UTF8String, NULL};
+
+    int outFD = open(outPath.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (outFD < 0) return NO;
+    int errFD = open(errPath.UTF8String, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, outFD, STDOUT_FILENO);
+    if (errFD >= 0) posix_spawn_file_actions_adddup2(&actions, errFD, STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, outFD);
+    if (errFD >= 0) posix_spawn_file_actions_addclose(&actions, errFD);
+
+    pid_t child = -1;
+    int rc = posix_spawn(&child, ldidC, &actions, NULL, (char *const *)args, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (outFD >= 0) close(outFD);
+    if (errFD >= 0) close(errFD);
+    if (rc != 0) return NO;
+
+    int status = 0;
+    waitpid(child, &status, 0);
+    if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) return NO;
+
+    NSString *ent = [NSString stringWithContentsOfFile:outPath encoding:NSUTF8StringEncoding error:NULL];
+    unlink(outPath.UTF8String);
+    unlink(errPath.UTF8String);
+    return (ent.length > 0 && [ent rangeOfString:key].location != NSNotFound);
 }
 
 #pragma mark - 直接远程线程注入 (app 自身有 task_for_pid-allow + system-task-ports,
