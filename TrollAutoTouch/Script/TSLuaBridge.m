@@ -48,6 +48,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "../Core/TSInjectedTouchClient.h"
 #import "../Core/TSVolumeKeyMonitor.h"
 #import "../Core/TSHUDService.h"
+#import "../HUD/TSHUDHost.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -1586,9 +1587,15 @@ static void lua_register_all(lua_State *L) {
 
     // 预热 HUD 宿主 (单 App 架构): 提前创建全屏透明窗口并注册 SBS 系统级托管,
     // 使首次音量键弹窗即时可用; 失败不阻塞脚本 (弹窗会回退前台可见/静默切换)。
+    // 注意: warmUp 只是调用 start, SBS 托管是异步注册(延迟 0.8s + 每 0.5s 重试),
+    // 不能立即宣称"已就绪"; 等 2.5s 后输出真实注册状态, 便于诊断后台弹窗不可用问题。
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         [[TSHUDService sharedInstance] warmUp];
-        lua_log(@"[HUD] 进程内 HUD 宿主已就绪 (全局弹窗可用)");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+            lua_log([NSString stringWithFormat:@"[HUD] %@",
+                     [[TSHUDHost shared] registrationStatusDescription]]);
+        });
     });
 
     // 诊断信息: 构建版本 + 注入状态。每次跑脚本日志首行即确认包版本与注入链路,

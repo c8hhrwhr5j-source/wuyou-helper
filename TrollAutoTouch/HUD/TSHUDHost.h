@@ -40,6 +40,10 @@ NS_ASSUME_NONNULL_BEGIN
                                      buttons:(nullable NSArray<NSString *> *)buttons
                                      timeout:(NSTimeInterval)timeout;
 
+/// 当前 HUD 宿主状态描述 (SBS 类可用性 / 是否已注册系统级托管 / 失败标志 / 前后台)。
+/// 供诊断日志输出, 避免"已就绪"这类误导性信息。
+- (NSString *)registrationStatusDescription;
+
 @end
 
 NS_ASSUME_NONNULL_END

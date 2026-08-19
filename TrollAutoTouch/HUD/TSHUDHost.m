@@ -19,10 +19,33 @@
 #import "TSHUDPrivate.h"
 #import <QuartzCore/QuartzCore.h>
 #import <sys/time.h>
+#import <dlfcn.h>
 
 // 系统级窗口托管层级: 高于普通 app 内容(UIWindowLevelAlert 为 2000),
 // 足以盖住所有前台 app 的窗口。
 static const double kSBSHostingWindowLevel = 10000.0;
+
+// SBSAccessibilityWindowHostingController 属于私有框架
+// SpringBoardServices.framework。TrollAutoTouch 作为 TrollStore app
+// 默认不会链接该私有框架, 直接 NSClassFromString 会返回 nil
+// (→ "SBS class missing" → 系统级托管注册失败 → 后台 HUD 弹窗不可用)。
+// 这里在运行时 dlopen 该框架后再查一次类。
+static Class TSHUDHostingClass(void) {
+    Class cls = NSClassFromString(@"SBSAccessibilityWindowHostingController");
+    if (!cls) {
+        static dispatch_once_t once;
+        static void *s_sbHandle = NULL;
+        dispatch_once(&once, ^{
+            s_sbHandle = dlopen("/System/Library/PrivateFrameworks/"
+                                "SpringBoardServices.framework/SpringBoardServices",
+                                RTLD_LAZY);
+        });
+        if (s_sbHandle) {
+            cls = NSClassFromString(@"SBSAccessibilityWindowHostingController");
+        }
+    }
+    return cls;
+}
 
 // 全屏透明宿主窗口子类:
 // 透明区域必须穿透到下层窗口 (hitTest 返回 nil),
@@ -167,9 +190,11 @@ static void HUDLog(NSString *fmt, ...) {
 
         if (_registeredContextId == ctxId) return YES; // 已注册
 
-        Class sbsClass = NSClassFromString(@"SBSAccessibilityWindowHostingController");
+        // 类属于私有框架 SpringBoardServices, app 未链接时先 dlopen 兜底
+        Class sbsClass = TSHUDHostingClass();
         if (!sbsClass) {
-            HUDLog(@"accessibility hosting: SBS class missing");
+            HUDLog(@"accessibility hosting: SBS class missing "
+                   "(NSClassFromString + dlopen SpringBoardServices both failed)");
             _startupFailedSBS = YES;
             return NO;
         }
@@ -245,6 +270,23 @@ static void HUDLog(NSString *fmt, ...) {
     NSTimeInterval maxWait = (timeout > 0 ? timeout : 60.0) + 15.0;
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(maxWait * NSEC_PER_SEC)));
     return result;
+}
+
+#pragma mark - 状态诊断
+
+// 供脚本日志/诊断界面查询 HUD 宿主的真实注册状态。
+// 线程安全: 只读共享变量(写都在主线程, 读在任意线程, 可接受)。
+- (NSString *)registrationStatusDescription {
+    NSString *clsState = TSHUDHostingClass()
+        ? @"SBS class OK" : @"SBS class MISSING(dlopen also failed)";
+    NSString *ctxState = (_registeredContextId != 0)
+        ? [NSString stringWithFormat:@"registered ctxId=%u", _registeredContextId]
+        : @"NOT registered(ctxId=0)";
+    NSString *failState = _startupFailedSBS ? @"startupFailedSBS=YES" : @"startupFailedSBS=NO";
+    NSString *fgState = ([UIApplication sharedApplication].applicationState == UIApplicationStateActive)
+        ? @"app=foreground" : @"app=background";
+    return [NSString stringWithFormat:@"HUD 宿主状态: %@ | %@ | %@ | %@",
+            clsState, ctxState, failState, fgState];
 }
 
 @end
