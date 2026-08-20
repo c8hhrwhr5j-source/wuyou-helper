@@ -77,7 +77,7 @@ static Class TSHUDHostingClass(void) {
 @end
 
 @implementation TSHUDHost {
-    UIWindow *_window;
+    TSHUDHostWindow *_window;
     UIViewController *_rootVC;
     UIView *_contentView;
     // iOS 15+: 通过 SBSAccessibilityWindowHostingController 把本进程窗口的
