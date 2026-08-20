@@ -380,6 +380,12 @@ static BOOL _luaPausedByButton = NO;
     NSString *name = note.userInfo[@"name"];
     if (name.length == 0) return;
 
+    // 脚本已在运行(例如脚本内 ui.open() 弹出设置页后点"开始运行"):
+    // 设置已由网页保存, 脚本会从 settings 表继续执行, 这里不能再启动一次, 否则脚本重复执行。
+    if ([[TSLuaBridge shared] isRunning]) {
+        return;
+    }
+
     NSString *devPath = [TSPaths pathForLua:[name stringByAppendingString:@".lua"]];
     NSString *path = nil;
     if ([[NSFileManager defaultManager] fileExistsAtPath:devPath]) {

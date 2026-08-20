@@ -99,14 +99,18 @@
 #pragma mark - 操作
 
 - (void)_onClose {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    [self dismissViewControllerAnimated:YES completion:^{
+        if (self.onFinish) self.onFinish(NO);
+    }];
 }
 
 - (void)_onRunRequest:(NSNotification *)note {
     NSString *name = note.userInfo[@"name"];
     if ([name isEqualToString:_scriptName]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self dismissViewControllerAnimated:YES completion:nil];
+            [self dismissViewControllerAnimated:YES completion:^{
+                if (self.onFinish) self.onFinish(YES);
+            }];
         });
     }
 }

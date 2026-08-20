@@ -41,9 +41,18 @@ function bj(x, y, color, err)
     return false
 end
 
--- 读取网页设置（主界面"脚本UI"→ 选 main → 网页改参数 → 点"开始运行"）
--- 网页保存的配置在 main.settings.json，运行前已注入全局 settings 表
+-- 网页设置（本脚本的 UI 名写死为 "main"，对应内置 www/ui/main 或设备 lua/ui/main）
+-- ui.open("main") 行为：
+--   * 检测到 UI 文件 → 全屏弹出设置页并阻塞等待：点"开始运行"返回 true（配置已注入
+--     settings 表），点"返回"返回 false
+--   * 检测不到 UI 文件 → 直接返回 false，不阻塞，脚本按默认配置继续
 function main()
+    if ui.open("main") then
+        log("[设置] 已在手机端完成网页配置")
+    else
+        log("[设置] 未检测到网页UI或未配置，使用默认值")
+    end
+
     local cfg = {
         delay      = 100,  -- 主循环间隔(毫秒)
         closeNotice= true, -- 关闭游戏公告

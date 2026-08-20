@@ -23,6 +23,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 以脚本名创建 (脚本名即网页目录名 /ui/<name>/)
 - (instancetype)initWithScriptName:(NSString *)name title:(nullable NSString *)title;
 
+/// 设置页结束回调 (主线程调用): didRun=YES 表示用户点"开始运行", NO 表示点"返回"关闭。
+/// 供脚本内 ui.open() 阻塞等待用; 主界面手动打开时可不设置。
+@property (nonatomic, copy) void (^onFinish)(BOOL didRun);
+
 @end
 
 NS_ASSUME_NONNULL_END

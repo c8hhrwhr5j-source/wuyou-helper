@@ -49,6 +49,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "../Core/TSVolumeKeyMonitor.h"
 #import "../Core/TSHUDService.h"
 #import "../HUD/TSHUDHost.h"
+#import "../Views/TSScriptUIViewController.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -67,6 +68,7 @@ static volatile BOOL _pauseRequested = NO;
 - (void)_presentInAppVolumeMenu;
 - (void)_presentBackgroundVolumeMenu;
 - (void)_togglePauseBackground;
+- (void)_injectSettingsTable:(lua_State *)L scriptPath:(NSString *)path;
 // App 内音量键控制菜单(注入失败兜底), 脚本结束时需自动关闭
 @property (nonatomic, weak) UIAlertController *volumeMenuAlert;
 @end
@@ -1351,6 +1353,99 @@ static int l_key_inputText(lua_State *L) {
     return 0;
 }
 
+#pragma mark - 脚本网页设置 UI
+
+// 检测脚本网页设置 UI 是否存在:
+//   设备: /var/mobile/touch/lua/ui/<name>/index.html (优先)
+//   内置: bundle www/ui/<name>/index.html
+// 供 ui.open() 在弹出前判断, 也供脚本内检测 UI 是否可用。
+static BOOL TS_ScriptUIExists(NSString *name) {
+    if (name.length == 0) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *devPath = [[[TSPaths luaDir] stringByAppendingPathComponent:@"ui"]
+                         stringByAppendingPathComponent:name];
+    devPath = [devPath stringByAppendingPathComponent:@"index.html"];
+    if ([fm fileExistsAtPath:devPath]) return YES;
+    NSString *bundlePath = [[[[NSBundle mainBundle] resourcePath]
+                             stringByAppendingPathComponent:@"www"]
+                            stringByAppendingPathComponent:@"ui"];
+    bundlePath = [[bundlePath stringByAppendingPathComponent:name]
+                  stringByAppendingPathComponent:@"index.html"];
+    return [fm fileExistsAtPath:bundlePath];
+}
+
+// ui.open(脚本名) -> boolean
+//   检测脚本网页设置 UI (内置 www/ui/<name> 或设备 lua/ui/<name>):
+//     - 不存在 → 直接返回 false, 不阻塞, 脚本按默认配置继续
+//     - 存在   → 全屏弹出网页设置页, 阻塞等待用户操作:
+//                 点"开始运行" → 返回 true (已注入全局 settings 表)
+//                 点"‹ 返回"   → 返回 false (按默认配置继续)
+//   阻塞期间可点主界面"停止"取消: 返回 false 并强制关闭设置页。
+//   用法: 在 main.lua 开头写死 if ui.open("main") then ... end
+static int l_ui_open(lua_State *L) {
+    const char *nameC = luaL_checkstring(L, 1);
+    NSString *name = [NSString stringWithUTF8String:nameC];
+    if (name.length == 0 || !TS_ScriptUIExists(name)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block BOOL ran = NO;
+    __block BOOL finished = NO;
+    __block TSScriptUIViewController *vc = nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 找到当前可 present 的顶层控制器(主窗口), 与 TSShowBlockingAlert 一致
+        NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+        UIWindow *keyWindow = nil;
+        for (UIWindow *w in windows) {
+            if (w.isKeyWindow) { keyWindow = w; break; }
+        }
+        if (!keyWindow) keyWindow = windows.firstObject;
+        UIViewController *top = keyWindow.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
+        if (!top) {
+            // 无可用窗口(如 App 后台), 直接结束等待, 避免 Lua 永久卡死
+            finished = YES;
+            dispatch_semaphore_signal(sem);
+            return;
+        }
+        vc = [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
+        vc.onFinish = ^(BOOL didRun) {
+            if (!finished) {
+                ran = didRun;
+                finished = YES;
+                dispatch_semaphore_signal(sem);
+            }
+        };
+        [top presentViewController:vc animated:YES completion:nil];
+    });
+
+    // Lua 线程阻塞等待: 分段等待并检查停止标志, 保证点"停止"后设置页立即关闭
+    while (!finished && !_stopRequested) {
+        if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) == 0) {
+            break;  // 用户点"开始运行"或"返回", 已收到信号
+        }
+    }
+    if (!finished && _stopRequested) {
+        // 脚本被停止: 强制关闭设置页
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [vc dismissViewControllerAnimated:NO completion:nil];
+        });
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    if (ran) {
+        // 用户点"开始运行": 网页已把配置写入 /var/mobile/touch/lua/<name>.settings.json,
+        // 注入全局 settings 表, 让脚本后续读取逻辑与主界面打开 UI 时一致。
+        NSString *luaPath = [[TSPaths luaDir] stringByAppendingPathComponent:
+                             [name stringByAppendingString:@".lua"]];
+        [[TSLuaBridge shared] _injectSettingsTable:L scriptPath:luaPath];
+    }
+    lua_pushboolean(L, ran ? 1 : 0);
+    return 1;
+}
+
 #pragma mark - 注册
 
 static void lua_register_all(lua_State *L) {
@@ -1520,6 +1615,14 @@ static void lua_register_all(lua_State *L) {
     };
     luaL_newlib(L, keyLib);
     lua_setglobal(L, "key");
+
+    // ── ui 模块 (脚本网页设置 UI) ──
+    static const luaL_Reg uiLib[] = {
+        {"open",   l_ui_open},
+        {NULL, NULL}
+    };
+    luaL_newlib(L, uiLib);
+    lua_setglobal(L, "ui");
 }
 
 #pragma mark - 执行
