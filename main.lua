@@ -41,23 +41,40 @@ function bj(x, y, color, err)
     return false
 end
 
+-- 读取网页设置（主界面"脚本UI"→ 选 main → 网页改参数 → 点"开始运行"）
+-- 网页保存的配置在 main.settings.json，运行前已注入全局 settings 表
 function main()
+    local cfg = {
+        delay      = 100,  -- 主循环间隔(毫秒)
+        closeNotice= true, -- 关闭游戏公告
+        enterArea  = true, -- 选区进入游戏
+        chooseRole = true, -- 选择角色
+    }
+    if type(settings) == "table" then
+        for k, v in pairs(settings) do
+            if cfg[k] ~= nil then cfg[k] = v end
+        end
+        log("[设置] 已加载网页配置: " .. json.encode(cfg))
+    else
+        log("[设置] 未使用网页配置，采用默认值")
+    end
+
     sleep(1000)
     log("=== 测试脚本开始 ===")
     local w, h = getScreenSize()
     log(string.format("屏幕 %.0f x %.0f", w, h))
     while true do
-        sleep(100)
+        sleep(cfg.delay)
         appsl()
-        if rgbbj("游戏公告") then
+        if cfg.closeNotice and rgbbj("游戏公告") then
             click(948, 162, 970, 187) -- 关闭公告
-            sleep(1000)
-        elseif rgbbj("选区进入游戏") then
+            sleep(500)
+        elseif cfg.enterArea and rgbbj("选区进入游戏") then
             click(834, 517, 950, 552) -- 进入游戏
-            sleep(1000)
-        elseif rgbbj("选择角色") then
+            sleep(500)
+        elseif cfg.chooseRole and rgbbj("选择角色") then
             click(606,671,728,709) -- 进入游戏
-            sleep(1000)
+            sleep(500)
         end
     end
 end

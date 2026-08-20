@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>热血传奇 - 脚本设置</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { background: #0b0e14; color: #e8e8e8; font-family: -apple-system, "PingFang SC", sans-serif; }
+  .header {
+    position: sticky; top: 0; z-index: 10;
+    background: linear-gradient(135deg, #1a1f2e, #232a3d);
+    padding: 14px 16px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid #333a4f;
+  }
+  .header .logo { width: 34px; height: 34px; border-radius: 8px; background: linear-gradient(135deg, #f0a030, #d4501a); display: flex; align-items: center; justify-content: center; font-weight: 800; color: #fff; font-size: 18px; }
+  .header h1 { font-size: 17px; font-weight: 700; letter-spacing: 1px; }
+  .header .sub { font-size: 11px; color: #8a93a8; margin-top: 2px; }
+  .banner {
+    margin: 12px 12px 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: linear-gradient(90deg, rgba(240,160,48,.15), rgba(212,80,26,.15));
+    border: 1px solid rgba(240,160,48,.35);
+    font-size: 12px; color: #f0b060; line-height: 1.5;
+  }
+  .section { margin: 14px 12px; }
+  .card { background: #151a26; border: 1px solid #2a3045; border-radius: 12px; overflow: hidden; }
+  .card-title { padding: 12px 14px 8px; font-size: 13px; color: #9aa4bd; font-weight: 600; letter-spacing: 1px; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 14px; border-top: 1px solid #23293c; gap: 12px;
+  }
+  .row:first-child { border-top: none; }
+  .row-label { font-size: 15px; flex: 1; }
+  .row-desc { font-size: 11px; color: #7c869c; margin-top: 3px; }
+  input[type=number] {
+    width: 100px; padding: 8px 10px; border-radius: 8px;
+    background: #0d1119; border: 1px solid #333a4f; color: #fff;
+    font-size: 15px; text-align: center; outline: none;
+  }
+  .range-wrap { flex: 1; display: flex; align-items: center; gap: 10px; }
+  input[type=range] { flex: 1; -webkit-appearance: none; height: 4px; border-radius: 2px; background: #333a4f; outline: none; }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 24px; height: 24px; border-radius: 50%;
+    background: linear-gradient(135deg, #f0a030, #d4501a);
+    border: 2px solid #fff2;
+  }
+  .range-val { width: 56px; text-align: center; font-size: 15px; color: #f0a030; font-weight: 700; }
+  .toggle { width: 50px; height: 30px; border-radius: 15px; background: #3a4157; position: relative; transition: background .2s; flex-shrink: 0; }
+  .toggle.on { background: linear-gradient(135deg, #f0a030, #d4501a); }
+  .toggle::after {
+    content: ''; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px;
+    border-radius: 50%; background: #fff; transition: left .2s; box-shadow: 0 1px 3px #0005;
+  }
+  .toggle.on::after { left: 23px; }
+  .btn-row { display: flex; gap: 10px; margin: 16px 12px; }
+  .btn {
+    flex: 1; padding: 14px 0; border: none; border-radius: 12px;
+    font-size: 16px; font-weight: 700; color: #fff;
+  }
+  .btn-save { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+  .btn-run { background: linear-gradient(135deg, #f0a030, #d4501a); }
+  .btn:active { opacity: .8; }
+  .toast {
+    position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%);
+    background: #222a3d; color: #fff; padding: 10px 20px; border-radius: 20px;
+    font-size: 13px; opacity: 0; transition: opacity .25s; z-index: 99;
+    box-shadow: 0 4px 16px #0008; max-width: 80%; text-align: center;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">热</div>
+  <div>
+    <h1>热血传奇 脚本设置</h1>
+    <div class="sub">改动保存后，点击"开始运行"生效</div>
+  </div>
+</div>
+
+<div class="banner">⚠️ 请在游戏画面保持当前界面。脚本启动后会自动处理：关闭公告 → 选区进入 → 选择角色。</div>
+
+<div class="section">
+  <div class="card">
+    <div class="card-title">运行参数</div>
+    <div class="row">
+      <div class="row-label">主循环间隔
+        <div class="row-desc">检测游戏状态的间隔（毫秒）</div>
+      </div>
+      <div class="range-wrap">
+        <input type="range" id="delay" min="50" max="1000" step="10" value="100">
+        <div class="range-val" id="delayVal">100</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="card">
+    <div class="card-title">功能开关</div>
+    <div class="row">
+      <div class="row-label">关闭游戏公告
+        <div class="row-desc">检测到公告时自动点击关闭</div>
+      </div>
+      <div class="toggle" id="closeNotice" data-on="true"></div>
+    </div>
+    <div class="row">
+      <div class="row-label">选区进入游戏
+        <div class="row-desc">检测到"选区进入游戏"时自动进入</div>
+      </div>
+      <div class="toggle" id="enterArea" data-on="true"></div>
+    </div>
+    <div class="row">
+      <div class="row-label">选择角色
+        <div class="row-desc">检测到"选择角色"时自动进入</div>
+      </div>
+      <div class="toggle" id="chooseRole" data-on="true"></div>
+    </div>
+  </div>
+</div>
+
+<div class="btn-row">
+  <button class="btn btn-save" id="btnSave">保存</button>
+  <button class="btn btn-run" id="btnRun">开始运行</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const SCRIPT = 'main';
+  const $ = id => document.getElementById(id);
+  let current = {};
+
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.classList.remove('show'), 2000);
+  }
+
+  // 开关控件
+  document.querySelectorAll('.toggle').forEach(el => {
+    el.addEventListener('click', () => {
+      el.classList.toggle('on');
+      el.dataset.on = el.classList.contains('on');
+    });
+  });
+
+  // 滑块联动数值
+  const delayEl = $('delay');
+  delayEl.addEventListener('input', () => { $('delayVal').textContent = delayEl.value; });
+
+  function collect() {
+    return {
+      delay: parseInt(delayEl.value, 10) || 100,
+      closeNotice: $('closeNotice').classList.contains('on'),
+      enterArea: $('enterArea').classList.contains('on'),
+      chooseRole: $('chooseRole').classList.contains('on'),
+    };
+  }
+
+  function apply(s) {
+    current = s || {};
+    delayEl.value = current.delay != null ? current.delay : 100;
+    $('delayVal').textContent = delayEl.value;
+    const set = (id, def) => {
+      const el = $(id);
+      const on = current[id] !== undefined ? !!current[id] : def;
+      el.classList.toggle('on', on);
+      el.dataset.on = on;
+    };
+    set('closeNotice', true);
+    set('enterArea', true);
+    set('chooseRole', true);
+  }
+
+  async function save() {
+    try {
+      const r = await fetch(`/api/ui/settings?name=${SCRIPT}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: SCRIPT, settings: collect() }),
+      });
+      const j = await r.json();
+      if (j.ok) { toast('✅ 设置已保存'); return true; }
+      toast('保存失败'); return false;
+    } catch (e) { toast('保存失败: ' + e.message); return false; }
+  }
+
+  $('btnSave').addEventListener('click', save);
+
+  $('btnRun').addEventListener('click', async () => {
+    if (await save()) {
+      toast('已保存，正在运行脚本…');
+      setTimeout(async () => {
+        try {
+          await fetch('/api/ui/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: SCRIPT }),
+          });
+        } catch (e) {}
+      }, 300);
+    }
+  });
+
+  // 加载已保存配置
+  fetch(`/api/ui/settings?name=${SCRIPT}`)
+    .then(r => r.json())
+    .then(j => apply(j.settings))
+    .catch(() => {});
+</script>
+</body>
+</html>

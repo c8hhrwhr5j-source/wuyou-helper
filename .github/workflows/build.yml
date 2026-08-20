@@ -449,7 +449,7 @@ jobs:
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html" "Payload/TrollAutoTouch.app/www/ui/main/index.html"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else
