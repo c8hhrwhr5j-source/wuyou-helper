@@ -1596,8 +1596,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     } else if ([obj isKindOfClass:[NSString class]]) {
         lua_pushstring(L, ((NSString *)obj).UTF8String);
     } else if ([obj isKindOfClass:[NSNumber class]]) {
-        CFNumberType t = CFNumberGetType((CFNumberRef)obj);
-        if (t == kCFNumberBooleanType || t == kCFNumberCharType) {
+        // 布尔: objCType 为 'c'(char) 或 'B'(BOOL), 其余按数字处理
+        const char *otype = [(NSNumber *)obj objCType];
+        if (otype && (otype[0] == 'c' || otype[0] == 'B')) {
             lua_pushboolean(L, [obj boolValue]);
         } else {
             lua_pushnumber(L, [obj doubleValue]);
