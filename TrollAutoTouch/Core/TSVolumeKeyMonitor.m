@@ -7,10 +7,8 @@
 //    相邻两次采样值变化即判定音量键被按下。与 AutoGo/CGO 的 aa_volume_monitor_ios.go
 //    完全同构 —— 不注入、不监听私有通知、不碰 IOHID, 唯一依赖是能读系统音量。
 //
-//  为什么不放在注入的 dylib 里:
-//    注入 SpringBoard 依赖 task_for_pid / opainject, arm64e 设备上容易失败
-//    (用户实测 "注入失败, 命令未发送"), 导致音量键功能完全不可用。
-//    而本方案在 App 进程内运行, 只要脚本在跑就能识别音量键, 与注入解耦。
+//  放在 App 进程内即可: 只要 App 在运行(含后台保活), 音量键轮询就生效,
+//  不依赖任何注入 (iOS 15.5+ TrollStore 2.x 无法获得 platform 身份, 注入不可行)。
 
 #import "TSVolumeKeyMonitor.h"
 #import <AVFoundation/AVFoundation.h>

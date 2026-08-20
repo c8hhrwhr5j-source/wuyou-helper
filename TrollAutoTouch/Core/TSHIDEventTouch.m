@@ -2,12 +2,11 @@
 //  TSHIDEventTouch.m
 //  TrollAutoTouch
 //
-//  系统级触摸注入 —— 三级通道，对齐原版 TrollAutoScript 2.2.0 / ZXTouch 13。
+//  系统级触摸 —— 双通道，对齐原版 TrollAutoScript 2.2.0 / ZXTouch 13。
 //
 //  关键背景（2026-08-16 逆向原版 tipa 确认）:
 //    原版 TrollAutoScript 2.2.0 的触摸**不是**注入 SpringBoard 实现的:
-//      - 主 app 二进制无任何 HID 注入字符串 (无 IOHIDEventSystemClientDispatchEvent,
-//        无 cynject/opainject), 只 posix_spawn 启动 HUDServices;
+//      - 主 app 二进制无任何 HID 注入字符串 (无 IOHIDEventSystemClientDispatchEvent),
 //      - HUDServices 注册为 FrontBoard 服务域 (Info.plist BSServiceDomains:
 //        com.apple.frontboard), 在**它自己的进程内**用
 //        IOHIDEventSystemClientDispatchEvent 直发 IOHID 触摸事件
@@ -16,28 +15,27 @@
 //    因此"普通 app 直发会被 backboardd 丢弃"的旧结论不成立 —— 旧测试失败
 //    的真实原因是当时 senderID 未就绪 / entitlements 不齐，而非机制本身。
 //
-//  当前架构（本类）三级通道, 依次尝试:
+//  当前架构（本类）双通道, 依次尝试:
 //    1. [第一通道] app 进程内 IOHID 直发 (ZXTouch 同款: parent digitizer +
 //       child finger 事件 + IOHIDEventSetSenderID + IOHIDEventSystemClientDispatchEvent)。
 //       需要 entitlements: com.apple.backboard.client +
 //       com.apple.private.hid.client.event-dispatch (TrollAutoTouch.entitlements 已含)
 //       以及有效 senderID (动态获取, 见 _setupSenderID)。
-//    2. [备选] 注入 SpringBoard: opainject 注入 TSInjectedTouchService.dylib,
-//       dylib 在 SpringBoard 进程内起 TCP server (127.0.0.1:23333) 注入 HID,
-//       本类通过 TSInjectedTouchClient socket 发送。
-//    3. [兜底] 本应用点击 fallback (借鉴 无忧辅助触控 TouchSimulation 三重策略):
-//       注入与直发都不可用时, 不再丢弃点击:
+//    2. [兜底] 本应用点击 fallback (借鉴 无忧辅助触控 TouchSimulation 三重策略):
+//       直发不可用时, 不再丢弃点击:
 //         a. AX (Accessibility): AXUIElementCopyElementAtPosition + AXPress,
 //            需要 com.apple.accessibility.api (已含), 对前台标准 UIKit 元素有效;
 //         b. 进程内 UIControl: 主线程 hitTest + sendActionsForControlEvents。
+//
+//  (注: 原三级通道中的"注入 SpringBoard" (opainject + TSInjectedTouchService)
+//   已确认在 iOS 15.5+ TrollStore 2.x 下因无法获得 platform 身份而不可行,
+//   相关代码已整体移除, 不再尝试注入。)
 //
 //  senderID 动态获取: 监听系统 digitizer 事件读取真实 senderID, 持久化到
 //  NSUserDefaults, 重启后复用 (ZXTouch senderid.plist 同款逻辑)。
 //
 
 #import "TSHIDEventTouch.h"
-#import "TSInjectedTouchClient.h"
-#import "TSInjectedTouchService.h"
 #import <UIKit/UIKit.h>
 #import <mach/mach_time.h>
 #import <dlfcn.h>
@@ -360,14 +358,12 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 
 /// 发送一次触摸事件。
 ///
-/// 三级通道依次尝试 (对齐原版 TrollAutoScript 2.2.0 / ZXTouch 13):
+/// 双通道依次尝试 (对齐原版 TrollAutoScript 2.2.0 / ZXTouch 13):
 ///   1. [第一通道] senderID 已就绪 → app 进程内 IOHID 直发
 ///      (_dispatchIOHIDTouchAtPoint:), 不需要注入, 原版 iOS16 实测可用;
-///   2. [备选] 注入 SpringBoard → 通过 TCP socket (127.0.0.1:23333) 发往
-///      SpringBoard 进程内的 TSInjectedTouchService.dylib, 由它在受信进程内
-///      注入 HID 事件;
-///   3. [兜底] 本应用点击 fallback (AX 辅助功能 > 进程内 UIControl), 只在
+///   2. [兜底] 本应用点击 fallback (AX 辅助功能 > 进程内 UIControl), 只在
 ///      down 时触发一次元素级点击, Moved/Ended 忽略 (无连续触摸流)。
+///   (原三级通道中的"注入 SpringBoard"不可行, 已整体移除, 见文件头注释。)
 - (void)_sendFingerEventAtPoint:(CGPoint)point
                           index:(uint32_t)index
                           phase:(TSTouchPhase)phase
@@ -391,26 +387,11 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
         return;
     }
 
-    // ── 2. 备选: 注入 SpringBoard → socket ──
-    if ([[TSInjectedTouchClient shared] ensureInjected]) {
-        // Lua 层已是逻辑点坐标; TSInjectedTouchClient 内部会按屏幕 bounds 归一化为 0~1。
-        uint8_t type;
-        switch (phase) {
-            case TSTouchPhaseBegan: type = TS_TOUCH_TYPE_DOWN; break;
-            case TSTouchPhaseMoved: type = TS_TOUCH_TYPE_MOVE; break;
-            case TSTouchPhaseEnded:
-            default:                type = TS_TOUCH_TYPE_UP;   break;
-        }
-        [[TSInjectedTouchClient shared] sendTouchType:type index:(uint8_t)index point:point];
-        return;
-    }
-
-    // ── 3. 兜底: 本应用点击 fallback (借鉴无忧辅助触控) ──
+    // ── 2. 兜底: 本应用点击 fallback (借鉴无忧辅助触控) ──
     static BOOL s_loggedFallback = NO;
     if (!s_loggedFallback) {
         s_loggedFallback = YES;
-        NSLog(@"[TSHIDEventTouch] 注入与直发均不可用, 进入本应用点击模式 (AX/进程内): %@",
-              [[TSInjectedTouchClient shared] statusDescription]);
+        NSLog(@"[TSHIDEventTouch] IOHID 直发不可用, 进入本应用点击模式 (AX/进程内)");
     }
     if (phase == TSTouchPhaseBegan) {
         if (!TSAXTapAt(point.x, point.y)) {
@@ -621,8 +602,6 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     } else {
         [s appendString:@", touch=直发未就绪(需手动触摸一次屏幕)"];
     }
-    // 备选: 注入 SpringBoard 的 socket 服务状态
-    [s appendFormat:@", 注入=%@", [[TSInjectedTouchClient shared] statusDescription]];
     // 本应用点击 fallback 状态 (AX 辅助功能 / 进程内 UIControl)
     TSAXSetup();
     if (s_tsAXReady) {

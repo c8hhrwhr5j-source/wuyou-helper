@@ -23,8 +23,6 @@
 #import "TSLuaBridge.h"
 #import "TSPaths.h"
 #import "Views/TSScriptUIViewController.h"
-#import "Core/TSInjectedTouchClient.h"
-#import "Injected/TSInjectedTouchService.h"
 
 @interface ViewController () <TSLogDelegate, TSWebControlDelegate>
 @property (nonatomic, strong) UITextView *logView;
@@ -42,27 +40,6 @@ static BOOL _luaPausedByButton = NO;
     self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.08 blue:0.12 alpha:1.0];
     [self _buildUI];
     [self _log:@"TrollAutoTouch v2.0 已启动。"];
-
-    // 音量键控制面板事件: 在任意 app(游戏)前台按音量键,
-    // SpringBoard 侧注入的 dylib 弹菜单, 用户选择后经 TCP 回调到这里。
-    __weak typeof(self) ws2 = self;
-    [TSInjectedTouchClient shared].controlEventHandler = ^(uint8_t event) {
-        if (event == TS_EVENT_PAUSE) {
-            _luaPausedByButton = YES;
-            [[TSLuaBridge shared] pause];
-            [ws2 _log:@"[音量键] 脚本已暂停"];
-        } else if (event == TS_EVENT_RESUME) {
-            _luaPausedByButton = NO;
-            [[TSLuaBridge shared] resume];
-            [ws2 _log:@"[音量键] 脚本已继续"];
-        } else if (event == TS_EVENT_STOP) {
-            _luaPausedByButton = NO;
-            [[TSLuaBridge shared] stop];
-            [[TSScriptEngine shared] stop];
-            [[TSHUDWindow shared] setScriptRunning:NO];
-            [ws2 _log:@"[音量键] 脚本已停止"];
-        }
-    };
 
     // 设置 HUD 操作回调
     __weak typeof(self) ws = self;

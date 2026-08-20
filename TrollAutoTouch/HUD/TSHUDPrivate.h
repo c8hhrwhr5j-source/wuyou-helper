@@ -9,7 +9,7 @@
 //    且不引入私有框架头文件, 故手动声明。
 //  - 编译期仅通过 NSClassFromString + NSSelectorFromString 动态获取类与选择器,
 //    不产生私有类符号引用; 主 target 的 OTHER_LDFLAGS 同时带有
-//    -Wl,-undefined,dynamic_lookup 兜底, 与 TSInjectedTouchService 策略一致。
+//    -Wl,-undefined,dynamic_lookup 兜底, 私有符号运行时由 dyld 动态解析。
 //  - 用法与系统行为参考 TrollAutoScript (原版 TrollAutoTouch 参考实现) 的 HUD 服务。
 //
 

@@ -45,7 +45,6 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "TSDeviceInfo.h"
 #import "TSOCREngine.h"
 #import "../Common/TSPaths.h"
-#import "../Core/TSInjectedTouchClient.h"
 #import "../Core/TSVolumeKeyMonitor.h"
 #import "../Core/TSHUDService.h"
 #import "../HUD/TSHUDHost.h"
@@ -1798,10 +1797,6 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     _pauseRequested = NO;
     self.runningPath = path;
     self.isRunning = YES;
-    // 脚本运行期间启用音量键控制面板: 在任意 app(游戏)前台按音量键,
-    // 注入成功时 SpringBoard 侧 dylib 弹 暂停/继续·停止·取消 菜单;
-    // 注入失败时 App 前台弹菜单兜底, 后台(游戏在前台)走 HUD 系统级弹窗。
-    [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:YES];
 
     // 预热 HUD 宿主 (单 App 架构): 提前创建全屏透明窗口并注册 SBS 系统级托管,
     // 使首次音量键弹窗即时可用; 失败不阻塞脚本 (弹窗会回退前台可见/静默切换)。
@@ -1816,13 +1811,6 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         });
     });
 
-    // 诊断信息: 构建版本 + 注入状态。每次跑脚本日志首行即确认包版本与注入链路,
-    // 避免"装了旧包还在看旧日志"的误判 (旧包此处无输出, 注入失败也无详细原因)。
-    NSString *ver   = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
-    NSString *build = [NSBundle mainBundle].infoDictionary[@"CFBundleVersion"] ?: @"?";
-    lua_log([NSString stringWithFormat:@"[诊断] 构建 %@ (build %@) | 注入状态: %@",
-             ver, build, [[TSInjectedTouchClient shared] statusDescription]]);
-
     // 后台保活: 用户切到游戏/其他 app 时 App 处于后台, iOS 会挂起后台进程,
     // 导致音量键轮询与 IOHID 直发触摸停摆。用静音音频播放阻止挂起
     // (需 Info.plist UIBackgroundModes=audio, 见 project.yml)。
@@ -1830,7 +1818,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
     // 公开 API, 不依赖注入 SpringBoard)。轮询由 TAS 服务启动时的常驻监听
     // (startGlobalVolumeMonitoring) 统一管理, 脚本运行/结束不启停轮询:
-    //   脚本运行中 → _handleVolumeKey → 控制菜单 (注入成功 dylib 弹 / 兜底 App 内弹);
+    //   脚本运行中 → _handleVolumeKey → 控制菜单 (暂停/继续·停止·取消);
     //   空闲未运行 → _handleIdleVolumeKey → 询问"运行选中脚本?"。
 
     lua_State *L = luaL_newstate();
@@ -1887,10 +1875,6 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     _pauseRequested = NO;
     self.runningPath = nil;
     self.isRunning = NO;
-    // 脚本结束, 关闭音量键控制面板, 避免平时按音量键误弹运行菜单
-    // (dylib 侧 s_volumeControlEnabled 仅在脚本运行期间为 YES;
-    //   App 进程内轮询保持常驻, 空闲按音量键走"运行脚本"选择)
-    [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:NO];
     // 脚本结束, 停止后台静音保活 (App 回到正常后台生命周期)
     [[TSAudioKeepAlive shared] stop];
     // 脚本结束, 自动关闭 App 内音量键菜单(若仍在显示)
@@ -1904,17 +1888,20 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 }
 
 // 音量键被按下 (TSVolumeKeyMonitor 轮询回调, 任意线程 → 转主线程):
-//   注入成功 → 让 SpringBoard dylib 弹 暂停/继续·停止·取消 菜单;
-//   注入失败 → App 前台弹选择菜单; App 后台(游戏等)走 HUD 系统级弹窗
+//   空闲未运行 → 弹"运行脚本/取消"选择(运行当前选中脚本);
+//   脚本运行中 → App 前台弹选择菜单; App 后台(游戏等)走 HUD 系统级弹窗
 //              (SBSAccessibilityWindowHostingController 托管, 可覆盖游戏)。
 - (void)_handleVolumeKey {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略,
-        // 与 dylib 侧 TSPresentControlAlert 的防抖形成双保险。
+        // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略。
         static NSTimeInterval s_lastKeyAt = 0;
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         if ((now - s_lastKeyAt) < 0.8) return;
         s_lastKeyAt = now;
+
+        // 诊断日志: 确认音量键轮询已触发 + 当前脚本运行状态, 便于排查"按音量没反应"
+        lua_log([NSString stringWithFormat:@"[音量键] 按下 (isRunning=%d, appState=%ld)",
+                 self.isRunning, (long)[UIApplication sharedApplication].applicationState]);
 
         // 空闲(无脚本运行): 弹"运行脚本/取消"选择, 运行当前选中的脚本
         if (!self.isRunning) {
@@ -1922,17 +1909,12 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
             return;
         }
 
-        TSInjectedTouchClient *client = [TSInjectedTouchClient shared];
-        if ([client isConnected]) {
-            // 注入成功: dylib 校验 s_volumeControlEnabled 后弹菜单
-            [client presentVolumeControlPanel];
-        } else if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
-            // 注入失败兜底 (App 前台): 弹选择菜单(暂停/继续 · 停止 · 取消),
-            // 由用户选择决定动作。
+        // 脚本运行中: 弹 暂停/继续·停止·取消 菜单。
+        // App 前台用 UIAlertController; App 后台(游戏等 app 在前台)走 HUD 系统级弹窗
+        // (SBSAccessibilityWindowHostingController 托管, 可覆盖游戏)。
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
             [self _presentInAppVolumeMenu];
         } else {
-            // 注入失败兜底 (App 后台, 如游戏/其他 app 在前台):
-            // UIAlertController 无法在后台显示, 改用 HUD 系统级弹窗。
             [self _presentBackgroundVolumeMenu];
         }
     });

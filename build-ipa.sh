@@ -174,46 +174,6 @@ case "$MODE" in
     cp -R "$ROOT/TrollAutoTouch/Resources/lua" "$PAYLOAD/TrollAutoTouch.app/lua"
     echo "[OK] lua 脚本已打包 (lua/Main.lua 等)"
 
-    # ── 注入式触摸服务: 编译 dylib + 打包 opainject 注入器 ──
-    echo "[*] 编译触摸服务 dylib (TSInjectedTouchService)"
-    # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制),
-    # 用 CONFIGURATION_BUILD_DIR 显式指定 dylib 输出目录。
-    xcodebuild -project "$ROOT/TrollAutoTouch.xcodeproj" \
-      -target TSInjectedTouchService \
-      -configuration Release \
-      -sdk iphoneos \
-      ARCHS="arm64 arm64e" \
-      ONLY_ACTIVE_ARCH=NO \
-      CODE_SIGNING_ALLOWED=NO \
-      CODE_SIGNING_REQUIRED=NO \
-      CODE_SIGN_IDENTITY="" \
-      CONFIGURATION_BUILD_DIR="$BUILD_DIR/dylib" \
-      build
-    DYLIB="$(find "$BUILD_DIR/dylib" "$BUILD_DIR/DerivedData" -name 'TSInjectedTouchService.dylib' -type f 2>/dev/null | head -1)"
-    [ -z "$DYLIB" ] && { echo "[x] 未找到 TSInjectedTouchService.dylib"; exit 1; }
-    mkdir -p "$PAYLOAD/TrollAutoTouch.app/bin"
-    cp "$DYLIB" "$PAYLOAD/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib"
-    cp "$ROOT/TrollAutoTouch/Resources/bin/opainject" "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
-    chmod 755 "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
-    # opainject 需要 task_for_pid 等注入权限, 打包时用 ldid 预签名,
-    # 否则 TrollStore 重签后这些 entitlement 不保证保留, 注入 SpringBoard 会失败
-    if command -v ldid >/dev/null 2>&1; then
-      ldid -S"$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
-      echo "[OK] opainject 已注入注入器 entitlements (task_for_pid 等)"
-    else
-      echo "[!] 未找到 ldid, opainject 未预签名 (注入可能失败)"
-    fi
-    # 运行时重签工具链 + entitlements: app 用 ldid 在注入前重签 opainject/dylib,
-    # 恢复 TrollStore 安装时被剥离的 entitlements (no-sandbox / task_for_pid-allow 等)。
-    for T in ldid fastPathSign; do
-      cp "$ROOT/TrollAutoTouch/Resources/bin/$T" "$PAYLOAD/TrollAutoTouch.app/bin/$T" 2>/dev/null && chmod 755 "$PAYLOAD/TrollAutoTouch.app/bin/$T"
-    done
-    cp "$ROOT/TrollAutoTouch/Resources/bin/ent2.xml" "$PAYLOAD/TrollAutoTouch.app/bin/ent2.xml" 2>/dev/null || true
-    cp "$ROOT/TrollAutoTouch/Resources/opainject.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject.entitlements.xml" 2>/dev/null || true
-    cp "$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/injector.entitlements.xml" 2>/dev/null || true
-    echo "[OK] 运行时重签工具链已部署到 bin/"
-    echo "[OK] 触摸服务已打包: bin/TSInjectedTouchService.dylib + bin/opainject"
-
     prepare_icons "$PAYLOAD/TrollAutoTouch.app"
     sign_copy_entitlements "$PAYLOAD/TrollAutoTouch.app"
 
@@ -237,28 +197,6 @@ case "$MODE" in
     if [ ! -d "$PAYLOAD/TrollAutoTouch.app/lua" ]; then
       cp -R "$ROOT/TrollAutoTouch/Resources/lua" "$PAYLOAD/TrollAutoTouch.app/lua"
       echo "[OK] lua 脚本已打包 (lua/Main.lua 等)"
-    fi
-    # 注入式触摸服务: opainject 从 Resources/bin 拷贝; dylib 若已在 build 产物则一并打包
-    mkdir -p "$PAYLOAD/TrollAutoTouch.app/bin"
-    cp "$ROOT/TrollAutoTouch/Resources/bin/opainject" "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
-    chmod 755 "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
-    if command -v ldid >/dev/null 2>&1; then
-      ldid -S"$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject"
-      echo "[OK] opainject 已注入注入器 entitlements"
-    fi
-    # 运行时重签工具链 + entitlements (同 xcode 子命令)
-    for T in ldid fastPathSign; do
-      cp "$ROOT/TrollAutoTouch/Resources/bin/$T" "$PAYLOAD/TrollAutoTouch.app/bin/$T" 2>/dev/null && chmod 755 "$PAYLOAD/TrollAutoTouch.app/bin/$T"
-    done
-    cp "$ROOT/TrollAutoTouch/Resources/bin/ent2.xml" "$PAYLOAD/TrollAutoTouch.app/bin/ent2.xml" 2>/dev/null || true
-    cp "$ROOT/TrollAutoTouch/Resources/opainject.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/opainject.entitlements.xml" 2>/dev/null || true
-    cp "$ROOT/TrollAutoTouch/Resources/injector.entitlements.xml" "$PAYLOAD/TrollAutoTouch.app/bin/injector.entitlements.xml" 2>/dev/null || true
-    DYLIB="$(find "$BUILD_DIR/DerivedData" -name 'TSInjectedTouchService.dylib' -type f 2>/dev/null | head -1)"
-    if [ -n "$DYLIB" ]; then
-      cp "$DYLIB" "$PAYLOAD/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib"
-      echo "[OK] 触摸服务 dylib 已打包 (bin/TSInjectedTouchService.dylib)"
-    else
-      echo "[!] 未找到 TSInjectedTouchService.dylib (跳过, 触摸注入将不可用)"
     fi
     prepare_icons "$PAYLOAD/TrollAutoTouch.app"
     sign_copy_entitlements "$PAYLOAD/TrollAutoTouch.app"
