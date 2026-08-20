@@ -11,6 +11,8 @@
 #import "../Core/TSToolExecutor.h"
 #import "../Common/TSPaths.h"
 #import "TSLuaBridge.h"
+#import "TSScriptCipher.h"
+#import "../HUD/TSHUDHost.h"
 
 @interface TSScriptListViewController () <UITableViewDelegate, UITableViewDataSource>
 
@@ -150,9 +152,55 @@
         [self _alert:@"读取失败" msg:@"无法打开脚本文件"];
         return;
     }
+    // .tas 加密脚本: 解密后交由 Lua 引擎运行
+    if ([TSScriptCipher isEncryptedContent:content]) {
+        content = [TSScriptCipher decryptScript:content];
+        if (!content) {
+            [self _alert:@"读取失败" msg:@"加密脚本解密失败"];
+            return;
+        }
+    }
     [[NSNotificationCenter defaultCenter] postNotificationName:@"TSRunScript"
                                                         object:nil
                                                       userInfo:@{@"path": e.path, @"content": content}];
+}
+
+// 加密脚本: xxx.lua -> xxx.tas (同名, 仅后缀变化)
+- (void)_encryptScript:(TSFileEntry *)e {
+    NSString *plain = [[TSToolExecutor shared] readTextFile:e.path];
+    if (!plain) {
+        [self _alert:@"读取失败" msg:@"无法读取脚本内容"];
+        return;
+    }
+    NSString *newName = [[e.name stringByDeletingPathExtension] stringByAppendingString:@".tas"];
+    NSString *newPath = [TSPaths pathForLua:newName];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:newPath]) {
+        [self _alert:@"加密失败" msg:@"同名 .tas 文件已存在"];
+        return;
+    }
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"加密脚本"
+                                                                    message:[NSString stringWithFormat:@"将 %@ 加密为 %@？\n加密后脚本仍可运行，但无法以明文查看源码。", e.name, newName]
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"加密" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        NSString *cipher = [TSScriptCipher encryptScript:plain];
+        if (!cipher) {
+            [self _alert:@"加密失败" msg:@"生成加密脚本失败"];
+            return;
+        }
+        if ([[TSToolExecutor shared] writeTextFile:newPath content:cipher] &&
+            [[TSToolExecutor shared] removeItem:e.path]) {
+            // 若加密的正是音量键选中的脚本, 同步选中状态 (名字不变, 后缀变了)
+            if ([[TSScriptListViewController selectedScriptName] isEqualToString:e.name]) {
+                [TSScriptListViewController setSelectedScriptName:newName];
+            }
+            [self _reload];
+            [[TSHUDHost shared] showToast:@"已加密" duration:1.2 hidden:NO];
+        } else {
+            [self _alert:@"加密失败" msg:@"写入或删除文件失败"];
+        }
+    }]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:confirm animated:YES completion:nil];
 }
 
 #pragma mark - TableView
@@ -209,16 +257,19 @@
     cell.textLabel.text = e.name;
     cell.textLabel.textColor = [TSColors label];
 
+    BOOL isTAS = [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd HH:mm";
     NSString *dateStr = e.modificationDate ? [df stringFromDate:e.modificationDate] : @"";
-    cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  |  %lld B", dateStr, e.size];
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"%@%@  |  %lld B",
+                                 isTAS ? @"已加密 | " : @"", dateStr, e.size];
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 
-    // 选中脚本显示打勾图标 + 淡色高亮背景 (音量键快速运行的对象)
+    // 选中脚本显示打勾图标 + 淡色高亮背景 (音量键快速运行的对象); .tas 加密脚本用锁图标
     BOOL isSelected = [[TSScriptListViewController selectedScriptName] isEqualToString:e.name];
     if (@available(iOS 13.0, *)) {
-        cell.imageView.image = [UIImage systemImageNamed:isSelected ? @"checkmark.circle.fill" : @"doc.text"];
+        NSString *icon = isSelected ? @"checkmark.circle.fill" : (isTAS ? @"lock.doc" : @"doc.text");
+        cell.imageView.image = [UIImage systemImageNamed:icon];
     }
     if (isSelected) {
         cell.backgroundColor = [[TSColors tint] colorWithAlphaComponent:0.15];
@@ -266,9 +317,15 @@
             [self _runScript:e];
         }]];
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"✎ 编辑" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self _editScript:e];
-    }]];
+    BOOL isTAS = [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
+    if (!isTAS) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"✎ 编辑" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self _editScript:e];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"🔒 加密" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self _encryptScript:e];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         [self _deleteScript:e];
     }]];
@@ -286,19 +343,29 @@
         [self _deleteScript:e];
         h(YES);
     }];
-    UIContextualAction *edit = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                       title:@"编辑"
-                                                                     handler:^(UIContextualAction *a, UIView *v, void (^h)(BOOL)) {
-        [self _editScript:e];
-        h(YES);
-    }];
-    edit.backgroundColor = [TSColors tint];
-    return [UISwipeActionsConfiguration configurationWithActions:@[delete, edit]];
+    NSMutableArray<UIContextualAction *> *actions = [NSMutableArray arrayWithObject:delete];
+    BOOL isTAS = [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
+    if (!isTAS) {
+        UIContextualAction *edit = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                           title:@"编辑"
+                                                                         handler:^(UIContextualAction *a, UIView *v, void (^h)(BOOL)) {
+            [self _editScript:e];
+            h(YES);
+        }];
+        edit.backgroundColor = [TSColors tint];
+        [actions addObject:edit];
+    }
+    return [UISwipeActionsConfiguration configurationWithActions:actions];
 }
 
 #pragma mark - Helpers
 
 - (void)_editScript:(TSFileEntry *)e {
+    // .tas 加密脚本禁止以明文查看/编辑源码
+    if ([e.path.pathExtension.lowercaseString isEqualToString:@"tas"]) {
+        [self _alert:@"加密脚本" msg:@"该脚本已加密，无法查看源码。"];
+        return;
+    }
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:[@"编辑 " stringByAppendingString:e.name]
                                                                 message:nil
                                                          preferredStyle:UIAlertControllerStyleAlert];

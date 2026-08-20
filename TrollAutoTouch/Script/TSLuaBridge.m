@@ -52,6 +52,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "../Views/TSScriptUIViewController.h"
 #import "TSScriptListViewController.h"
 #import "../Core/TSToolExecutor.h"
+#import "TSScriptCipher.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -1678,6 +1679,16 @@ static void lua_register_all(lua_State *L) {
             lua_log([NSString stringWithFormat:@"[Lua] 读取脚本失败: %@", path]);
             return;
         }
+        // .tas 加密脚本: 先解密再交给 Lua 引擎
+        if ([TSScriptCipher isEncryptedContent:code]) {
+            NSString *plain = [TSScriptCipher decryptScript:code];
+            if (!plain) {
+                lua_log([NSString stringWithFormat:@"[Lua] 脚本解密失败(.tas): %@", path]);
+                return;
+            }
+            code = plain;
+            lua_log([NSString stringWithFormat:@"[Lua] 运行加密脚本(.tas): %@", path.lastPathComponent]);
+        }
         [self _execute:code filePath:path];
     });
 }
@@ -1985,6 +1996,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
             s_idleMenuShowing = NO;
             if ([clicked isEqualToString:@"运行"]) {
                 NSString *content = [[TSToolExecutor shared] readTextFile:path];
+                if ([TSScriptCipher isEncryptedContent:content]) {
+                    content = [TSScriptCipher decryptScript:content];
+                }
                 if (content.length) {
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"TSRunScript"
                                                                         object:nil
