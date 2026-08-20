@@ -65,7 +65,13 @@ targets:
         optional: true
       - path: TrollAutoTouch/Resources/lua
         optional: true
+      # www 作为 folder reference 整体打包, 保留目录结构
+      # (www/index.html noVNC 首页 + www/ui/<name>/ 脚本网页设置页),
+      # 否则 xcodegen 按 basename 拷贝, www/index.html 与 www/ui/*/index.html
+      # 会全部冲突到 app 根目录的 index.html。
       - path: TrollAutoTouch/Resources/www
+        type: folder
+        buildPhase: resources
         optional: true
       - path: TrollAutoTouch/Resources/lib
         optional: true
