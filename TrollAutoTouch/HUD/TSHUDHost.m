@@ -161,6 +161,13 @@ static void HUDLog(NSString *fmt, ...) {
         // (逆向自原版 HUDServices: BLUIWindow + makeKeyAndVisible)
         _window.hidden = NO;
         [_window makeKeyAndVisible];
+        // makeKeyAndVisible 会让本窗口成为 keyWindow (windowLevel 更高),
+        // 必须把 key 交还给主窗口, 否则主界面状态栏样式/键盘行为受影响,
+        // 且 keyWindow 判断会被降级逻辑误用 (见 _foregroundWindow 注释)。
+        UIWindow *mainW = [self _foregroundWindow];
+        if (mainW && mainW != _window) {
+            [mainW makeKeyWindow];
+        }
         HUDLog(@"TSHUDHost start: window ok (key=%d)",
                (_window.isKeyWindow ? 1 : 0));
 
@@ -208,10 +215,21 @@ static void HUDLog(NSString *fmt, ...) {
 
 // 前台降级窗口: SBS 未托管成功且 app 在前台时,
 // 弹窗直接显示在主窗口上, 保证用户一定能看到 (前台可见, 后台仍不可见)。
+//
+// ★ 关键: 不能依赖 keyWindow! 本类自建的 HUD 窗口在 start 里
+// makeKeyAndVisible 后会成为 keyWindow (windowLevel 高于主窗口),
+// 若把 keyWindow 当作降级目标, toast 会被加回"从不渲染的 HUD 窗口"上,
+// 前台依然看不到 (逆向结论: 原版前台 toast 挂在自己的视图层级, 不依赖 SBS)。
+// 正确做法: 只找 windowLevel == UIWindowLevelNormal 的主窗口。
 - (UIWindow *)_foregroundWindow {
-    UIWindow *key = [UIApplication sharedApplication].keyWindow;
-    if (key) return key;
     NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *w in windows) {
+        if (w.windowLevel == UIWindowLevelNormal && w.rootViewController) {
+            return w;
+        }
+    }
+    UIWindow *key = [UIApplication sharedApplication].keyWindow;
+    if (key && key.windowLevel == UIWindowLevelNormal) return key;
     if (windows.count) return windows.firstObject;
     return nil;
 }
@@ -241,6 +259,11 @@ static void HUDLog(NSString *fmt, ...) {
             if (scene) {
                 _window.windowScene = scene;
                 [_window makeKeyAndVisible];
+                // 同样交还 key 给主窗口 (见 start 注释)
+                UIWindow *mainW = [self _foregroundWindow];
+                if (mainW && mainW != _window) {
+                    [mainW makeKeyWindow];
+                }
                 sceneAttached = YES;
                 HUDLog(@"TSHUDHost window attached to scene + key on active");
             }
