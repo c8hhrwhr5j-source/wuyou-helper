@@ -27,6 +27,10 @@
 // 脚本网页设置 UI: 网页点"开始运行"后发出, userInfo: {"name":脚本名}
 FOUNDATION_EXPORT NSNotificationName const TSScriptUIRunRequestNotification;
 
+// 脚本网页设置 UI: 网页点"取消"后发出, userInfo: {"name":脚本名}
+// UI 容器收到后停止当前脚本并关闭设置页
+FOUNDATION_EXPORT NSNotificationName const TSScriptUICancelRequestNotification;
+
 NS_ASSUME_NONNULL_BEGIN
 
 /// 远程控制回调

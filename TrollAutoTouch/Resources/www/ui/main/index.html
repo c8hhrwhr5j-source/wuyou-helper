@@ -10,7 +10,7 @@
   .header {
     position: sticky; top: 0; z-index: 10;
     background: linear-gradient(135deg, #1a1f2e, #232a3d);
-    padding: 14px 16px;
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) 16px 14px;
     display: flex; align-items: center; gap: 10px;
     border-bottom: 1px solid #333a4f;
   }
@@ -60,7 +60,7 @@
     flex: 1; padding: 14px 0; border: none; border-radius: 12px;
     font-size: 16px; font-weight: 700; color: #fff;
   }
-  .btn-save { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+  .btn-cancel { background: #3a4157; color: #b9c0d4; }
   .btn-run { background: linear-gradient(135deg, #f0a030, #d4501a); }
   .btn:active { opacity: .8; }
   .toast {
@@ -75,11 +75,11 @@
 <body>
 
 <div class="header">
-  <div class="logo">热</div>
-  <div>
-    <h1>热血传奇 脚本设置</h1>
-    <div class="sub">改动保存后，点击"开始运行"生效</div>
-  </div>
+<div class="logo">热</div>
+<div>
+  <h1>热血传奇 脚本设置</h1>
+  <div class="sub">改动后点击"保存运行"保存并启动脚本</div>
+</div>
 </div>
 
 <div class="banner">⚠️ 请在游戏画面保持当前界面。脚本启动后会自动处理：关闭公告 → 选区进入 → 选择角色。</div>
@@ -124,8 +124,8 @@
 </div>
 
 <div class="btn-row">
-  <button class="btn btn-save" id="btnSave">保存</button>
-  <button class="btn btn-run" id="btnRun">开始运行</button>
+  <button class="btn btn-cancel" id="btnCancel">取消</button>
+  <button class="btn btn-run" id="btnRun">保存运行</button>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -192,9 +192,8 @@
     } catch (e) { toast('保存失败: ' + e.message); return false; }
   }
 
-  $('btnSave').addEventListener('click', save);
-
-  $('btnRun').addEventListener('click', async () => {
+  // 保存并运行 (原"保存"与"开始运行"合并为一步)
+  async function saveAndRun() {
     if (await save()) {
       toast('已保存，正在运行脚本…');
       setTimeout(async () => {
@@ -207,7 +206,24 @@
         } catch (e) {}
       }, 300);
     }
-  });
+  }
+
+  // 取消: 通知原生停止 main.lua 并关闭设置页
+  function cancel() {
+    toast('已取消，停止运行');
+    setTimeout(async () => {
+      try {
+        await fetch('/api/ui/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: SCRIPT }),
+        });
+      } catch (e) {}
+    }, 300);
+  }
+
+  $('btnRun').addEventListener('click', saveAndRun);
+  $('btnCancel').addEventListener('click', cancel);
 
   // 加载已保存配置
   fetch(`/api/ui/settings?name=${SCRIPT}`)

@@ -12,7 +12,11 @@
 //    设置数据: /var/mobile/touch/lua/<name>.settings.json (网页经 HTTP API 读写)
 //    运行:     网页 POST /api/ui/run → 服务器保存设置并发通知 →
 //              本控制器自动关闭, 主界面启动脚本
+//    取消:     网页 POST /api/ui/cancel → 服务器发通知 →
+//              本控制器停止当前脚本并关闭设置页
 //
+//  注: 本容器为全屏无导航栏模式, 左上角不带返回按钮;
+//      关闭/取消统一由网页底部"取消"按钮触发。
 
 #import <UIKit/UIKit.h>
 
@@ -23,9 +27,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 以脚本名创建 (脚本名即网页目录名 /ui/<name>/)
 - (instancetype)initWithScriptName:(NSString *)name title:(nullable NSString *)title;
 
-/// 设置页结束回调 (主线程调用): didRun=YES 表示用户点"开始运行", NO 表示点"返回"关闭。
+/// 设置页结束回调 (主线程调用): didRun=YES 表示用户点"保存运行", NO 表示点"取消"关闭。
 /// 供脚本内 ui.open() 阻塞等待用; 主界面手动打开时可不设置。
 @property (nonatomic, copy) void (^onFinish)(BOOL didRun);
+
+/// 是否由网页"取消"按钮触发关闭 (只读, 供脚本内 ui.open() 判断是否已自行关闭)。
+@property (nonatomic, readonly) BOOL cancelRequested;
 
 @end
 

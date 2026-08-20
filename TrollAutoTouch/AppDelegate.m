@@ -19,6 +19,10 @@
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    // ── 屏幕常亮: 打开 app 即禁止系统自动锁屏, 直到 app 退出 ──
+    // (脚本挂机/网页设置 UI 操作期间均保持屏幕点亮)
+    application.idleTimerDisabled = YES;
+
     // ── 确保目录存在 ──
     [TSPaths ensureDirectoriesExist];
 

@@ -23,6 +23,9 @@
 // 脚本网页设置 UI: 网页"开始运行"后由服务器发出, userInfo: {"name":脚本名}
 NSNotificationName const TSScriptUIRunRequestNotification = @"TSScriptUIRunRequestNotification";
 
+// 脚本网页设置 UI: 网页"取消"后由服务器发出, userInfo: {"name":脚本名}
+NSNotificationName const TSScriptUICancelRequestNotification = @"TSScriptUICancelRequestNotification";
+
 // htonll 在较新 iOS SDK 中已作为宏提供，仅在未定义时自行实现
 #ifndef htonll
 static inline uint64_t htonll(uint64_t host) {
@@ -553,6 +556,23 @@ static NSData *WSTextFrame(NSString *text) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[NSNotificationCenter defaultCenter]
                 postNotificationName:TSScriptUIRunRequestNotification
+                              object:nil
+                            userInfo:@{@"name": name}];
+        });
+        [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
+        return;
+    }
+    if ([path isEqualToString:@"/api/ui/cancel"] && [method isEqualToString:@"POST"]) {
+        NSDictionary *json = [self parseJSON:body];
+        NSString *name = json[@"name"];
+        if (name.length == 0 || [name containsString:@"/"] || [name containsString:@".."]) {
+            [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+            return;
+        }
+        // 通知 UI 容器: 停止当前脚本并关闭设置页
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:TSScriptUICancelRequestNotification
                               object:nil
                             userInfo:@{@"name": name}];
         });

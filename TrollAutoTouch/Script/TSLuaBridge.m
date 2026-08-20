@@ -1428,10 +1428,14 @@ static int l_ui_open(lua_State *L) {
         }
     }
     if (!finished && _stopRequested) {
-        // 脚本被停止: 强制关闭设置页
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [vc dismissViewControllerAnimated:NO completion:nil];
-        });
+        // 脚本被停止: 强制关闭设置页。
+        // 若已由网页"取消"按钮触发 (TSScriptUIViewController 已自行 stop + dismiss),
+        // 不再重复 dismiss。
+        if (vc && !vc.cancelRequested) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [vc dismissViewControllerAnimated:NO completion:nil];
+            });
+        }
         lua_pushboolean(L, 0);
         return 1;
     }

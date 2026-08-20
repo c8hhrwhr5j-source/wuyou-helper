@@ -10,19 +10,20 @@ body { font-family:-apple-system,"PingFang SC",sans-serif; background:#eef1f5; c
 /* ===== 顶部固定导航 ===== */
 .nav-button-group-fixed {
   position:fixed; top:0; left:0; right:0; z-index:100;
-  background:#fff; border-bottom:1px solid #e3e6ea; padding:6px 10px;
+  background:#1a1f2e; border-bottom:1px solid #2a3045;
+  padding:calc(env(safe-area-inset-top, 0px) + 6px) 10px 6px;
 }
 .nav-row { display:flex; gap:8px; margin-bottom:6px; }
 .nav-row:last-child { margin-bottom:0; }
 .nav-btn {
-  flex:1; padding:8px 0; border:1px solid #d8dce2; border-radius:8px;
-  background:#f7f8fa; color:#444; font-size:14px; text-align:center;
+  flex:1; padding:8px 0; border:1px solid #3a4157; border-radius:8px;
+  background:#232a3d; color:#cfd6e6; font-size:14px; text-align:center;
 }
 .nav-btn.active {
   background:#1677ff; border-color:#1677ff; color:#fff; font-weight:600;
 }
 /* ===== 内容区 ===== */
-.content { padding: 96px 10px 70px; }
+.content { padding: 120px 10px 80px; }
 .panel-content { display:none; }
 .panel-content.active { display:block; }
 .section-title {
@@ -83,7 +84,7 @@ input[type="range"] { flex:1; max-width:55%; height:30px; accent-color:#1677ff; 
 .bottom-bar button {
   flex:1; height:44px; border:none; border-radius:10px; font-size:16px; font-weight:600;
 }
-.btn-save { background:#f0f2f5; color:#333; }
+.btn-cancel { background:#eef0f4; color:#888; }
 .btn-run { background:#1677ff; color:#fff; }
 /* toast */
 #toast {
@@ -221,8 +222,8 @@ input[type="range"] { flex:1; max-width:55%; height:30px; accent-color:#1677ff; 
 </div>
 
 <div class="bottom-bar">
-  <button class="btn-save" onclick="saveSettings()">保存设置</button>
-  <button class="btn-run" onclick="runScript()">开始运行</button>
+  <button class="btn-cancel" onclick="cancelSettings()">取消</button>
+  <button class="btn-run" onclick="saveAndRun()">保存运行</button>
 </div>
 
 <div id="toast"></div>
@@ -309,23 +310,39 @@ async function saveSettings() {
     });
     const json = await res.json();
     toast(json.ok ? '设置已保存' : '保存失败');
+    return json.ok === true;
   } catch (e) {
     toast('保存失败: ' + e.message);
+    return false;
   }
 }
 
-async function runScript() {
-  const settings = collect();
-  toast('已启动脚本...');
+// 保存并运行 (原"保存设置"与"开始运行"合并为一步)
+async function saveAndRun() {
+  if (await saveSettings()) {
+    toast('已保存，正在运行脚本…');
+    try {
+      await fetch('/api/ui/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: SCRIPT })
+      });
+    } catch (e) {
+      toast('启动失败: ' + e.message);
+    }
+  }
+}
+
+// 取消: 通知原生停止脚本并关闭设置页
+async function cancelSettings() {
+  toast('已取消，停止运行');
   try {
-    await fetch('/api/ui/run', {
+    await fetch('/api/ui/cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: SCRIPT, settings: settings })
+      body: JSON.stringify({ name: SCRIPT })
     });
-  } catch (e) {
-    toast('启动失败: ' + e.message);
-  }
+  } catch (e) {}
 }
 
 loadSettings();
