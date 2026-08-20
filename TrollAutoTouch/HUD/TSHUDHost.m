@@ -75,6 +75,11 @@ static Class TSHUDHostingClass(void) {
     // CAContext 注册到 SpringBoard 的 accessibility 窗口层, 实现
     // "不依赖 app 前台" 的系统级弹窗 (逆向自 AutoGoRunner/agoverlayd)。
     id _sbsHostingCtrl;
+    // 显式创建的 CAContext (Go 版模式, 逆向自 __fbInstallCAContextOverlay):
+    // remoteContextWithOptions: 显式创建 → contextId 一定非零,
+    // 再 setLayer: 把 HUD 窗口 layer 挂进远程上下文供 SBS 托管。
+    // 不依赖 window.layer.contextId (透明窗口下可能为 0 → SBS 托管永远失败)。
+    id _sbsCAContext;
     unsigned _registeredContextId;
     BOOL _startupFailedSBS;
     BOOL _started;
@@ -277,6 +282,98 @@ static void HUDLog(NSString *fmt, ...) {
 
 #pragma mark - 系统级窗口托管 (SBSAccessibilityWindowHostingController)
 
+// 获取用于 SBS 托管的 contextId (逆向自 Go 版 __fbInstallCAContextOverlay):
+//   cls = NSClassFromString("CAContext")
+//   ctx = [cls remoteContextWithOptions:@{@"kCAContextIgnoresHitTest": @YES}]
+//   [ctx setLayer:_window.layer]      // 把 HUD 窗口 layer 挂进远程上下文
+//   ctxId = [ctx contextId]           // 显式创建 → contextId 一定非零
+//   [CATransaction flush]             // 提交渲染, 内容进入 context
+// 显式创建不依赖"窗口 layer 是否被系统分配 CAContext"(透明窗口下 layer.contextId
+// 可能为 0 → SBS 托管永远失败, 这是旧实现 toast 不显示的根本原因)。
+- (unsigned)_acquireContextId {
+    // 复用已创建的显式 CAContext (窗口 layer 可能重建, 重新 setLayer 挂上)
+    if (_sbsCAContext) {
+        SEL ctxIdSel = NSSelectorFromString(@"contextId");
+        unsigned ctxId = 0;
+        if (ctxIdSel && [_sbsCAContext respondsToSelector:ctxIdSel]) {
+            unsigned (*ctxIdFn)(id, SEL) = (unsigned (*)(id, SEL))[_sbsCAContext methodForSelector:ctxIdSel];
+            if (ctxIdFn) ctxId = ctxIdFn(_sbsCAContext, ctxIdSel);
+        }
+        if (ctxId != 0) {
+            SEL setLayerSel = NSSelectorFromString(@"setLayer:");
+            if (setLayerSel && [_sbsCAContext respondsToSelector:setLayerSel] && _window.layer) {
+                void (*setLayerFn)(id, SEL, CALayer *) = (void (*)(id, SEL, CALayer *))[_sbsCAContext methodForSelector:setLayerSel];
+                if (setLayerFn) setLayerFn(_sbsCAContext, setLayerSel, _window.layer);
+            }
+            return ctxId;
+        }
+        _sbsCAContext = nil; // context 失效, 重建
+    }
+
+    @try {
+        Class caContextClass = NSClassFromString(@"CAContext");
+        if (!caContextClass) {
+            // QuartzCore 框架已链接, 但保险起见 dlopen 兜底
+            static void *s_quartzHandle = NULL;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                s_quartzHandle = dlopen("/System/Library/Frameworks/"
+                                        "QuartzCore.framework/QuartzCore", RTLD_LAZY);
+            });
+            if (s_quartzHandle) {
+                caContextClass = NSClassFromString(@"CAContext");
+            }
+        }
+        if (caContextClass) {
+            // [CAContext remoteContextWithOptions:@{@"kCAContextIgnoresHitTest": @YES}]
+            SEL remoteSel = NSSelectorFromString(@"remoteContextWithOptions:");
+            if (remoteSel && [caContextClass respondsToSelector:remoteSel]) {
+                NSDictionary *opts = @{@"kCAContextIgnoresHitTest": @YES};
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id ctx = [caContextClass performSelector:remoteSel withObject:opts];
+#pragma clang diagnostic pop
+                if (ctx) {
+                    // [ctx setLayer:_window.layer]
+                    SEL setLayerSel = NSSelectorFromString(@"setLayer:");
+                    if (setLayerSel && [ctx respondsToSelector:setLayerSel] && _window.layer) {
+                        void (*setLayerFn)(id, SEL, CALayer *) = (void (*)(id, SEL, CALayer *))[ctx methodForSelector:setLayerSel];
+                        if (setLayerFn) setLayerFn(ctx, setLayerSel, _window.layer);
+                    }
+                    // unsigned ctxId = [ctx contextId]
+                    SEL ctxIdSel = NSSelectorFromString(@"contextId");
+                    unsigned ctxId = 0;
+                    if (ctxIdSel && [ctx respondsToSelector:ctxIdSel]) {
+                        unsigned (*ctxIdFn)(id, SEL) = (unsigned (*)(id, SEL))[ctx methodForSelector:ctxIdSel];
+                        if (ctxIdFn) ctxId = ctxIdFn(ctx, ctxIdSel);
+                    }
+                    if (ctxId != 0) {
+                        _sbsCAContext = ctx;
+                        // [CATransaction flush] 提交渲染, 确保内容进入 context
+                        Class txClass = NSClassFromString(@"CATransaction");
+                        if (txClass && [txClass respondsToSelector:@selector(flush)]) {
+                            [txClass flush];
+                        }
+                        HUDLog(@"CAContext created explicitly: ctxId=%u", ctxId);
+                        return ctxId;
+                    }
+                    _sbsCAContext = nil;
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        _sbsCAContext = nil;
+        HUDLog(@"CAContext explicit create exception: %@", e);
+    }
+
+    // 兜底: window.layer.contextId (旧逻辑, 仅 CAContext 显式创建不可用时)
+    CALayer *layer = _window.layer;
+    if (layer && [layer respondsToSelector:@selector(contextId)]) {
+        return (unsigned)[layer contextId];
+    }
+    return 0;
+}
+
 - (BOOL)_registerAccessibilityHostingWithRetryCount:(NSInteger)retryCount {
     if (retryCount <= 0) {
         HUDLog(@"accessibility hosting: retry exhausted, fallback to foreground");
@@ -285,13 +382,8 @@ static void HUDLog(NSString *fmt, ...) {
     }
 
     @try {
-        // 类型检查: contextId 是 CALayer 私有属性, 用 respondsToSelector 兜底
-        CALayer *layer = _window.layer;
-        if (!layer) return NO;
-        unsigned ctxId = 0;
-        if ([layer respondsToSelector:@selector(contextId)]) {
-            ctxId = (unsigned)[layer contextId];
-        }
+        // 优先显式创建 CAContext, 失败再退回 window.layer.contextId
+        unsigned ctxId = [self _acquireContextId];
         if (ctxId == 0) {
             __weak typeof(self) weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),

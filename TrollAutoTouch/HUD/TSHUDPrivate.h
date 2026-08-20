@@ -39,4 +39,18 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) unsigned contextId;
 @end
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CAContext (QuartzCore 私有类) —— 显式创建远程渲染上下文。
+// 逆向自 Go 版 AutoGoRunner.__fbInstallCAContextOverlay / floatball:
+//   1. cls = NSClassFromString(@"CAContext")
+//   2. ctx = [cls remoteContextWithOptions:@{@"kCAContextIgnoresHitTest": @YES}]
+//   3. [ctx setLayer:windowLayer]      // 把本地 layer 挂进远程上下文
+//   4. ctxId = [ctx contextId]         // 显式创建 → contextId 一定非零
+//   5. [CATransaction flush]           // 提交渲染
+// 之后 SBSAccessibilityWindowHostingController 用 ctxId 托管到系统级。
+// 编译期不直接引用 (NSClassFromString + methodForSelector 运行时调用)。
+// ─────────────────────────────────────────────────────────────────────────────
+// CAContext 的私有头不在 SDK 中, 类/选择器均运行时解析,
+// 无需在此声明 @interface; 具体调用见 TSHUDHost.m _createCAContextId。
+
 NS_ASSUME_NONNULL_END
