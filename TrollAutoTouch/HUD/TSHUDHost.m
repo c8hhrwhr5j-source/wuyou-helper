@@ -16,6 +16,7 @@
 
 #import "TSHUDHost.h"
 #import "HUDCustomAlertView.h"
+#import "HUDToastView.h"
 #import "TSHUDPrivate.h"
 #import <QuartzCore/QuartzCore.h>
 #import <sys/time.h>
@@ -270,6 +271,29 @@ static void HUDLog(NSString *fmt, ...) {
     NSTimeInterval maxWait = (timeout > 0 ? timeout : 60.0) + 15.0;
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(maxWait * NSEC_PER_SEC)));
     return result;
+}
+
+#pragma mark - 非阻塞 toast (可任意线程调用)
+
+- (void)showToast:(NSString *)text
+         duration:(NSTimeInterval)duration
+           hidden:(BOOL)hidden {
+    if (!_started) [self start];
+    if (text.length == 0) return;
+    if (duration <= 0) duration = 1.0;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            _window.hidden = NO;
+            HUDToastView *toast = [[HUDToastView alloc] initWithText:text
+                                                            duration:duration
+                                                              hidden:hidden];
+            [_rootVC.view addSubview:toast];
+            [toast show];
+        } @catch (NSException *e) {
+            HUDLog(@"showToast exception: %@", e);
+        }
+    });
 }
 
 #pragma mark - 状态诊断

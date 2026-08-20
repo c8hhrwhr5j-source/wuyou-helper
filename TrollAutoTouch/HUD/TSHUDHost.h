@@ -40,6 +40,17 @@ NS_ASSUME_NONNULL_BEGIN
                                      buttons:(nullable NSArray<NSString *> *)buttons
                                      timeout:(NSTimeInterval)timeout;
 
+/// 全局非阻塞 toast: 在任意前台 App 之上短暂显示一条提示, 到时自动消失。
+/// 不阻塞调用线程 (异步派发主线程), 且不拦截任何触摸
+/// (toast 卡片 userInteractionEnabled=NO, 命中即穿透)。
+/// @param text     提示文本
+/// @param duration 显示时长(秒); <=0 时用默认 1 秒
+/// @param hidden   弱化模式: YES 时用屏幕顶部小字样式, 尽量不占用
+///                 屏幕中部找色区域 (对应原版 sys.toast 的"是否隐藏"语义)
+- (void)showToast:(NSString *)text
+         duration:(NSTimeInterval)duration
+           hidden:(BOOL)hidden;
+
 /// 当前 HUD 宿主状态描述 (SBS 类可用性 / 是否已注册系统级托管 / 失败标志 / 前后台)。
 /// 供诊断日志输出, 避免"已就绪"这类误导性信息。
 - (NSString *)registrationStatusDescription;

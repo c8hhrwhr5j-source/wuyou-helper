@@ -293,11 +293,35 @@ static int l_global_logStr(lua_State *L) {
     return 0;
 }
 
-static int l_global_toast(lua_State *L) {
-    size_t len = 0;
-    const char *s = luaL_checklstring(L, 1, &len);
-    lua_log([NSString stringWithFormat:@"[toast] %@", luaToNSString(s, len)]);
+// sys.toast(提示消息, [显示时间毫秒], [是否隐藏])
+//   非阻塞: 通过 HUD 宿主 (TSHUDHost + SBS 系统级托管) 在任意前台 App 之上
+//   短暂显示提示, 自动消失, 不影响脚本继续执行。
+//   显示时间默认 1000 毫秒; 是否隐藏=true 时用屏幕顶部小字弱化样式,
+//   尽量不占用屏幕中部找色区域 (对应原版 sys.toast 的"是否隐藏"语义)。
+static int l_sys_toast(lua_State *L) {
+    size_t mlen = 0;
+    const char *msg = luaL_checklstring(L, 1, &mlen);
+    NSString *message = luaToNSString(msg, mlen);
+
+    NSTimeInterval duration = 1.0;
+    if (lua_type(L, 2) == LUA_TNUMBER) {
+        duration = lua_tonumber(L, 2) / 1000.0; // 毫秒 -> 秒
+    }
+
+    BOOL hidden = NO;
+    if (lua_type(L, 3) == LUA_TBOOLEAN) hidden = lua_toboolean(L, 3);
+
+    lua_log([NSString stringWithFormat:@"[toast] %@ (%gms, hidden=%d)",
+             message, duration * 1000, hidden]);
+
+    // showToast 内部异步派发到主线程, 这里立即返回 (非阻塞)。
+    [[TSHUDHost shared] showToast:message duration:duration hidden:hidden];
     return 0;
+}
+
+static int l_global_toast(lua_State *L) {
+    // 全局 toast(消息) 与 sys.toast 等效, 保持历史兼容
+    return l_sys_toast(L);
 }
 
 static int l_global_mSleep(lua_State *L) {
@@ -1526,6 +1550,7 @@ static void lua_register_all(lua_State *L) {
         {"battery",     l_sys_battery},
         {"alert",       l_sys_alert},
         {"alertButtons",l_sys_alertButtons},
+        {"toast",       l_sys_toast},
         {NULL, NULL}
     };
     luaL_newlib(L, sysLib);
