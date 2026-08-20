@@ -162,6 +162,12 @@ case "$MODE" in
     rm -rf "$PAYLOAD"; mkdir -p "$PAYLOAD"
     cp -R "$APP" "$PAYLOAD/"
 
+    # ── 网页资源 (noVNC 首页 + 脚本设置 UI): 整目录拷贝, 保留 www/ 结构 ──
+    # (不走 xcodegen 打包, 避免 www/index.html 与 www/ui/*/index.html
+    #  因 basename 相同在 Copy Bundle Resources 里冲突)
+    cp -R "$ROOT/TrollAutoTouch/Resources/www" "$PAYLOAD/TrollAutoTouch.app/www"
+    echo "[OK] www 网页资源已打包 (www/index.html noVNC + www/ui/* 脚本设置页)"
+
     # ── 注入式触摸服务: 编译 dylib + 打包 opainject 注入器 ──
     echo "[*] 编译触摸服务 dylib (TSInjectedTouchService)"
     # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制),
@@ -216,6 +222,11 @@ case "$MODE" in
     [ -z "$APP" ] && { echo "用法: $0 payload path/to/TrollAutoTouch.app"; exit 1; }
     rm -rf "$PAYLOAD"; mkdir -p "$PAYLOAD"
     cp -R "$APP" "$PAYLOAD/"
+    # 网页资源 (noVNC + 脚本设置 UI): 编译产物未含 www 时从仓库补拷
+    if [ ! -d "$PAYLOAD/TrollAutoTouch.app/www" ]; then
+      cp -R "$ROOT/TrollAutoTouch/Resources/www" "$PAYLOAD/TrollAutoTouch.app/www"
+      echo "[OK] www 网页资源已打包 (www/index.html noVNC + www/ui/* 脚本设置页)"
+    fi
     # 注入式触摸服务: opainject 从 Resources/bin 拷贝; dylib 若已在 build 产物则一并打包
     mkdir -p "$PAYLOAD/TrollAutoTouch.app/bin"
     cp "$ROOT/TrollAutoTouch/Resources/bin/opainject" "$PAYLOAD/TrollAutoTouch.app/bin/opainject"

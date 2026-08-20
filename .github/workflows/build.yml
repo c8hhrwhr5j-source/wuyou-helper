@@ -426,6 +426,15 @@ jobs:
           find "$APP_DST" -maxdepth 1 -name "*.png" | while read f; do echo "  $(basename $f) ($(stat -f%z "$f") bytes)"; done
 
           echo ""
+          echo "=== 网页资源 (www) ==="
+          # noVNC 首页 + 脚本设置 UI (www/ui/*/):
+          # xcodegen 不打 www (避免 www/index.html 与 www/ui/*/index.html 因
+          # basename 相同在 Copy Bundle Resources 冲突), 这里整目录拷贝。
+          cp -R "$PWD/TrollAutoTouch/Resources/www" "$APP_DST/www"
+          echo "[OK] www 目录已拷入 app bundle:"
+          find "$APP_DST/www" -type f | sed 's/^/  /' | head -20
+
+          echo ""
           echo "=== 打包 ==="
           cd build && zip -qry TrollAutoTouch.ipa Payload
           echo "[OK] build/TrollAutoTouch.ipa"
@@ -440,7 +449,7 @@ jobs:
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else

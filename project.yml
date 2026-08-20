@@ -39,6 +39,10 @@ targets:
           - "Resources/demo.script"
           - "Resources/demo.lua"
           - "Resources/lua/**"
+          # www 网页资源 (noVNC + 脚本设置 UI) 由 build-ipa.sh 打包时
+          # 整目录拷贝进 app bundle, 不走 xcodegen (避免多个 index.html
+          # 因 basename 相同在 Copy Bundle Resources 里冲突)。
+          - "Resources/www/**"
           # vendor/lua 由下方独立条目管理（需排除 lua.c/luac.c 两个含 main 的程序源）。
           # 若不排除，本递归条目会把它们一并收录，与 AppDelegate 的 main 冲突
           # 导致链接期 duplicate symbol '_main'。
@@ -65,14 +69,9 @@ targets:
         optional: true
       - path: TrollAutoTouch/Resources/lua
         optional: true
-      # www 作为 folder reference 整体打包, 保留目录结构
-      # (www/index.html noVNC 首页 + www/ui/<name>/ 脚本网页设置页),
-      # 否则 xcodegen 按 basename 拷贝, www/index.html 与 www/ui/*/index.html
-      # 会全部冲突到 app 根目录的 index.html。
-      - path: TrollAutoTouch/Resources/www
-        type: folder
-        buildPhase: resources
-        optional: true
+      # 注: www 网页资源 (noVNC + www/ui/* 脚本设置 UI) 不走 xcodegen 打包,
+      # 由 build-ipa.sh 在组装 Payload 时整目录拷贝到 TrollAutoTouch.app/www/,
+      # 避免多个 index.html 因 basename 相同在 Copy Bundle Resources 冲突。
       - path: TrollAutoTouch/Resources/lib
         optional: true
       - path: TrollAutoTouch/Resources/res
