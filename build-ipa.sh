@@ -168,6 +168,12 @@ case "$MODE" in
     cp -R "$ROOT/TrollAutoTouch/Resources/www" "$PAYLOAD/TrollAutoTouch.app/www"
     echo "[OK] www 网页资源已打包 (www/index.html noVNC + www/ui/* 脚本设置页)"
 
+    # ── Lua 脚本 (Main.lua 等): 整目录拷贝, 保留 lua/ 结构 ──
+    # (project.yml 已把 Resources/lua 排除出 Copy Bundle Resources, 需手动拷贝,
+    #  否则 AppDelegate 同步内置脚本到设备、网页 UI 点"开始运行"会找不到脚本)
+    cp -R "$ROOT/TrollAutoTouch/Resources/lua" "$PAYLOAD/TrollAutoTouch.app/lua"
+    echo "[OK] lua 脚本已打包 (lua/Main.lua 等)"
+
     # ── 注入式触摸服务: 编译 dylib + 打包 opainject 注入器 ──
     echo "[*] 编译触摸服务 dylib (TSInjectedTouchService)"
     # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制),
@@ -226,6 +232,11 @@ case "$MODE" in
     if [ ! -d "$PAYLOAD/TrollAutoTouch.app/www" ]; then
       cp -R "$ROOT/TrollAutoTouch/Resources/www" "$PAYLOAD/TrollAutoTouch.app/www"
       echo "[OK] www 网页资源已打包 (www/index.html noVNC + www/ui/* 脚本设置页)"
+    fi
+    # Lua 脚本: 编译产物未含 lua 时从仓库补拷
+    if [ ! -d "$PAYLOAD/TrollAutoTouch.app/lua" ]; then
+      cp -R "$ROOT/TrollAutoTouch/Resources/lua" "$PAYLOAD/TrollAutoTouch.app/lua"
+      echo "[OK] lua 脚本已打包 (lua/Main.lua 等)"
     fi
     # 注入式触摸服务: opainject 从 Resources/bin 拷贝; dylib 若已在 build 产物则一并打包
     mkdir -p "$PAYLOAD/TrollAutoTouch.app/bin"

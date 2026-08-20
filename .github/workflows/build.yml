@@ -435,6 +435,17 @@ jobs:
           find "$APP_DST/www" -type f | sed 's/^/  /' | head -20
 
           echo ""
+          echo "=== Lua 脚本 (lua) ==="
+          # 内置 Lua 脚本 (Main.lua 等): project.yml 已把 Resources/lua 排除出
+          # Copy Bundle Resources (避免 Main.lua 等 basename 与 www/ui/*/index.html
+          # 类似的冲突), 这里整目录拷贝。否则 AppDelegate 启动同步内置脚本到设备
+          # /var/mobile/touch/lua/main.lua 以及网页 UI 点"开始运行"的回退查找
+          # (pathForResource:ofType:) 都会找不到脚本。
+          cp -R "$PWD/TrollAutoTouch/Resources/lua" "$APP_DST/lua"
+          echo "[OK] lua 目录已拷入 app bundle:"
+          find "$APP_DST/lua" -type f | sed 's/^/  /' | head -20
+
+          echo ""
           echo "=== 打包 ==="
           cd build && zip -qry TrollAutoTouch.ipa Payload
           echo "[OK] build/TrollAutoTouch.ipa"
@@ -449,7 +460,7 @@ jobs:
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html" "Payload/TrollAutoTouch.app/www/ui/main/index.html"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html" "Payload/TrollAutoTouch.app/www/ui/main/index.html" "Payload/TrollAutoTouch.app/lua/Main.lua"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else
