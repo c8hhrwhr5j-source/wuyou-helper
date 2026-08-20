@@ -1575,6 +1575,75 @@ static void lua_register_all(lua_State *L) {
     lua_log(@"[Lua] 脚本已继续");
 }
 
+#pragma mark - 网页设置注入
+
+// 递归: 把 NSDictionary/NSArray/NSString/NSNumber 转成 Lua 值
+static void lua_pushJSONObject(lua_State *L, id obj) {
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        lua_newtable(L);
+        [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
+            lua_pushstring(L, [k description].UTF8String);
+            lua_pushJSONObject(L, v);
+            lua_rawset(L, -3);
+        }];
+    } else if ([obj isKindOfClass:[NSArray class]]) {
+        lua_newtable(L);
+        [(NSArray *)obj enumerateObjectsUsingBlock:^(id v, NSUInteger i, BOOL *stop) {
+            lua_pushinteger(L, (lua_Integer)i + 1);
+            lua_pushJSONObject(L, v);
+            lua_rawset(L, -3);
+        }];
+    } else if ([obj isKindOfClass:[NSString class]]) {
+        lua_pushstring(L, ((NSString *)obj).UTF8String);
+    } else if ([obj isKindOfClass:[NSNumber class]]) {
+        CFNumberType t = CFNumberGetType((CFNumberRef)obj);
+        if (t == kCFNumberBooleanType || t == kCFNumberCharType) {
+            lua_pushboolean(L, [obj boolValue]);
+        } else {
+            lua_pushnumber(L, [obj doubleValue]);
+        }
+    } else {
+        lua_pushnil(L);
+    }
+}
+
+// 把设置 JSON 解析后注入全局 settings 表; 找不到则注入空表
+// 查找顺序:
+//   1) 网页设置 UI 约定: /var/mobile/touch/lua/<脚本名>.settings.json
+//      (内置脚本运行时路径在 bundle 内, 必须按脚本名去设备目录找)
+//   2) 脚本旁侧文件: <脚本路径>.settings.json
+- (void)_injectSettingsTable:(lua_State *)L scriptPath:(NSString *)path {
+    NSString *settingsPath = nil;
+    if (path.length) {
+        NSString *fileName = path.lastPathComponent; // 如 demo.lua
+        NSString *baseName = fileName.stringByDeletingPathExtension;
+        NSString *devPath = [[TSPaths luaDir]
+            stringByAppendingPathComponent:[baseName stringByAppendingString:@".settings.json"]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:devPath]) {
+            settingsPath = devPath;
+        } else {
+            NSString *sidePath = [path stringByAppendingString:@".settings.json"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:sidePath]) {
+                settingsPath = sidePath;
+            }
+        }
+    }
+    if (settingsPath) {
+        NSData *data = [NSData dataWithContentsOfFile:settingsPath];
+        id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if ([obj isKindOfClass:[NSDictionary class]]) {
+            lua_pushJSONObject(L, obj);
+            lua_setglobal(L, "settings");
+            lua_log([NSString stringWithFormat:@"[设置] 已加载网页配置 %@ (%lu 项)",
+                     settingsPath.lastPathComponent,
+                     (unsigned long)[(NSDictionary *)obj count]]);
+            return;
+        }
+    }
+    lua_newtable(L);
+    lua_setglobal(L, "settings");
+}
+
 - (void)_execute:(NSString *)code filePath:(NSString *)path {
     _stopRequested = NO;
     _pauseRequested = NO;
@@ -1634,6 +1703,9 @@ static void lua_register_all(lua_State *L) {
         lua_pushstring(L, path.UTF8String);
         lua_setglobal(L, "_SCRIPT_PATH_");
     }
+
+    // 脚本网页设置 UI: 注入全局 settings 表 (用户经网页配置, 存于 <脚本>.settings.json)
+    [self _injectSettingsTable:L scriptPath:path];
 
     // 注意: 长度必须用 UTF-8 字节数(strlen)，不能用 code.length(NSString 字符数)。
     // 否则含中文的脚本会被截断, 报 ")` expected near <eof>" 之类的假语法错误。

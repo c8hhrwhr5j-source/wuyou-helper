@@ -12,12 +12,16 @@
 #import "TSDeviceInfo.h"
 #import "TSHIDEventTouch.h"
 #import "TSScriptEngine.h"
+#import "TSPaths.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <unistd.h>
 #import <fcntl.h>
+
+// 脚本网页设置 UI: 网页"开始运行"后由服务器发出, userInfo: {"name":脚本名}
+NSNotificationName const TSScriptUIRunRequestNotification = @"TSScriptUIRunRequestNotification";
 
 // htonll 在较新 iOS SDK 中已作为宏提供，仅在未定义时自行实现
 #ifndef htonll
@@ -330,6 +334,10 @@ static NSData *WSTextFrame(NSString *text) {
         [self serveControlPanel:clientFd];
     } else if ([path hasPrefix:@"/www/"]) {
         [self serveStaticFile:clientFd path:[path substringFromIndex:4]];
+    } else if ([path hasPrefix:@"/api/ui/"]) {
+        [self handleUIApi:clientFd path:path method:method body:body];
+    } else if ([path hasPrefix:@"/ui/"]) {
+        [self serveUIFile:clientFd path:[path substringFromIndex:4]];
     } else if ([path isEqualToString:@"/api/screenshot"]) {
         [self serveScreenshot:clientFd];
     } else if ([path isEqualToString:@"/api/stream"]) {
@@ -397,6 +405,174 @@ static NSData *WSTextFrame(NSString *text) {
 
     NSData *resp = HTTPResponse(200, @"OK", mime, fileData, @{@"Cache-Control": @"max-age=3600"});
     [self sendAndClose:clientFd data:resp];
+}
+
+#pragma mark - 脚本网页设置 UI
+
+// 约定 (参照 AutoJS resources/ui 风格):
+//   脚本:     /var/mobile/touch/lua/<name>.lua
+//   设置页:   /var/mobile/touch/lua/ui/<name>/index.html (设备, 优先)
+//             或 bundle www/ui/<name>/index.html (内置示例)
+//   设置数据: /var/mobile/touch/lua/<name>.settings.json
+//   运行:     网页 POST /api/ui/run → 保存 settings.json →
+//             发出 TSScriptUIRunRequestNotification (name) → 原生运行脚本
+
+- (NSArray<NSString *> *)uiScriptNames {
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    // 设备设置页目录
+    NSString *devUIRoot = [[TSPaths luaDir] stringByAppendingPathComponent:@"ui"];
+    for (NSString *dir in [fm contentsOfDirectoryAtPath:devUIRoot error:nil]) {
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:[[devUIRoot stringByAppendingPathComponent:dir]
+                                      stringByAppendingPathComponent:@"index.html"]
+                     isDirectory:&isDir] && !isDir) {
+            [names addObject:dir];
+        }
+    }
+    // bundle 内置设置页
+    NSString *bundleUIRoot = [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"www/ui"];
+    for (NSString *dir in [fm contentsOfDirectoryAtPath:bundleUIRoot error:nil]) {
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:[[bundleUIRoot stringByAppendingPathComponent:dir]
+                                      stringByAppendingPathComponent:@"index.html"]
+                     isDirectory:&isDir] && !isDir) {
+            [names addObject:dir];
+        }
+    }
+    return [[names allObjects] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+- (NSString *)uiSettingsPathForName:(NSString *)name {
+    return [[TSPaths luaDir]
+        stringByAppendingPathComponent:[name stringByAppendingString:@".settings.json"]];
+}
+
+// 静态资源: /ui/<name>/<rest> → 设备 ui/<name>/<rest>, 回退 bundle www/ui/<name>/<rest>
+- (void)serveUIFile:(int)clientFd path:(NSString *)path {
+    NSArray *comps = [path componentsSeparatedByString:@"/"];
+    if (comps.count < 2) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+        return;
+    }
+    NSString *name = [comps[0] stringByRemovingPercentEncoding];
+    NSString *rest = [[comps subarrayWithRange:NSMakeRange(1, comps.count - 1)]
+                      componentsJoinedByString:@"/"];
+    // 安全: 禁止路径穿越 / 脚本名含斜杠
+    if (name.length == 0 || [name containsString:@".."] || [name containsString:@"/"]
+        || [rest containsString:@".."]) {
+        [self sendAndClose:clientFd data:[self errorResponse:403 msg:@"Forbidden"]];
+        return;
+    }
+    NSString *filePath = [[[[TSPaths luaDir] stringByAppendingPathComponent:@"ui"]
+                            stringByAppendingPathComponent:name]
+                           stringByAppendingPathComponent:rest];
+    NSData *fileData = [NSData dataWithContentsOfFile:filePath];
+    if (!fileData) {
+        filePath = [[[[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"www/ui"]
+                      stringByAppendingPathComponent:name]
+                     stringByAppendingPathComponent:rest];
+        fileData = [NSData dataWithContentsOfFile:filePath];
+    }
+    if (!fileData) {
+        [self sendAndClose:clientFd data:[self errorResponse:404 msg:@"Not Found"]];
+        return;
+    }
+    NSString *ext = rest.pathExtension.lowercaseString;
+    NSString *mime = @"application/octet-stream";
+    if ([ext isEqualToString:@"html"] || [ext isEqualToString:@"htm"]) mime = @"text/html; charset=utf-8";
+    else if ([ext isEqualToString:@"css"]) mime = @"text/css";
+    else if ([ext isEqualToString:@"js"]) mime = @"application/javascript";
+    else if ([ext isEqualToString:@"json"]) mime = @"application/json";
+    else if ([ext isEqualToString:@"png"]) mime = @"image/png";
+    else if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) mime = @"image/jpeg";
+    else if ([ext isEqualToString:@"gif"]) mime = @"image/gif";
+    else if ([ext isEqualToString:@"svg"]) mime = @"image/svg+xml";
+    NSData *resp = HTTPResponse(200, @"OK", mime, fileData, @{@"Cache-Control": @"no-cache"});
+    [self sendAndClose:clientFd data:resp];
+}
+
+// API: /api/ui/list | /api/ui/settings?name=xxx | /api/ui/run
+- (void)handleUIApi:(int)clientFd path:(NSString *)path method:(NSString *)method body:(NSData *)body {
+    if ([path isEqualToString:@"/api/ui/list"]) {
+        NSMutableArray *items = [NSMutableArray array];
+        for (NSString *name in [self uiScriptNames]) {
+            [items addObject:@{@"name": name, @"title": name}];
+        }
+        [self sendAndClose:clientFd data:[self jsonResponse:@{@"scripts": items}]];
+        return;
+    }
+    if ([path isEqualToString:@"/api/ui/settings"]) {
+        NSString *name = [self queryValueForPath:path key:@"name"];
+        if (name.length == 0 || [name containsString:@"/"] || [name containsString:@".."]) {
+            [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+            return;
+        }
+        NSString *settingsPath = [self uiSettingsPathForName:name];
+        if ([method isEqualToString:@"GET"]) {
+            NSDictionary *settings = @{};
+            NSData *data = [NSData dataWithContentsOfFile:settingsPath];
+            if (data) {
+                id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([obj isKindOfClass:[NSDictionary class]]) settings = obj;
+            }
+            [self sendAndClose:clientFd data:[self jsonResponse:@{@"name": name, @"settings": settings}]];
+            return;
+        }
+        if ([method isEqualToString:@"POST"]) {
+            NSDictionary *json = [self parseJSON:body];
+            id settings = json[@"settings"];
+            if (![settings isKindOfClass:[NSDictionary class]]) {
+                [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+                return;
+            }
+            NSData *outData = [NSJSONSerialization dataWithJSONObject:settings
+                                                              options:NSJSONWritingPrettyPrinted
+                                                                error:nil];
+            [outData writeToFile:settingsPath atomically:YES];
+            [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
+            return;
+        }
+    }
+    if ([path isEqualToString:@"/api/ui/run"] && [method isEqualToString:@"POST"]) {
+        NSDictionary *json = [self parseJSON:body];
+        NSString *name = json[@"name"];
+        id settings = json[@"settings"];
+        if (name.length == 0 || [name containsString:@"/"] || [name containsString:@".."]) {
+            [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+            return;
+        }
+        // 先保存设置
+        if ([settings isKindOfClass:[NSDictionary class]]) {
+            NSData *outData = [NSJSONSerialization dataWithJSONObject:settings
+                                                              options:NSJSONWritingPrettyPrinted
+                                                                error:nil];
+            [outData writeToFile:[self uiSettingsPathForName:name] atomically:YES];
+        }
+        // 通知主线程运行脚本 (ViewController / TSScriptUIViewController 监听)
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:TSScriptUIRunRequestNotification
+                              object:nil
+                            userInfo:@{@"name": name}];
+        });
+        [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
+        return;
+    }
+    [self sendAndClose:clientFd data:[self errorResponse:404 msg:@"Not Found"]];
+}
+
+- (NSString *)queryValueForPath:(NSString *)path key:(NSString *)key {
+    NSRange q = [path rangeOfString:@"?"];
+    if (q.location == NSNotFound) return nil;
+    NSString *query = [path substringFromIndex:q.location + 1];
+    for (NSString *pair in [query componentsSeparatedByString:@"&"]) {
+        NSArray *kv = [pair componentsSeparatedByString:@"="];
+        if (kv.count == 2 && [kv[0] isEqualToString:key]) {
+            return [kv[1] stringByRemovingPercentEncoding];
+        }
+    }
+    return nil;
 }
 
 - (void)serveScreenshot:(int)clientFd {

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+<title>示例脚本设置</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body { font-family:-apple-system,"PingFang SC",sans-serif; background:#eef1f5; color:#222; }
+/* ===== 顶部固定导航 ===== */
+.nav-button-group-fixed {
+  position:fixed; top:0; left:0; right:0; z-index:100;
+  background:#fff; border-bottom:1px solid #e3e6ea; padding:6px 10px;
+}
+.nav-row { display:flex; gap:8px; margin-bottom:6px; }
+.nav-row:last-child { margin-bottom:0; }
+.nav-btn {
+  flex:1; padding:8px 0; border:1px solid #d8dce2; border-radius:8px;
+  background:#f7f8fa; color:#444; font-size:14px; text-align:center;
+}
+.nav-btn.active {
+  background:#1677ff; border-color:#1677ff; color:#fff; font-weight:600;
+}
+/* ===== 内容区 ===== */
+.content { padding: 96px 10px 70px; }
+.panel-content { display:none; }
+.panel-content.active { display:block; }
+.section-title {
+  font-size:15px; font-weight:700; color:#1677ff;
+  padding:10px 2px 6px;
+}
+.group-card {
+  background:#fff; border-radius:10px; margin-bottom:10px;
+  padding:4px 12px; border:1px solid #e9ecf0;
+}
+.row {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:11px 0; border-bottom:1px solid #f0f2f5; gap:10px;
+}
+.row:last-child { border-bottom:none; }
+.row .label { font-size:14px; color:#333; flex:1; }
+.row .label small { display:block; color:#999; font-size:11px; margin-top:2px; }
+/* select */
+select {
+  height:34px; border:1px solid #d8dce2; border-radius:6px;
+  background:#fff; font-size:14px; padding:0 8px; max-width:55%; color:#222;
+}
+/* input */
+input[type="text"], input[type="password"], input[type="number"] {
+  height:34px; border:1px solid #d8dce2; border-radius:6px;
+  font-size:14px; padding:0 8px; width:55%; color:#222; background:#fff;
+}
+/* 开关 */
+.toggle-switch { position:relative; display:inline-block; width:48px; height:27px; flex:none; }
+.toggle-switch input { display:none; }
+.toggle-slider {
+  position:absolute; inset:0; border-radius:14px; background:#d8dce2; transition:.2s;
+}
+.toggle-slider::before {
+  content:""; position:absolute; width:23px; height:23px; border-radius:50%;
+  left:2px; top:2px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:.2s;
+}
+.toggle-switch input:checked + .toggle-slider { background:#1677ff; }
+.toggle-switch input:checked + .toggle-slider::before { transform:translateX(21px); }
+/* 滑块 */
+input[type="range"] { flex:1; max-width:55%; height:30px; accent-color:#1677ff; }
+.range-val { width:52px; text-align:right; font-size:13px; color:#1677ff; font-weight:600; }
+/* 分段单选 */
+.segmented { display:flex; border:1px solid #1677ff; border-radius:8px; overflow:hidden; max-width:60%; flex:none; }
+.segmented input { display:none; }
+.segmented label {
+  padding:6px 12px; font-size:13px; color:#1677ff; background:#fff;
+  border-right:1px solid #1677ff; text-align:center;
+}
+.segmented label:last-child { border-right:none; }
+.segmented input:checked + label { background:#1677ff; color:#fff; }
+/* ===== 底部操作栏 ===== */
+.bottom-bar {
+  position:fixed; left:0; right:0; bottom:0; z-index:100;
+  display:flex; gap:10px; padding:10px 12px;
+  background:#fff; border-top:1px solid #e3e6ea;
+}
+.bottom-bar button {
+  flex:1; height:44px; border:none; border-radius:10px; font-size:16px; font-weight:600;
+}
+.btn-save { background:#f0f2f5; color:#333; }
+.btn-run { background:#1677ff; color:#fff; }
+/* toast */
+#toast {
+  position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+  background:rgba(0,0,0,.78); color:#fff; font-size:14px;
+  padding:12px 20px; border-radius:10px; display:none; z-index:200; max-width:80%;
+}
+</style>
+</head>
+<body>
+
+<div class="nav-button-group-fixed">
+  <div class="nav-row">
+    <button class="nav-btn active" onclick="showPanel(this,'accountPanel')">账号</button>
+    <button class="nav-btn" onclick="showPanel(this,'farmPanel')">挂机</button>
+    <button class="nav-btn" onclick="showPanel(this,'battlePanel')">战斗</button>
+    <button class="nav-btn" onclick="showPanel(this,'advPanel')">高级</button>
+  </div>
+</div>
+
+<div class="content">
+
+<!-- ===== 账号面板 ===== -->
+<div id="accountPanel" class="panel-content active">
+  <div class="section-title">账号设置</div>
+  <div class="group-card">
+    <div class="row">
+      <span class="label">脚本授权卡密
+        <small>必填，用于校验运行权限</small></span>
+      <input type="password" id="kmi" data-key="kami" data-type="string" placeholder="请输入卡密">
+    </div>
+    <div class="row">
+      <span class="label">角色名称
+        <small>挂机时优先匹配的角色</small></span>
+      <input type="text" id="jsmc" data-key="roleName" data-type="string" placeholder="角色名">
+    </div>
+    <div class="row">
+      <span class="label">运行方式</span>
+      <select id="yxf" data-key="runMode" data-type="string">
+        <option value="restart">重新运行</option>
+        <option value="continue">接着运行</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 挂机面板 ===== -->
+<div id="farmPanel" class="panel-content">
+  <div class="section-title">挂机设置</div>
+  <div class="group-card">
+    <div class="row">
+      <span class="label">挂机地图</span>
+      <select id="dt" data-key="map" data-type="string">
+        <option value="wuye">野图打怪</option>
+        <option value="jingying">精英地图</option>
+        <option value="yanhuo">焰火屠魔</option>
+        <option value="wolong">卧龙山庄</option>
+      </select>
+    </div>
+    <div class="row">
+      <span class="label">自动买药
+        <small>血量/蓝量不足时自动回城购买</small></span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="my" data-key="autoBuy" data-type="bool">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span class="label">买药数量</span>
+      <input type="range" id="mysl" data-key="buyCount" data-type="number"
+             min="0" max="500" step="10" value="100">
+      <span class="range-val" id="mysl_val">100</span>
+    </div>
+    <div class="row">
+      <span class="label">自动喊话</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="zh" data-key="autoShout" data-type="bool">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 战斗面板 ===== -->
+<div id="battlePanel" class="panel-content">
+  <div class="section-title">战斗设置</div>
+  <div class="group-card">
+    <div class="row">
+      <span class="label">战斗模式</span>
+      <div class="segmented">
+        <input type="radio" name="mode" id="mode_gj" value="auto" data-key="battleMode" data-type="string" checked>
+        <label for="mode_gj">自动</label>
+        <input type="radio" name="mode" id="mode_bs" value="boss" data-key="battleMode" data-type="string">
+        <label for="mode_bs">只打BOSS</label>
+        <input type="radio" name="mode" id="mode_hand" value="manual" data-key="battleMode" data-type="string">
+        <label for="mode_hand">手动</label>
+      </div>
+    </div>
+    <div class="row">
+      <span class="label">技能顺序
+        <small>逗号分隔，如 4,3,2,1</small></span>
+      <input type="text" id="jn" data-key="skillOrder" data-type="string" value="4,3,2,1">
+    </div>
+    <div class="row">
+      <span class="label">血量低于此值回城
+        <small>百分比</small></span>
+      <input type="range" id="hp" data-key="lowHp" data-type="number"
+             min="10" max="90" step="5" value="30">
+      <span class="range-val" id="hp_val">30%</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 高级面板 ===== -->
+<div id="advPanel" class="panel-content">
+  <div class="section-title">高级设置</div>
+  <div class="group-card">
+    <div class="row">
+      <span class="label">断线重连间隔
+        <small>秒</small></span>
+      <input type="range" id="zlsj" data-key="reconnectSec" data-type="number"
+             min="5" max="120" step="5" value="30">
+      <span class="range-val" id="zlsj_val">30s</span>
+    </div>
+    <div class="row">
+      <span class="label">输出详细日志</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="rj" data-key="verboseLog" data-type="bool" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<div class="bottom-bar">
+  <button class="btn-save" onclick="saveSettings()">保存设置</button>
+  <button class="btn-run" onclick="runScript()">开始运行</button>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const SCRIPT = 'demo';
+
+function showPanel(btn, id) {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.panel-content').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// 收集所有带 data-key 的控件值
+function collect() {
+  const data = {};
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key, type = el.dataset.type;
+    let val;
+    if (el.type === 'checkbox')      val = el.checked;
+    else if (el.type === 'radio')    { if (el.checked) val = el.value; else return; }
+    else if (el.type === 'range')    val = Number(el.value);
+    else if (el.tagName === 'SELECT') val = el.value;
+    else                             val = el.value;
+    data[key] = val;
+  });
+  // 处理单选组重复 key: radio 用 value 覆盖
+  return data;
+}
+
+// 用已保存设置回填控件
+function apply(saved) {
+  if (!saved) return;
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    if (!(key in saved)) return;
+    const val = saved[key];
+    if (el.type === 'checkbox')          el.checked = !!val;
+    else if (el.type === 'radio')        { if (String(val) === el.value) el.checked = true; }
+    else if (el.type === 'range')        el.value = val;
+    else if (el.tagName === 'SELECT')    el.value = String(val);
+    else                                 el.value = val;
+  });
+  updateRangeLabels();
+}
+
+function updateRangeLabels() {
+  document.querySelectorAll('input[type="range"]').forEach(r => {
+    const id = r.id + '_val', v = r.value;
+    const label = document.getElementById(id);
+    if (!label) return;
+    if (r.id === 'hp')      label.textContent = v + '%';
+    else if (r.id === 'zlsj') label.textContent = v + 's';
+    else                    label.textContent = v;
+  });
+}
+document.addEventListener('input', e => {
+  if (e.target.type === 'range') updateRangeLabels();
+});
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.display = 'none', 1600);
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/ui/settings?name=' + SCRIPT);
+    const json = await res.json();
+    apply(json.settings || {});
+  } catch (e) { console.log('load settings failed', e); }
+}
+
+async function saveSettings() {
+  const settings = collect();
+  try {
+    const res = await fetch('/api/ui/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: SCRIPT, settings: settings })
+    });
+    const json = await res.json();
+    toast(json.ok ? '设置已保存' : '保存失败');
+  } catch (e) {
+    toast('保存失败: ' + e.message);
+  }
+}
+
+async function runScript() {
+  const settings = collect();
+  toast('已启动脚本...');
+  try {
+    await fetch('/api/ui/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: SCRIPT, settings: settings })
+    });
+  } catch (e) {
+    toast('启动失败: ' + e.message);
+  }
+}
+
+loadSettings();
+</script>
+</body>
+</html>

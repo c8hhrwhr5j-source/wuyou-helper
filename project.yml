@@ -26,7 +26,7 @@ settings:
     # (与 TSInjectedTouchService 相同策略; 不产生私有框架链接依赖)。
     # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
     #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework Security -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework Security -framework WebKit -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework UserNotifications -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
 targets:
   TrollAutoTouch:
     type: application
@@ -82,6 +82,10 @@ targets:
         # (配合 TSAudioKeepAlive, 不产生声音、不抢占其他 app 音频)。
         UIBackgroundModes:
           - audio
+        # 脚本网页设置 UI (WKWebView) 通过 http://127.0.0.1 访问内嵌 HTTP 服务器,
+        # 需要 ATS 本地网络豁免 (NSAllowsLocalNetworking, iOS 10+)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         CFBundleIcons:
           CFBundlePrimaryIcon:
             CFBundleIconFiles:

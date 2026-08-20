@@ -22,6 +22,7 @@
 #import "TSToolExecutor.h"
 #import "TSLuaBridge.h"
 #import "TSPaths.h"
+#import "Views/TSScriptUIViewController.h"
 #import "Core/TSInjectedTouchClient.h"
 #import "Injected/TSInjectedTouchService.h"
 
@@ -71,6 +72,12 @@ static BOOL _luaPausedByButton = NO;
 
     // 设置 Web 服务器回调
     [TSHTTPServer shared].delegate = self;
+
+    // 脚本网页设置 UI: 网页点"开始运行"后由 HTTP 服务器发出, 这里启动对应脚本
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_handleScriptUIRun:)
+                                                 name:TSScriptUIRunRequestNotification
+                                               object:nil];
 }
 
 - (void)_buildUI {
@@ -91,7 +98,7 @@ static BOOL _luaPausedByButton = NO;
         @"运行 Lua",     @"停止 Lua",
         @"显示 HUD",     @"隐藏 HUD",
         @"启动守护",     @"Shell 执行",
-        @"暂停 Lua",
+        @"暂停 Lua",     @"脚本UI",
     ];
 
     for (NSUInteger i = 0; i < titles.count; i++) {
@@ -152,6 +159,7 @@ static BOOL _luaPausedByButton = NO;
         case 16: [self _startDaemon]; break;
         case 17: [self _testShell]; break;
         case 18: [self _pauseLuaScript]; break;
+        case 19: [self _openScriptUI]; break;
     }
 }
 
@@ -332,6 +340,63 @@ static BOOL _luaPausedByButton = NO;
 - (void)_stopLuaScript {
     [[TSLuaBridge shared] stop];
     [self _log:@"[Lua] 已请求停止"];
+}
+
+#pragma mark - 脚本网页设置 UI
+
+// 打开脚本设置 UI: 列出有网页设置页的脚本, 选择后全屏显示设置网页
+- (void)_openScriptUI {
+    // 确保内嵌服务器运行 (设置网页由它提供)
+    if (![TSHTTPServer shared].isRunning) {
+        [[TSHTTPServer shared] start];
+    }
+    NSArray<NSString *> *names = [[TSHTTPServer shared] uiScriptNames];
+    if (names.count == 0) {
+        [self _log:@"[脚本UI] 未找到带设置页的脚本 (内置示例: demo)"];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"脚本设置 UI"
+                                                                message:@"选择脚本, 网页中配置参数后点\"开始运行\""
+                                                         preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSString *name in names) {
+        [ac addAction:[UIAlertAction actionWithTitle:name style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *a) {
+            TSScriptUIViewController *vc =
+                [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
+            [self presentViewController:vc animated:YES completion:nil];
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+        ac.popoverPresentationController.sourceView = self.view;
+        ac.popoverPresentationController.sourceRect =
+            CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    }
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// 网页点"开始运行"回调: 运行 /var/mobile/touch/lua/<name>.lua, 不存在则用内置 <name>.lua
+- (void)_handleScriptUIRun:(NSNotification *)note {
+    NSString *name = note.userInfo[@"name"];
+    if (name.length == 0) return;
+
+    NSString *devPath = [TSPaths pathForLua:[name stringByAppendingString:@".lua"]];
+    NSString *path = nil;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:devPath]) {
+        path = devPath;
+    } else {
+        path = [[NSBundle mainBundle] pathForResource:name ofType:@"lua"];
+    }
+    if (!path) {
+        [self _log:[NSString stringWithFormat:@"[脚本UI] 未找到脚本 %@.lua (设备或内置)", name]];
+        return;
+    }
+    __weak typeof(self) ws = self;
+    [TSLuaBridge shared].logHandler = ^(NSString *msg) {
+        [ws _log:msg];
+    };
+    [[TSLuaBridge shared] runFile:path];
+    [self _log:[NSString stringWithFormat:@"[脚本UI] 启动脚本: %@", path]];
 }
 
 // 暂停/继续切换 (主界面按钮)。脚本运行期间也可按音量键呼出控制面板。

@@ -1,7 +1,25 @@
--- demo.lua — TrollAutoTouch Lua 找色点击示例
--- 通过 [运行 Lua] 按钮执行；把本文件复制到
--- /var/mobile/touch/lua/demo.lua 后即可自行编辑(优先加载)。
--- 其他目录: /var/mobile/touch/log 放本地日志, /var/mobile/touch/res 放资源文件。
+-- demo.lua — TrollAutoTouch Lua 示例脚本
+-- 运行方式:
+--   1) [运行 Lua] 按钮: 直接运行 (无网页配置时 settings 为空表)
+--   2) [脚本UI] → demo: 网页中配置参数, 点"开始运行"后由原生运行本脚本,
+--      用户配置以全局 settings 表注入 (对应 /var/mobile/touch/lua/demo.settings.json)
+-- 把本文件复制到 /var/mobile/touch/lua/demo.lua 即可自行编辑(优先加载)。
+
+-- ===== 网页设置 UI 配置读取演示 =====
+-- settings 表由原生注入, 字段与 www/ui/demo/index.html 中的 data-key 对应
+logStr("===== 网页设置 UI 配置 =====")
+logStr("卡密:    " .. (settings.kami     or "(未设置)"))
+logStr("角色:    " .. (settings.roleName or "(未设置)"))
+logStr("运行方式: " .. (settings.runMode  or "restart"))
+logStr("挂机地图: " .. (settings.map      or "wuye"))
+logStr("自动买药: " .. tostring(settings.autoBuy))
+logStr("买药数量: " .. tostring(settings.buyCount or 100))
+logStr("战斗模式: " .. (settings.battleMode or "auto"))
+logStr("技能顺序: " .. (settings.skillOrder or "4,3,2,1"))
+logStr("低血回城: " .. tostring(settings.lowHp or 30) .. "%")
+logStr("重连间隔: " .. tostring(settings.reconnectSec or 30) .. "s")
+logStr("详细日志: " .. tostring(settings.verboseLog))
+logStr("============================")
 
 -- ===== 基础用法 =====
 logStr("TrollAutoTouch Lua 脚本启动!")
