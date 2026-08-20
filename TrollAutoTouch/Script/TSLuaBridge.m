@@ -50,6 +50,8 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "../Core/TSHUDService.h"
 #import "../HUD/TSHUDHost.h"
 #import "../Views/TSScriptUIViewController.h"
+#import "TSScriptListViewController.h"
+#import "../Core/TSToolExecutor.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -67,6 +69,7 @@ static volatile BOOL _pauseRequested = NO;
 - (void)_handleVolumeKey;
 - (void)_presentInAppVolumeMenu;
 - (void)_presentBackgroundVolumeMenu;
+- (void)_handleIdleVolumeKey;
 - (void)_togglePauseBackground;
 - (void)_injectSettingsTable:(lua_State *)L scriptPath:(NSString *)path;
 // App 内音量键控制菜单(注入失败兜底), 脚本结束时需自动关闭
@@ -1814,14 +1817,10 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     // (需 Info.plist UIBackgroundModes=audio, 见 project.yml)。
     [[TSAudioKeepAlive shared] start];
     // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
-    // 公开 API, 不依赖注入 SpringBoard)。识别到后:
-    //   注入成功 → 通知 dylib 弹控制菜单; 注入失败 → App 内弹选择菜单兜底。
-    TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
-    __weak typeof(self) weakSelf = self;
-    vm.onVolumeKey = ^{
-        [weakSelf _handleVolumeKey];
-    };
-    [vm start];
+    // 公开 API, 不依赖注入 SpringBoard)。轮询由 TAS 服务启动时的常驻监听
+    // (startGlobalVolumeMonitoring) 统一管理, 脚本运行/结束不启停轮询:
+    //   脚本运行中 → _handleVolumeKey → 控制菜单 (注入成功 dylib 弹 / 兜底 App 内弹);
+    //   空闲未运行 → _handleIdleVolumeKey → 询问"运行选中脚本?"。
 
     lua_State *L = luaL_newstate();
     if (!L) {
@@ -1877,11 +1876,10 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     _pauseRequested = NO;
     self.runningPath = nil;
     self.isRunning = NO;
-    // 脚本结束, 关闭音量键控制面板, 避免平时按音量键误弹菜单
+    // 脚本结束, 关闭音量键控制面板, 避免平时按音量键误弹运行菜单
+    // (dylib 侧 s_volumeControlEnabled 仅在脚本运行期间为 YES;
+    //   App 进程内轮询保持常驻, 空闲按音量键走"运行脚本"选择)
     [[TSInjectedTouchClient shared] setVolumeKeyControlEnabled:NO];
-    // 停止音量键轮询
-    [[TSVolumeKeyMonitor shared] stop];
-    [TSVolumeKeyMonitor shared].onVolumeKey = nil;
     // 脚本结束, 停止后台静音保活 (App 回到正常后台生命周期)
     [[TSAudioKeepAlive shared] stop];
     // 脚本结束, 自动关闭 App 内音量键菜单(若仍在显示)
@@ -1907,6 +1905,12 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         if ((now - s_lastKeyAt) < 0.8) return;
         s_lastKeyAt = now;
 
+        // 空闲(无脚本运行): 弹"运行脚本/取消"选择, 运行当前选中的脚本
+        if (!self.isRunning) {
+            [self _handleIdleVolumeKey];
+            return;
+        }
+
         TSInjectedTouchClient *client = [TSInjectedTouchClient shared];
         if ([client isConnected]) {
             // 注入成功: dylib 校验 s_volumeControlEnabled 后弹菜单
@@ -1920,6 +1924,77 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
             // UIAlertController 无法在后台显示, 改用 HUD 系统级弹窗。
             [self _presentBackgroundVolumeMenu];
         }
+    });
+}
+
+// ── 常驻音量键监听 (TAS 服务开关) ──────────────────────────────
+// App 启动且 TAS 服务开启时调用。音量键轮询不随脚本启停:
+//   脚本运行中 → _handleVolumeKey → 控制菜单;
+//   空闲未运行 → _handleIdleVolumeKey → 询问运行选中脚本。
+- (void)startGlobalVolumeMonitoring {
+    TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
+    __weak typeof(self) weakSelf = self;
+    vm.onVolumeKey = ^{
+        [weakSelf _handleVolumeKey];
+    };
+    [vm start];
+    lua_log(@"[音量键] 常驻监听已启动 (TAS 服务开)");
+}
+
+- (void)stopGlobalVolumeMonitoring {
+    [TSVolumeKeyMonitor shared].onVolumeKey = nil;
+    [[TSVolumeKeyMonitor shared] stop];
+    lua_log(@"[音量键] 常驻监听已停止 (TAS 服务关)");
+}
+
+// 空闲(无脚本运行)时按音量键: 询问是否运行"当前选中的脚本"。
+// 用 HUD 系统级弹窗, 在任意 app(游戏等)前台都能显示;
+// 点"运行" → 运行脚本列表里选中的 lua 脚本; 点"取消" → 什么都不做。
+- (void)_handleIdleVolumeKey {
+    static BOOL s_idleMenuShowing = NO;
+    if (s_idleMenuShowing) return; // 弹窗显示期间忽略再次按键
+    s_idleMenuShowing = YES;
+
+    NSString *name = [TSScriptListViewController selectedScriptName];
+    if (!name.length) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            s_idleMenuShowing = NO;
+            [[TSHUDHost shared] showToast:@"未选中脚本，请先在配置页选中" duration:1.2 hidden:NO];
+        });
+        lua_log(@"[音量键] 空闲: 未选中脚本, 忽略");
+        return;
+    }
+    NSString *path = [TSPaths pathForLua:name];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            s_idleMenuShowing = NO;
+            [[TSHUDHost shared] showToast:@"所选脚本已不存在" duration:1.2 hidden:NO];
+        });
+        lua_log(@"[音量键] 空闲: 选中脚本不存在, 忽略");
+        return;
+    }
+
+    lua_log([NSString stringWithFormat:@"[音量键] 空闲: 询问是否运行「%@」", name]);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程
+        NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
+                                                                     message:[NSString stringWithFormat:@"运行脚本「%@」？", name]
+                                                                     buttons:@[@"运行", @"取消"]
+                                                                     timeout:0];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            s_idleMenuShowing = NO;
+            if ([clicked isEqualToString:@"运行"]) {
+                NSString *content = [[TSToolExecutor shared] readTextFile:path];
+                if (content.length) {
+                    [[NSNotificationCenter defaultCenter] postNotificationName:@"TSRunScript"
+                                                                        object:nil
+                                                                      userInfo:@{@"path": path, @"content": content}];
+                } else {
+                    lua_log([NSString stringWithFormat:@"[音量键] 读取脚本失败: %@", path]);
+                }
+            }
+            // "取消" 或 HUD 不可用(返回 nil): 什么都不做
+        });
     });
 }
 

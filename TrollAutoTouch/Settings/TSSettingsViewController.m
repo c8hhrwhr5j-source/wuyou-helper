@@ -9,10 +9,17 @@
 #import "TSSettingsViewController.h"
 #import "../Views/TSPerformanceMonitorView.h"
 #import "../Core/TSToolExecutor.h"
+#import "../Core/TSDaemonManager.h"
 #import "../Script/TSHTTPServer.h"
+#import "../Script/TSLuaBridge.h"
 #import "../HUD/TSHUDWindow.h"
+#import "../HUD/TSHUDHost.h"
 #import "../Common/TSPaths.h"
 #import "TSLogViewController.h"
+
+// TAS 服务开关的持久化 key。开 → App 启动即运行服务 + 常驻音量键监听;
+// 关 → 停止服务/监听, 进后台也不保活。默认开。
+static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 #pragma mark - Switch Cell
 
@@ -107,8 +114,9 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // TAS 服务默认开启: 安装即处于运行保活状态(AppDelegate 已无条件 startAll)
-        _tasServiceOn    = YES;
+        // TAS 服务默认开启: 安装即处于运行保活状态。状态持久化, 重启后保持上次选择。
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        _tasServiceOn = [ud objectForKey:kTASServiceEnabledKey] ? [ud boolForKey:kTASServiceEnabledKey] : YES;
         _remoteAccessOn  = NO;
         _touchDisplayOn  = NO;
         // 悬浮窗口默认关闭: 用户需要时手动开启
@@ -166,6 +174,20 @@
 
 - (void)_toggleTAS:(BOOL)on {
     _tasServiceOn = on;
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kTASServiceEnabledKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    if (on) {
+        // 开启: 启动服务 + 常驻音量键监听 (空闲按音量键 → 弹"运行脚本/取消")
+        [[TSDaemonManager shared] startAll];
+        [[TSLuaBridge shared] startGlobalVolumeMonitoring];
+        [[TSHUDHost shared] showToast:@"TAS 服务已开启" duration:1.2 hidden:NO];
+    } else {
+        // 关闭: 停止音量键监听 + 停止服务 (含后台保活/心跳)
+        [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
+        [[TSDaemonManager shared] stopAll];
+        [[TSHUDHost shared] showToast:@"TAS 服务已关闭" duration:1.2 hidden:NO];
+    }
     [_tableView reloadData];
 }
 

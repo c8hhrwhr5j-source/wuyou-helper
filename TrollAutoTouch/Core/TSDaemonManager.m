@@ -63,6 +63,14 @@
 }
 
 - (void)appDidEnterBackground:(NSNotification *)note {
+    // TAS 服务开关关闭时不做后台保活 (用户明确停用服务)
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL tasOn = [ud objectForKey:@"TASServiceEnabled"] ? [ud boolForKey:@"TASServiceEnabled"] : YES;
+    if (!tasOn) {
+        NSLog(@"[Daemon] TAS 服务已关闭, 跳过后台保活");
+        return;
+    }
+
     NSLog(@"[Daemon] 应用进入后台");
     _isInBackground = YES;
     _state = TSDaemonStateBackground;

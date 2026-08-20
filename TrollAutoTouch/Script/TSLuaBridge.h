@@ -54,6 +54,14 @@ FOUNDATION_EXPORT NSNotificationName const TSLuaRunningStateChangedNotification;
 /// 恢复被 pause 暂停的脚本
 - (void)resume;
 
+// ── 常驻音量键监听 (TAS 服务开启时由 App 启动调用) ──
+/// 启动常驻音量键轮询。统一在 -_handleVolumeKey 内按运行状态分流:
+///   脚本运行中 → 控制菜单(暂停/停止/注入); 空闲 → 弹"运行脚本/取消"选择。
+- (void)startGlobalVolumeMonitoring;
+
+/// 停止常驻音量键轮询 (TAS 服务关闭时调用)。
+- (void)stopGlobalVolumeMonitoring;
+
 @end
 
 NS_ASSUME_NONNULL_END

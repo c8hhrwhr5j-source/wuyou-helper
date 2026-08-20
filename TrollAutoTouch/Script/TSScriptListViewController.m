@@ -29,6 +29,17 @@
     return self;
 }
 
+#pragma mark - 选中脚本 (音量键快速运行)
+
++ (NSString *)selectedScriptName {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:@"LastSelectedScript"] ?: @"";
+}
+
++ (void)setSelectedScriptName:(NSString *)name {
+    [[NSUserDefaults standardUserDefaults] setObject:(name ?: @"") forKey:@"LastSelectedScript"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
 - (void)loadView {
     [super loadView];
     self.view.backgroundColor = [TSColors bg];
@@ -125,6 +136,10 @@
 }
 
 - (void)_deleteScript:(TSFileEntry *)e {
+    // 删除的是选中脚本 → 清除选中状态
+    if ([[TSScriptListViewController selectedScriptName] isEqualToString:e.name]) {
+        [TSScriptListViewController setSelectedScriptName:@""];
+    }
     [[TSToolExecutor shared] removeItem:e.path];
     [self _reload];
 }
@@ -200,8 +215,15 @@
     cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  |  %lld B", dateStr, e.size];
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 
+    // 选中脚本显示打勾图标 + 淡色高亮背景 (音量键快速运行的对象)
+    BOOL isSelected = [[TSScriptListViewController selectedScriptName] isEqualToString:e.name];
     if (@available(iOS 13.0, *)) {
-        cell.imageView.image = [UIImage systemImageNamed:@"doc.text"];
+        cell.imageView.image = [UIImage systemImageNamed:isSelected ? @"checkmark.circle.fill" : @"doc.text"];
+    }
+    if (isSelected) {
+        cell.backgroundColor = [[TSColors tint] colorWithAlphaComponent:0.15];
+    } else {
+        cell.backgroundColor = [TSColors card];
     }
 
     // 当前正在运行的脚本，在名字最右侧显示"运行中"标签
@@ -227,6 +249,9 @@
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (_scripts.count == 0) return;
     TSFileEntry *e = _scripts[ip.row];
+    // 点击即设为选中 (持久化, 供音量键快速运行), 刷新勾选显示
+    [TSScriptListViewController setSelectedScriptName:e.name];
+    [_tableView reloadData];
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:e.name
                                                                    message:[NSString stringWithFormat:@"%@\n%lld B", e.modificationDate ?: @"", e.size]
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
