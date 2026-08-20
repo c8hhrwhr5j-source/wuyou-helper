@@ -71,6 +71,7 @@ static Class TSHUDHostingClass(void) {
 @implementation TSHUDHost {
     UIWindow *_window;
     UIViewController *_rootVC;
+    UIView *_contentView;
     // iOS 15+: 通过 SBSAccessibilityWindowHostingController 把本进程窗口的
     // CAContext 注册到 SpringBoard 的 accessibility 窗口层, 实现
     // "不依赖 app 前台" 的系统级弹窗 (逆向自 AutoGoRunner/agoverlayd)。
@@ -83,6 +84,9 @@ static Class TSHUDHostingClass(void) {
     unsigned _registeredContextId;
     BOOL _startupFailedSBS;
     BOOL _started;
+    // 脚本坐标系方向 (对应 Lua screen.init): 0=home在下(竖屏) 1=home在右 2=home在左。
+    // 用于旋转 HUD 内容层, 使 toast/弹窗在横屏游戏中横屏显示 (与脚本坐标系一致)。
+    NSInteger _scriptOrientation;
 }
 
 // 启动日志落盘到 /tmp/hud_startup.log, 便于在无 Xcode 环境下排查启动/崩溃路径。
@@ -150,6 +154,13 @@ static void HUDLog(NSString *fmt, ...) {
         _rootVC.view.backgroundColor = [UIColor clearColor];
         _window.rootViewController = _rootVC;
 
+        // 内容容器: 所有弹窗/toast 挂载在此, 脚本方向旋转只作用于容器,
+        // rootVC.view 保持系统管理 (frame 始终跟随 window.bounds, 不受旋转影响)。
+        _contentView = [[UIView alloc] initWithFrame:_rootVC.view.bounds];
+        _contentView.backgroundColor = [UIColor clearColor];
+        _contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [_rootVC.view addSubview:_contentView];
+
         // 渲染锚点: 窗口内容必须真正参与离屏渲染, layer 才会被分配
         // CAContext (contextId≠0)。纯 clearColor 的空内容会被系统优化掉,
         // 导致 contextId 一直是 0 (ctxId=0 → SBS 托管永远失败)。
@@ -157,7 +168,7 @@ static void HUDLog(NSString *fmt, ...) {
         UIView *anchor = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
         anchor.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.01];
         anchor.hidden = NO;
-        [_rootVC.view addSubview:anchor];
+        [_contentView addSubview:anchor];
 
         // ★ 关键: iOS 13+ 手动创建的 UIWindow 必须 makeKeyAndVisible
         // 才会被 scene 纳入渲染管线并分配 CAContext。
@@ -190,7 +201,10 @@ static void HUDLog(NSString *fmt, ...) {
                                                  selector:@selector(_appDidBecomeActive:)
                                                      name:UIApplicationDidBecomeActiveNotification
                                                    object:nil];
-        HUDLog(@"TSHUDHost start done");
+
+        // 应用脚本方向 (可能在 start 之前已由 screen.init 设置)
+        [self _applyScriptOrientation];
+        HUDLog(@"TSHUDHost start done (orientation=%ld)", (long)_scriptOrientation);
     } @catch (NSException *e) {
         HUDLog(@"TSHUDHost start exception: %@", e);
     }
@@ -240,19 +254,20 @@ static void HUDLog(NSString *fmt, ...) {
 }
 
 // 弹窗内容应挂载的视图:
-//  - SBS 托管成功 → HUD 窗口根视图 (系统级, 任意 app 之上)
+//  - SBS 托管成功 → HUD 窗口内容层 _contentView (系统级, 任意 app 之上;
+//                   脚本方向旋转只作用于它, toast/弹窗自动横屏)
 //  - 否则           → 主窗口内容 (前台可见; 后台不可见)
 // 避免"托管失败时把视图加在从不渲染的窗口上 → 前台也看不到"的坑。
 - (UIView *)_displayContentView {
     if (_registeredContextId != 0) {
-        return _rootVC.view;
+        return _contentView ?: _rootVC.view;
     }
     UIWindow *fg = [self _foregroundWindow];
     if (fg) {
         if (fg.rootViewController.view) return fg.rootViewController.view;
         return fg;
     }
-    return _rootVC.view;
+    return _contentView ?: _rootVC.view;
 }
 
 - (void)_appDidBecomeActive:(NSNotification *)note {
@@ -450,6 +465,70 @@ static void HUDLog(NSString *fmt, ...) {
     }
 }
 
+#pragma mark - 脚本方向 (screen.init)
+
+// 设置脚本坐标系方向并旋转 HUD 内容层。
+// 方向语义与 Lua screen.init 一致: 0=home在下(竖屏) 1=home在右 2=home在左。
+// 旋转规则与 TSLuaBridge 的 tsTransformPoint 严格一致 (portrait→home右/左),
+// 确保 HUD 内容坐标系与脚本/取色坐标一致, 横屏游戏里 toast/弹窗横屏显示。
+- (void)setScriptOrientation:(NSInteger)orientation {
+    if (orientation < 0 || orientation > 2) return;
+    _scriptOrientation = orientation;
+    if ([NSThread isMainThread]) {
+        [self _applyScriptOrientation];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _applyScriptOrientation];
+        });
+    }
+}
+
+// 应用旋转: 旋转 _contentView (HUD 内容层)。
+// 只旋转内容视图而不是窗口本身: 窗口 layer 需保持全屏尺寸供 SBS 托管
+// (上下文尺寸固定), 旋转内容层即可让 toast/弹窗在横屏坐标系下布局显示。
+// 与 TSLuaBridge 坐标变换严格一致: 竖屏为基准, home右/左 旋转 ±90°。
+- (void)_applyScriptOrientation {
+    if (!_window) return;
+    UIView *content = _contentView;
+    if (!content) return;
+
+    CGRect winBounds = _window.bounds;
+    CGFloat w = CGRectGetWidth(winBounds);
+    CGFloat h = CGRectGetHeight(winBounds);
+
+    [UIView performWithoutAnimation:^{
+        switch (_scriptOrientation) {
+            case 1: // home 在右: 顺时针旋转 90° (portrait→home右: (X,Y)→(Y,Wp-1-X))
+                content.transform = CGAffineTransformMakeRotation(M_PI_2);
+                content.bounds = CGRectMake(0, 0, h, w);
+                content.center = CGPointMake(w / 2.0, h / 2.0);
+                break;
+            case 2: // home 在左: 逆时针旋转 90° (portrait→home左: (X,Y)→(Hp-1-Y,X))
+                content.transform = CGAffineTransformMakeRotation(-M_PI_2);
+                content.bounds = CGRectMake(0, 0, h, w);
+                content.center = CGPointMake(w / 2.0, h / 2.0);
+                break;
+            default: // 竖屏
+                content.transform = CGAffineTransformIdentity;
+                content.bounds = CGRectMake(0, 0, w, h);
+                content.center = CGPointMake(w / 2.0, h / 2.0);
+                break;
+        }
+    }];
+    HUDLog(@"TSHUDHost script orientation applied: %ld", (long)_scriptOrientation);
+}
+
+// 弹窗/toast 布局参考尺寸: 旋转后内容层的 bounds (横屏时宽高已交换),
+// 供 HUDCustomAlertView/HUDToastView 在旋转坐标系下布局。
+- (CGSize)scriptContentSize {
+    if (_contentView) return _contentView.bounds.size;
+    if (_scriptOrientation != 0) {
+        CGRect winBounds = _window ? _window.bounds : [UIScreen mainScreen].bounds;
+        return CGSizeMake(CGRectGetHeight(winBounds), CGRectGetWidth(winBounds));
+    }
+    return _window ? _window.bounds.size : [UIScreen mainScreen].bounds.size;
+}
+
 - (nullable NSString *)presentAlertWithTitle:(nullable NSString *)title
                                      message:(nullable NSString *)message
                                      buttons:(nullable NSArray<NSString *> *)buttons
@@ -478,6 +557,8 @@ static void HUDLog(NSString *fmt, ...) {
                 result = r;
                 dispatch_semaphore_signal(sem);
             }];
+            // 按旋转后的内容层尺寸布局 (横屏时卡片在横屏坐标系下居中)
+            [alert layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:alert];
             [alert show];
         } @catch (NSException *e) {
@@ -515,6 +596,8 @@ static void HUDLog(NSString *fmt, ...) {
             HUDToastView *toast = [[HUDToastView alloc] initWithText:text
                                                             duration:duration
                                                               hidden:hidden];
+            // 按旋转后的内容层尺寸布局 (横屏时 toast 在横屏坐标系下显示)
+            [toast layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:toast];
             [toast show];
         } @catch (NSException *e) {

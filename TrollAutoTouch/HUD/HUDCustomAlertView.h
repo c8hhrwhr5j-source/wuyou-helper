@@ -25,6 +25,10 @@ NS_ASSUME_NONNULL_BEGIN
                       timeout:(NSTimeInterval)timeout
                      onResult:(nullable void (^)(NSString *_Nullable result))resultBlock;
 
+/// 按容器尺寸(宿主内容层, 旋转后宽高已交换)布局。
+/// 主线程调用; 加入容器后也可随时重排。
+- (void)layoutInContainerSize:(CGSize)size;
+
 /// 加入父视图后调用: 淡入显示, 并启动超时计时。
 - (void)show;
 

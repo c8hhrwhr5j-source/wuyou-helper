@@ -24,6 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
                     duration:(NSTimeInterval)duration
                       hidden:(BOOL)hidden;
 
+/// 按容器尺寸(宿主内容层, 旋转后宽高已交换)布局。
+/// 主线程调用; 加入容器后也可随时重排。
+- (void)layoutInContainerSize:(CGSize)size;
+
 /// 加入父视图后调用: 淡入显示, 启动到时淡出计时。
 - (void)show;
 

@@ -51,6 +51,15 @@ NS_ASSUME_NONNULL_BEGIN
          duration:(NSTimeInterval)duration
            hidden:(BOOL)hidden;
 
+/// 设置脚本坐标系方向 (对应 Lua screen.init): 0=竖屏(home在下) 1=横屏(home在右) 2=横屏(home在左)。
+/// HUD 弹窗/toast 内容层随之旋转, 与脚本坐标系保持一致 (横屏游戏时弹窗横屏显示)。
+/// 线程安全: 内部派发主线程应用。
+- (void)setScriptOrientation:(NSInteger)orientation;
+
+/// 当前脚本方向下的 HUD 内容层布局尺寸 (旋转后宽高已交换, 主线程读取)。
+/// 供弹窗/toast 在旋转坐标系下布局使用。
+- (CGSize)scriptContentSize;
+
 /// 当前 HUD 宿主状态描述 (SBS 类可用性 / 是否已注册系统级托管 / 失败标志 / 前后台)。
 /// 供诊断日志输出, 避免"已就绪"这类误导性信息。
 - (NSString *)registrationStatusDescription;

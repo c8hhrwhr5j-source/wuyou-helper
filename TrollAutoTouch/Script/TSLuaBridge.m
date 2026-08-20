@@ -398,6 +398,8 @@ static int l_screen_init(lua_State *L) {
     static const char *names[] = {"home在下(竖屏)", "home在右", "home在左"};
     lua_log([NSString stringWithFormat:@"screen.init: 坐标系方向已设为 %s (当前设备: %s)",
              names[dir], names[tsCurrentOrientation()]]);
+    // 联动 HUD: toast/弹窗内容层旋转到与脚本坐标系一致 (横屏游戏时横屏显示)
+    [[TSHUDHost shared] setScriptOrientation:dir];
     return 0;
 }
 

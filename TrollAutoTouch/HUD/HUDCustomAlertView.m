@@ -32,7 +32,11 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 
 @end
 
-@implementation HUDCustomAlertView
+@implementation HUDCustomAlertView {
+    NSString *_alertTitle;
+    NSString *_alertMessage;
+    NSArray<NSString *> *_alertButtons;
+}
 
 - (instancetype)initWithTitle:(NSString *)title
                       message:(NSString *)message
@@ -46,6 +50,9 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
         _finished = NO;
         self.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
 
+        _alertTitle = [title copy];
+        _alertMessage = [message copy];
+
         // 按钮兜底: 显式按钮优先; 空按钮 + 永久显示 -> 补"确定"保证可关闭
         NSMutableArray *finalButtons = [buttons mutableCopy];
         if (!finalButtons) {
@@ -54,20 +61,35 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
         if (finalButtons.count == 0 && timeout <= 0) {
             [finalButtons addObject:@"确定"];
         }
+        _alertButtons = [finalButtons copy];
 
-        [self _buildCardWithTitle:title message:message buttons:finalButtons];
+        [self _buildCardWithTitle:_alertTitle message:_alertMessage buttons:_alertButtons];
     }
     return self;
 }
 
 #pragma mark - 布局
 
+// 按容器尺寸(宿主内容层, 旋转后宽高已交换)重排。
+// 主线程调用; 加入容器后由 TSHUDHost 调用, 也可随时重排。
+- (void)layoutInContainerSize:(CGSize)size {
+    self.frame = CGRectMake(0, 0, size.width, size.height);
+
+    // 移除旧卡片重建 (按钮需重新排布)
+    [_cardView removeFromSuperview];
+    _cardView = nil;
+    _titleLabel = nil;
+    _messageLabel = nil;
+    _buttonContainer = nil;
+    [self _buildCardWithTitle:_alertTitle message:_alertMessage buttons:_alertButtons];
+}
+
 - (void)_buildCardWithTitle:(NSString *)title message:(NSString *)message
                     buttons:(NSArray<NSString *> *)buttons {
     UIFont *titleFont = [UIFont boldSystemFontOfSize:kTitleFontSize];
     UIFont *msgFont   = [UIFont systemFontOfSize:kMsgFontSize];
 
-    // 计算卡片尺寸
+    // 计算卡片尺寸 (基于当前内容层尺寸, 横屏时宽高已交换)
     CGFloat screenW = self.bounds.size.width;
     CGFloat cardW = MIN(kCardMaxWidth, MAX(kCardMinWidth, screenW - kCardHMargin * 2));
 
