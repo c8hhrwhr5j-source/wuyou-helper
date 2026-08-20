@@ -129,9 +129,29 @@ static void HUDLog(NSString *fmt, ...) {
         _window.windowLevel = UIWindowLevelStatusBar + 100;
         _window.backgroundColor = [UIColor clearColor];
 
+        // iOS 13+ scene-based app: 手动创建的 UIWindow 必须挂到某个
+        // UIWindowScene, 否则不会参与渲染, layer 拿不到 CAContext
+        // (contextId=0), SBS 系统级托管将永远失败。
+        if (@available(iOS 13.0, *)) {
+            UIWindowScene *scene = [self _anyWindowScene];
+            if (scene) {
+                _window.windowScene = scene;
+            } else {
+                HUDLog(@"TSHUDHost start: no windowScene yet, will retry on active");
+            }
+        }
+
         _rootVC = [[UIViewController alloc] init];
         _rootVC.view.backgroundColor = [UIColor clearColor];
         _window.rootViewController = _rootVC;
+
+        // 渲染锚点: 透明且空内容的窗口可能不被分配 CAContext,
+        // 放一个 1x1 不可见的占位 view 强制窗口参与渲染, 保证 layer 有 contextId。
+        UIView *anchor = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+        anchor.backgroundColor = [UIColor clearColor];
+        anchor.hidden = NO;
+        [_rootVC.view addSubview:anchor];
+
         _window.hidden = NO;
         HUDLog(@"TSHUDHost start: window ok");
 
@@ -155,9 +175,37 @@ static void HUDLog(NSString *fmt, ...) {
     }
 }
 
+// 取任意可用的 UIWindowScene (scene-based app 下 HUD 窗口需挂到 scene)。
+// start 可能在 app 完全启动前被调用 (connectedScenes 为空), 返回 nil,
+// 由 _appDidBecomeActive: 稍后补挂。
+- (UIWindowScene *)_anyWindowScene {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                return (UIWindowScene *)scene;
+            }
+        }
+    }
+    return nil;
+}
+
 - (void)_appDidBecomeActive:(NSNotification *)note {
-    if (_startupFailedSBS) return;
-    [self _registerAccessibilityHostingWithRetryCount:5];
+    BOOL sceneAttached = NO;
+    // 启动早期没有 scene 时, 现在补挂到窗口
+    if (@available(iOS 13.0, *)) {
+        if (_window && !_window.windowScene) {
+            UIWindowScene *scene = [self _anyWindowScene];
+            if (scene) {
+                _window.windowScene = scene;
+                sceneAttached = YES;
+                HUDLog(@"TSHUDHost window attached to scene on active");
+            }
+        }
+    }
+    // 之前因没有 scene / 重试耗尽而标记失败时, 补挂 scene 后重置标记再试一次
+    if (_startupFailedSBS && !sceneAttached) return;
+    _startupFailedSBS = NO;
+    [self _registerAccessibilityHostingWithRetryCount:10];
 }
 
 #pragma mark - 系统级窗口托管 (SBSAccessibilityWindowHostingController)
