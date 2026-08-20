@@ -230,11 +230,24 @@ static void HUDLog(NSString *fmt, ...) {
 
 #pragma mark - 阻塞式弹窗 (可后台线程调用)
 
+// UIWindow/UIView 必须主线程创建; start 可能被 Lua 后台线程首次触发,
+// 统一保证 start 在主线程执行 (已启动则立即返回)。
+- (void)ensureStartedOnMainThread {
+    if (_started) return;
+    if ([NSThread isMainThread]) {
+        [self start];
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            [self start];
+        });
+    }
+}
+
 - (nullable NSString *)presentAlertWithTitle:(nullable NSString *)title
                                      message:(nullable NSString *)message
                                      buttons:(nullable NSArray<NSString *> *)buttons
                                      timeout:(NSTimeInterval)timeout {
-    if (!_started) [self start];
+    [self ensureStartedOnMainThread];
 
     // 若窗口未成功托管到系统级 且 app 不在前台, 弹窗不可见,
     // 直接返回 nil (脚本继续执行, 不永久阻塞)。
@@ -278,12 +291,19 @@ static void HUDLog(NSString *fmt, ...) {
 - (void)showToast:(NSString *)text
          duration:(NSTimeInterval)duration
            hidden:(BOOL)hidden {
-    if (!_started) [self start];
+    [self ensureStartedOnMainThread];
     if (text.length == 0) return;
     if (duration <= 0) duration = 1.0;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            // 可见性检查: 与 presentAlert 一致。SBS 未托管成功 且 app 不在前台时,
+            // toast 加在窗口上也看不到, 记日志便于排查 (不再静默失败)。
+            if (_registeredContextId == 0 &&
+                [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+                HUDLog(@"showToast skipped (not foreground & SBS not registered): %@", text);
+                return;
+            }
             _window.hidden = NO;
             HUDToastView *toast = [[HUDToastView alloc] initWithText:text
                                                             duration:duration
