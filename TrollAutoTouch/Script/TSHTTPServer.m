@@ -497,6 +497,13 @@ static NSData *WSTextFrame(NSString *text) {
 
 // API: /api/ui/list | /api/ui/settings?name=xxx | /api/ui/run
 - (void)handleUIApi:(int)clientFd path:(NSString *)path method:(NSString *)method body:(NSData *)body {
+    // 请求行中的 path 是原始 URL, 可能带 query string (如 /api/ui/settings?name=main)。
+    // 路由匹配必须用剥离 query 的纯路径; 参数仍从完整 URL (fullPath) 解析。
+    NSString *fullPath = path;
+    NSRange qRange = [fullPath rangeOfString:@"?"];
+    if (qRange.location != NSNotFound) {
+        path = [fullPath substringToIndex:qRange.location];
+    }
     if ([path isEqualToString:@"/api/ui/list"]) {
         NSMutableArray *items = [NSMutableArray array];
         for (NSString *name in [self uiScriptNames]) {
@@ -506,7 +513,12 @@ static NSData *WSTextFrame(NSString *text) {
         return;
     }
     if ([path isEqualToString:@"/api/ui/settings"]) {
-        NSString *name = [self queryValueForPath:path key:@"name"];
+        // name 参数兼容两种传法: URL query (?name=xxx, main 页面) 或 POST body (demo 页面)
+        NSString *name = [self queryValueForPath:fullPath key:@"name"];
+        if (name.length == 0) {
+            NSDictionary *bodyJSON = [self parseJSON:body];
+            name = [bodyJSON isKindOfClass:[NSDictionary class]] ? bodyJSON[@"name"] : nil;
+        }
         if (name.length == 0 || [name containsString:@"/"] || [name containsString:@".."]) {
             [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
             return;
