@@ -45,13 +45,21 @@
                                  ceil(textRect.size.height) + padY * 2);
     if (cardSize.width > maxW + padX * 2) cardSize.width = maxW + padX * 2;
 
-    // 位置: 普通样式居中偏上; 弱化样式贴顶部(状态栏下方)
-    CGFloat x = (size.width - cardSize.width) / 2.0;
+    // 位置: 横屏(宽>高)时普通样式靠底部 20% 显示; 竖屏保持居中偏上; 弱化样式贴顶部
+    CGFloat x = (size.width - cardSize.width) / 2.0; // 左右始终居中
     CGFloat y;
     if (_hiddenStyle) {
         y = 60.0; // 顶部小字, 远离中部的找色区域
+    } else if (size.width > size.height) {
+        // 横屏内容层 (screen.init(1/2) 旋转后 宽>高):
+        // 离底部 20% 显示。例: 屏高 750 → y=600 (距底 150)
+        y = size.height * 0.8;
+        // 兜底: 文字过多时保证卡片不超出屏幕底边
+        if (y + cardSize.height > size.height - 20.0) {
+            y = size.height - cardSize.height - 20.0;
+        }
     } else {
-        y = size.height * 0.32; // 居中偏上, 醒目但不过分遮挡
+        y = size.height * 0.32; // 竖屏: 居中偏上, 醒目但不过分遮挡
     }
     self.frame = CGRectMake(x, y, cardSize.width, cardSize.height);
 
