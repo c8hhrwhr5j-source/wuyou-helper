@@ -24,3 +24,25 @@ _analysis/
 
 # 构建目录（build-ipa.sh 输出）
 build/
+
+# 本地辅助脚本 / 逆向样本 / 下载产物 / 日志（不提交）
+_*.ps1
+_*.txt
+_*.zip
+_*.bat
+_ipa_unzip/
+_old_tipa_unzip/
+_ipa_extract/
+_extract_tmp/
+_ci_logs_new_x/
+ci_logs/
+ci_logs.zip
+ci_logs_x/
+ci_logs_extract2/
+ci-error-new.txt
+ci-error-tail.txt
+ci-ipa-contents-latest.txt
+ci_log.txt
+ipa_contents.txt
+research/
+TrollAutoScript-2.2.0-test.tipa

@@ -294,6 +294,41 @@ appNode.unKeep()
 -- 日志
 logStr("这是一条日志")
 print("也支持 print")
+```
+
+### 9.1 屏幕悬浮提示 `sys.toast` / `toast`
+
+在**任意前台 App 之上**短暂显示一条提示（非阻塞，不影响脚本继续执行），常用于
+通知"任务开始 / 完成 / 出错"。
+
+```lua
+-- 语法: sys.toast(提示消息, [显示时间毫秒], [是否隐藏])
+sys.toast("任务完成")                    -- 默认显示 1000 毫秒
+sys.toast("倒计时 3 秒", 3000)           -- 显示 3000 毫秒(3 秒)
+sys.toast("正在找色...", 500, true)      -- 弱化模式
+
+-- 全局 toast() 完全等效, 两种写法任选
+toast("兼容写法")
+```
+
+- **显示时间**（可选，毫秒，默认 `1000`）：到时间自动消失。
+- **是否隐藏**（可选，布尔，默认 `false`）：`true` 时改用**屏幕顶部小字弱化样式**，
+  尽量不占用屏幕中部的找色/找图区域，适合长时间挂机时的低频提示。
+- **非阻塞**：函数调用后立即返回，脚本继续往下执行；提示由系统级 HUD 托管窗口显示，
+  即使脚本在后台运行也能看到。
+- 注意：HUD 托管窗口显示在系统层，截屏找色仍以屏幕实际像素为准（IOSurface 帧缓冲），
+  弱化模式只是把文字移到屏幕最上方，避开绝大多数找色区域。
+
+```lua
+-- 实际用法: 找色成功时提示
+local x, y = findColor(0xFF0000, 0.9)
+if x then
+    tap(x, y)
+    sys.toast("找到红色按钮并点击", 1500)
+else
+    sys.toast("未找到按钮", 1000, true)
+end
+```
 
 -- JSON
 local jsonText = json.encode({a = 1, b = {c = 2}})
@@ -412,7 +447,7 @@ logStr("自动任务结束")
 | `getScreenSize()` | 屏幕尺寸 → w,h |
 | `mSleep(ms)` / `sleep(sec)` | 延时 |
 | `logStr(s)` / `print(...)` | 日志 |
-| `toast(s)` | 悬浮提示 |
+| `sys.toast(msg[, ms][, hidden])` / `toast(...)` | 屏幕悬浮提示（非阻塞，默认 1000ms，可指定显示时长与弱化模式） |
 | `findText(s)` | OCR 找文字 → x,y |
 
 **模块**：`touch.` `screen.` `sys.` `device.` `app.` `appNode.` `json.` `str.` `file.` `pasteboard.` `key.`

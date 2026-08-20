@@ -78,12 +78,15 @@ function main()
         if cfg.closeNotice and rgbbj("游戏公告") then
             click(948, 162, 970, 187) -- 关闭公告
             sleep(500)
+            toast("关闭公告")
         elseif cfg.enterArea and rgbbj("选区进入游戏") then
             click(834, 517, 950, 552) -- 进入游戏
             sleep(500)
+            toast("进入游戏")
         elseif cfg.chooseRole and rgbbj("选择角色") then
             click(606,671,728,709) -- 进入游戏
             sleep(500)
+            toast("进入游戏")
         end
     end
 end
