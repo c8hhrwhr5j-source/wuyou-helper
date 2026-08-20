@@ -104,10 +104,7 @@ jobs:
           # 禁用 chained fixups，兼容 Procursus ldid / TrollStore。
           # 警告: 不能在这里传 OTHER_LDFLAGS，命令行会整体覆盖 project.yml 中的
           #       框架链接参数（-framework UIKit ...），导致链接失败！
-          # ARCHS="arm64 arm64e" + ONLY_ACTIVE_ARCH=NO: app 必须编译为 universal!
-          # app 自身直接注入 SpringBoard (task_for_pid + thread_create_running(dlopen)),
-          # 在 A12+ arm64e 设备上 app 必须以 arm64e 模式运行, 否则本进程的 dlopen 地址
-          # (arm64 共享缓存) ≠ SpringBoard 的 dlopen (arm64e 共享缓存), 注入会崩溃。
+          # ARCHS="arm64 arm64e" + ONLY_ACTIVE_ARCH=NO: app 编译为 universal。
           # 日志写入文件，失败时打印完整日志并立即退出（不再被管道吞掉退出码）。
           if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
@@ -151,72 +148,11 @@ jobs:
           tail -5 /tmp/xcodebuild.log
           echo "[OK] xcodebuild 编译成功"
 
-          # 验证 app 主二进制架构 (必须同时包含 arm64 + arm64e, 否则直接注入 SpringBoard 会失败)
-          APP_BIN="build/DerivedData/Build/Products/Release-iphoneos/TrollAutoTouch.app/TrollAutoTouch"
-          if [ -f "$APP_BIN" ]; then
-            echo "[*] app 主二进制架构:"
-            lipo -info "$APP_BIN"
-            if lipo -info "$APP_BIN" 2>/dev/null | grep -q "arm64e"; then
-              echo "[OK] app 包含 arm64e slice (直接注入可用)"
-            else
-              echo "[!] 警告: app 不包含 arm64e slice! 在 A12+ 设备上直接注入 SpringBoard 会失败"
-            fi
-          fi
-
-          # ── 编译触摸服务 dylib (TSInjectedTouchService, 注入 SpringBoard 用) ──
-          # 注意: -target 构建不能搭配 -derivedDataPath (xcodebuild 限制,
-          # 该 flag 仅与 -scheme/-xctestrun 搭配), 否则报错:
-          #   "The flag -scheme, -testProductsPath, or -xctestrun is required
-          #    when specifying -derivedDataPath."
-          # 所以用 CONFIGURATION_BUILD_DIR 显式指定 dylib 输出目录。
-          # 架构必须为 universal (arm64 + arm64e)!
-          # SpringBoard 在 A12+ (arm64e) 设备上是 arm64e 进程,
-          # 只有 arm64 的 dylib 无法被 dlopen, 触摸服务永远不会启动。
-          # 注意: ONLY_ACTIVE_ARCH 必须为 NO 才会把 ARCHS 里的两个架构都编出来。
-          if ! xcodebuild -project TrollAutoTouch.xcodeproj \
-            -target TSInjectedTouchService \
-            -configuration Release \
-            -sdk iphoneos \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS="arm64 arm64e" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            ENABLE_CHAINED_FIXUPS=NO \
-            CONFIGURATION_BUILD_DIR="$PWD/build/dylib" \
-            build > /tmp/dylib_build.log 2>&1; then
-            echo "[x] dylib 编译失败，完整日志:"
-            tail -80 /tmp/dylib_build.log
-            {
-              echo "## dylib 编译失败详情"
-              echo ""
-              echo '```'
-              grep -nE "error:|undefined|ld: |clang:|file not found" /tmp/dylib_build.log | tail -60
-              echo ""
-              echo "--- 日志尾部 ---"
-              tail -100 /tmp/dylib_build.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            # 把 dylib 编译日志推送到 ci-debug 分支（便于在仓库里直接读取）
-            {
-              git config user.name "ci-bot"
-              git config user.email "ci-bot@users.noreply.github.com"
-              cp /tmp/dylib_build.log ./ci-error.log
-              git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
-              git add -f ci-error.log
-              git commit -m "ci: save dylib build log (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
-              git push origin ci-debug --force
-            } >/dev/null 2>&1 && echo "[i] dylib 日志已推送到 ci-debug 分支" || echo "[i] dylib 日志推送失败(忽略)"
-            exit 1
-          fi
-          tail -3 /tmp/dylib_build.log
-          echo "[OK] TSInjectedTouchService.dylib 编译成功"
-          echo "[*] dylib 架构 (必须同时包含 arm64 与 arm64e):"
-          lipo -info "$PWD/build/dylib/TSInjectedTouchService.dylib"
-
           # ── HUD 全局弹窗: 单 App 架构 ──
           # HUD 宿主已并入主 App 进程内 (TSHUDHost + SBSAccessibilityWindowHostingController,
           # 见 TrollAutoTouch/HUD/), 不再编译独立 HUDServices.app。
+          # (注: 原"注入 SpringBoard 触摸服务" (TSInjectedTouchService dylib + opainject)
+          #  已确认 iOS 15.5+ TrollStore 2.x 下不可行, 相关 target 与打包已整体移除。)
           echo "[OK] HUD 宿主已随主 App 编译 (进程内, 无独立 app)"
 
       - name: Package IPA
@@ -241,69 +177,6 @@ jobs:
             echo "[*] 请查看 Build 步骤日志确认编译是否成功"
             exit 1
           fi
-
-          echo ""
-          echo "=== 触摸服务 (injected touch) ==="
-          # 注入式触摸: TSInjectedTouchService.dylib (注入 SpringBoard 的触摸服务)
-          # + opainject (OpenInject 注入器)。app 运行时把它们部署到 Documents 后:
-          #   opainject <SpringBoard_pid> <dylib>  → 注入 → socket 发触摸
-          mkdir -p "$APP_DST/bin"
-          DYLIB=$(find build/DerivedData build/dylib -name 'TSInjectedTouchService.dylib' -type f 2>/dev/null | head -1)
-          if [ -n "$DYLIB" ]; then
-            cp "$DYLIB" "$APP_DST/bin/TSInjectedTouchService.dylib"
-            # dylib 必须带 platform-application 签名: SpringBoard 是 platform 二进制
-            # (CS_PLATFORM_BINARY), iOS 15+ 要求注入的 dylib 同样带 platform-application,
-            # 否则 SpringBoard dlopen 会被 dyld 拒绝 (library validation), opainject 可能
-            # 显示注入成功但 dylib 实际未加载。injector.entitlements.xml 含
-            # platform-application + no-sandbox, 满足 SpringBoard 加载要求。
-            if ldid -S"$PWD/TrollAutoTouch/Resources/injector.entitlements.xml" "$APP_DST/bin/TSInjectedTouchService.dylib" 2>/dev/null; then
-              echo "[OK] TSInjectedTouchService.dylib 已签名 (platform-application)"
-            else
-              echo "[!] dylib 签名失败 (SpringBoard 可能拒绝 dlopen)"
-            fi
-            echo "[OK] TSInjectedTouchService.dylib ($(stat -f%z "$APP_DST/bin/TSInjectedTouchService.dylib") bytes)"
-          else
-            echo "[x] 未找到 TSInjectedTouchService.dylib, 触摸注入不可用"
-            exit 1
-          fi
-          cp "$PWD/TrollAutoTouch/Resources/bin/opainject" "$APP_DST/bin/opainject"
-          chmod 755 "$APP_DST/bin/opainject"
-          # opainject 重签: 补上 no-sandbox + springboard.debugapplications。
-          # 实测 opainject 被 app spawn 后以 mobile(501) 运行, 若二进制自身缺 no-sandbox,
-          # 子进程会继承 app 沙箱 → sandbox 拦截 task_for_pid(SpringBoard) → opainject
-          # 报 "ERROR: Got invalid task port (-1)" (task_for_pid 返回 dead name)。
-          # 原版可用的注入器 luaLib 自带 no-sandbox + debugapplications, 这里对齐该权限集。
-          # 签名用 Procursus ldid (v2.1.5-procursus7), 支持 arm64e 重签 + --platform-apply
-          # (codesign 不支持 --platform-apply; xerub 老版 ldid 重签才破坏 arm64e slice)。
-          # --platform-apply: 让 CodeDirectory 带上 CS_PLATFORM_BINARY, 使 opainject 进程
-          # 成为 platform 进程(与 platform-application 权限配合), 兜底应对 task_for_pid
-          # 对 platform 目标进程(SpringBoard)的平台进程检查。
-          # 注意: 不能用 ent2.xml(仅 5 个 key, 会剥离 system-task-ports 等关键权限)。
-          OP_ENT="$PWD/TrollAutoTouch/Resources/opainject.entitlements.xml"
-          if ldid -S"$OP_ENT" --platform-apply "$APP_DST/bin/opainject" 2>/tmp/op_sign.log; then
-            echo "[OK] opainject 已重签 (no-sandbox + debugapplications + platform-apply)"
-          elif codesign --force --sign - --entitlements "$OP_ENT" "$APP_DST/bin/opainject" 2>>/tmp/op_sign.log; then
-            echo "[OK] opainject 已重签 (no-sandbox + debugapplications, 无 platform-apply)"
-          else
-            echo "[!] opainject 重签失败, 保留原版签名 (task_for_pid 可能仍会失败):"
-            echo "    $(cat /tmp/op_sign.log)"
-          fi
-          echo "[*] opainject 提取 entitlements (验证):"
-          codesign -d --entitlements - "$APP_DST/bin/opainject" 2>/dev/null | grep -E "no-sandbox|debugapplications|platform-application|system-task-ports|task_for_pid|thread-set-state" || echo "    (提取失败/为空!)"
-          cp "$OP_ENT" "$APP_DST/bin/opainject.entitlements.xml"
-          # 运行时重签工具链 (学原版 bin/): 部署 ldid + ent2.xml + injector.entitlements.xml,
-          # app 在注入前可再次重签 opainject/dylib, 兜底应对 TrollStore 重签剥离权限。
-          for T in ldid fastPathSign; do
-            if [ -f "$PWD/TrollAutoTouch/Resources/bin/$T" ]; then
-              cp "$PWD/TrollAutoTouch/Resources/bin/$T" "$APP_DST/bin/$T"
-              chmod 755 "$APP_DST/bin/$T"
-              echo "[OK] 已部署运行时工具 $T"
-            fi
-          done
-          cp "$PWD/TrollAutoTouch/Resources/bin/ent2.xml" "$APP_DST/bin/ent2.xml" 2>/dev/null || true
-          cp "$PWD/TrollAutoTouch/Resources/injector.entitlements.xml" "$APP_DST/bin/injector.entitlements.xml" 2>/dev/null || true
-          echo "[OK] bin/ 内容:"
-          ls -la "$APP_DST/bin"
 
           echo ""
           echo "=== HUD 全局弹窗 ==="
@@ -349,17 +222,14 @@ jobs:
           echo "[*] 二进制签名结构:"
           otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
 
-          # 3) 注入: 优先 Procursus ldid (v2.1.5-procursus7) --platform-apply。
+          # 3) 签名: 优先 Procursus ldid (v2.1.5-procursus7) --platform-apply。
           #    codesign 不支持 --platform-apply (实测报 unrecognized option), 无法用 codesign
           #    打 CS_PLATFORM_BINARY; 而 Procursus ldid 支持该选项且能正确重签 arm64e slice
           #    (xerub 老版 ldid 才破坏 arm64e → EBADEXEC)。chained fixups 已在 project.yml
           #    禁用 (-Wl,-no_fixup_chains), ldid 可正常解析。
-          #    --platform-apply: 给 CodeDirectory 打上 CS_PLATFORM_BINARY, 使 app 进程成为
-          #    platform 进程 (与 opainject 对齐)。iOS 15+ 上 task_for_pid 对 platform 目标
-          #    (SpringBoard) 有平台进程检查: 非 platform 调用者会拿到 dead/null task port,
-          #    后续 mach_vm_allocate 报 MACH_SEND_INVALID_DEST (kr=0x10000003), 直接注入必败。
+          #    --platform-apply: 给 CodeDirectory 打上 CS_PLATFORM_BINARY。
           if ldid -S/tmp/ent.xml --platform-apply "$BIN" 2>/tmp/ldid_sign.log; then
-            echo "[OK] ldid 注入成功 (entitlements + platform-apply)"
+            echo "[OK] ldid 签名成功 (entitlements + platform-apply)"
             SIGN_TOOL=ldid
           else
             echo "[!] ldid 失败, 回退 codesign (无 platform-apply):"
@@ -404,17 +274,9 @@ jobs:
           CS_FLAGS=$(codesign -dvvv "$BIN" 2>&1 | grep -i "flags=" | head -1)
           echo "[*] app CodeDirectory flags: ${CS_FLAGS:-未知}"
           if echo "$CS_FLAGS" | grep -qi "platform"; then
-            echo "[OK] app 已带 CS_PLATFORM_BINARY, 进程将是 platform 身份"
+            echo "[OK] app 已带 CS_PLATFORM_BINARY"
           else
-            echo "[!] 警告: 未检测到 CS_PLATFORM_BINARY, task_for_pid(SpringBoard) 可能仍会失败"
-            echo "    (ldid --platform-apply 未生效? 检查上方 ldid 签名输出)"
-          fi
-          OP_FLAGS=$(codesign -dvvv "$APP_DST/bin/opainject" 2>&1 | grep -i "flags=" | head -1)
-          echo "[*] opainject CodeDirectory flags: ${OP_FLAGS:-未知}"
-          if echo "$OP_FLAGS" | grep -qi "platform"; then
-            echo "[OK] opainject 已带 CS_PLATFORM_BINARY"
-          else
-            echo "[!] 警告: opainject 未检测到 CS_PLATFORM_BINARY"
+            echo "[!] 警告: 未检测到 CS_PLATFORM_BINARY (TrollStore 安装时仅保留此签名状态, 不影响 HUD 弹窗/音量键等不依赖 platform 身份的功能)"
           fi
 
           echo ""
@@ -452,15 +314,14 @@ jobs:
 
           # ── IPA 内容自检 ──
           # artifact 下载需要 GitHub 认证, 无法直接验证; 因此把 IPA 内文件清单
-          # 推送到 ci-debug 分支的 ci-ipa-contents.txt, 匿名即可读取验证
-          # (确认 bin/TSInjectedTouchService.dylib 与 bin/opainject 确实在包里)。
+          # 推送到 ci-debug 分支的 ci-ipa-contents.txt, 匿名即可读取验证。
           echo ""
           echo "=== IPA 内容清单 ==="
           unzip -l TrollAutoTouch.ipa | tee /tmp/ipa_contents.txt
           echo ""
           echo "=== 关键文件检查 ==="
           MISSING_IPA=0
-          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/bin/TSInjectedTouchService.dylib" "Payload/TrollAutoTouch.app/bin/opainject" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html" "Payload/TrollAutoTouch.app/www/ui/main/index.html" "Payload/TrollAutoTouch.app/lua/Main.lua"; do
+          for KEY in "Payload/TrollAutoTouch.app/TrollAutoTouch" "Payload/TrollAutoTouch.app/www/index.html" "Payload/TrollAutoTouch.app/www/ui/demo/index.html" "Payload/TrollAutoTouch.app/www/ui/main/index.html" "Payload/TrollAutoTouch.app/lua/Main.lua"; do
             if grep -q "$KEY" /tmp/ipa_contents.txt; then
               echo "[OK] $KEY"
             else
