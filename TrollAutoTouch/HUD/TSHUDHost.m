@@ -145,15 +145,24 @@ static void HUDLog(NSString *fmt, ...) {
         _rootVC.view.backgroundColor = [UIColor clearColor];
         _window.rootViewController = _rootVC;
 
-        // 渲染锚点: 透明且空内容的窗口可能不被分配 CAContext,
-        // 放一个 1x1 不可见的占位 view 强制窗口参与渲染, 保证 layer 有 contextId。
+        // 渲染锚点: 窗口内容必须真正参与离屏渲染, layer 才会被分配
+        // CAContext (contextId≠0)。纯 clearColor 的空内容会被系统优化掉,
+        // 导致 contextId 一直是 0 (ctxId=0 → SBS 托管永远失败)。
+        // 用 alpha=0.01 的近透明色: 肉眼不可见, 但强制窗口渲染。
         UIView *anchor = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
-        anchor.backgroundColor = [UIColor clearColor];
+        anchor.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.01];
         anchor.hidden = NO;
         [_rootVC.view addSubview:anchor];
 
+        // ★ 关键: iOS 13+ 手动创建的 UIWindow 必须 makeKeyAndVisible
+        // 才会被 scene 纳入渲染管线并分配 CAContext。
+        // 只设 hidden=NO 的窗口不参与渲染, layer.contextId=0,
+        // 即使 app 在前台, 加在窗口上的视图也永远不会显示。
+        // (逆向自原版 HUDServices: BLUIWindow + makeKeyAndVisible)
         _window.hidden = NO;
-        HUDLog(@"TSHUDHost start: window ok");
+        [_window makeKeyAndVisible];
+        HUDLog(@"TSHUDHost start: window ok (key=%d)",
+               (_window.isKeyWindow ? 1 : 0));
 
         // iOS 15+: 把窗口注册到 SpringBoard 的 accessibility 窗口层。
         // 延迟到首轮 runloop 之后执行 (窗口显示后 layer 需一轮
@@ -175,11 +184,19 @@ static void HUDLog(NSString *fmt, ...) {
     }
 }
 
-// 取任意可用的 UIWindowScene (scene-based app 下 HUD 窗口需挂到 scene)。
-// start 可能在 app 完全启动前被调用 (connectedScenes 为空), 返回 nil,
-// 由 _appDidBecomeActive: 稍后补挂。
+// 取任意可用的 UIWindowScene。
+// 本 App 是旧式 UIWindow (非 scene-based), iOS 13+ 下手动创建的窗口必须
+// 挂到主窗口所在的 scene 才会参与渲染并拿到 CAContext (contextId≠0)。
+// 优先从主窗口取 windowScene (最可靠), 其次遍历 connectedScenes。
 - (UIWindowScene *)_anyWindowScene {
     if (@available(iOS 13.0, *)) {
+        // ① 主窗口 (AppDelegate 的 window) 的 scene —— 主界面能正常显示,
+        //    说明它已挂到兼容 scene, 直接复用它的 scene 最稳妥
+        NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+        for (UIWindow *w in windows) {
+            if (w.windowScene) return w.windowScene;
+        }
+        // ② connectedScenes 兜底
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
                 return (UIWindowScene *)scene;
@@ -189,16 +206,43 @@ static void HUDLog(NSString *fmt, ...) {
     return nil;
 }
 
+// 前台降级窗口: SBS 未托管成功且 app 在前台时,
+// 弹窗直接显示在主窗口上, 保证用户一定能看到 (前台可见, 后台仍不可见)。
+- (UIWindow *)_foregroundWindow {
+    UIWindow *key = [UIApplication sharedApplication].keyWindow;
+    if (key) return key;
+    NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+    if (windows.count) return windows.firstObject;
+    return nil;
+}
+
+// 弹窗内容应挂载的视图:
+//  - SBS 托管成功 → HUD 窗口根视图 (系统级, 任意 app 之上)
+//  - 否则           → 主窗口内容 (前台可见; 后台不可见)
+// 避免"托管失败时把视图加在从不渲染的窗口上 → 前台也看不到"的坑。
+- (UIView *)_displayContentView {
+    if (_registeredContextId != 0) {
+        return _rootVC.view;
+    }
+    UIWindow *fg = [self _foregroundWindow];
+    if (fg) {
+        if (fg.rootViewController.view) return fg.rootViewController.view;
+        return fg;
+    }
+    return _rootVC.view;
+}
+
 - (void)_appDidBecomeActive:(NSNotification *)note {
     BOOL sceneAttached = NO;
-    // 启动早期没有 scene 时, 现在补挂到窗口
+    // 启动早期没有 scene 时, 现在补挂到窗口并重新 makeKeyAndVisible
     if (@available(iOS 13.0, *)) {
         if (_window && !_window.windowScene) {
             UIWindowScene *scene = [self _anyWindowScene];
             if (scene) {
                 _window.windowScene = scene;
+                [_window makeKeyAndVisible];
                 sceneAttached = YES;
-                HUDLog(@"TSHUDHost window attached to scene on active");
+                HUDLog(@"TSHUDHost window attached to scene + key on active");
             }
         }
     }
@@ -310,7 +354,7 @@ static void HUDLog(NSString *fmt, ...) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            _window.hidden = NO;
+            UIView *host = [self _displayContentView];
             HUDCustomAlertView *alert = [[HUDCustomAlertView alloc] initWithTitle:title
                                                                           message:message
                                                                           buttons:buttons
@@ -319,7 +363,7 @@ static void HUDLog(NSString *fmt, ...) {
                 result = r;
                 dispatch_semaphore_signal(sem);
             }];
-            [_rootVC.view addSubview:alert];
+            [host addSubview:alert];
             [alert show];
         } @catch (NSException *e) {
             HUDLog(@"presentAlert exception: %@", e);
@@ -352,11 +396,11 @@ static void HUDLog(NSString *fmt, ...) {
                 HUDLog(@"showToast skipped (not foreground & SBS not registered): %@", text);
                 return;
             }
-            _window.hidden = NO;
+            UIView *host = [self _displayContentView];
             HUDToastView *toast = [[HUDToastView alloc] initWithText:text
                                                             duration:duration
                                                               hidden:hidden];
-            [_rootVC.view addSubview:toast];
+            [host addSubview:toast];
             [toast show];
         } @catch (NSException *e) {
             HUDLog(@"showToast exception: %@", e);
