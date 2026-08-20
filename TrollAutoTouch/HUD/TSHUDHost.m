@@ -55,6 +55,9 @@ static Class TSHUDHostingClass(void) {
 // 仅当命中弹窗内容 (HUDCustomAlertView 及其子视图) 时才消费触摸,
 // 与 TSHUDWindow (悬浮窗) 的 hitTest 穿透逻辑保持一致。
 @interface TSHUDHostWindow : UIWindow
+// 透明内容容器 (所有弹窗/toast 的父视图)。
+// 命中容器本身(空白处)时穿透给下层窗口, 只有命中实际弹窗/toast 才消费触摸。
+@property (nonatomic, weak) UIView *contentContainer;
 @end
 
 @implementation TSHUDHostWindow
@@ -62,6 +65,11 @@ static Class TSHUDHostingClass(void) {
     UIView *hit = [super hitTest:point withEvent:event];
     // 命中窗口自身或根视图(透明背景, 无弹窗) → 穿透给下层窗口
     if (hit == self || hit == self.rootViewController.view) {
+        return nil;
+    }
+    // 命中透明内容容器本身(未命中任何弹窗/toast 子视图) → 穿透给下层窗口。
+    // 否则全屏透明的 _contentView 会吞掉主界面所有触摸 (点击无反应)。
+    if (hit == self.contentContainer) {
         return nil;
     }
     return hit;
@@ -160,6 +168,8 @@ static void HUDLog(NSString *fmt, ...) {
         _contentView.backgroundColor = [UIColor clearColor];
         _contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [_rootVC.view addSubview:_contentView];
+        // 窗口 hitTest 依据该容器做空白穿透 (命中容器本身 → 不消费触摸)
+        _window.contentContainer = _contentView;
 
         // 渲染锚点: 窗口内容必须真正参与离屏渲染, layer 才会被分配
         // CAContext (contextId≠0)。纯 clearColor 的空内容会被系统优化掉,
@@ -168,6 +178,7 @@ static void HUDLog(NSString *fmt, ...) {
         UIView *anchor = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
         anchor.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.01];
         anchor.hidden = NO;
+        anchor.userInteractionEnabled = NO; // 渲染锚点不参与触摸, 避免吞掉 (0,0) 处点击
         [_contentView addSubview:anchor];
 
         // ★ 关键: iOS 13+ 手动创建的 UIWindow 必须 makeKeyAndVisible
