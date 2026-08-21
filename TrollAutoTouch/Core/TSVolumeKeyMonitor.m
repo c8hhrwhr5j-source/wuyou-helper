@@ -12,16 +12,23 @@
 
 #import "TSVolumeKeyMonitor.h"
 #import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
 
 // 轮询间隔 200ms (CGO 同款)。音量键单次按压产生 1/16 格音量变化,
 // 200ms 足够捕捉且不会漏掉快速连按。
 static const NSTimeInterval TSVolumePollInterval = 0.2;
+// 启动校准窗口: start 后这段时间内只校准基准音量, 不触发按键回调。
+// 必须用"时间"而非"音量变化次数"——会话刚激活时读值可能从 0/陈旧值
+// 经历多次变化才稳定, 但用户按键不受时间限制。若按"变化次数"计数,
+// 会把用户前 3 次真实按键也吞掉 (表现为"冷启动后要按 4 次音量键才出
+// 暂停/运行弹窗", 且无论连按还是隔很久按, 都精确在第 4 次才触发)。
+static const NSTimeInterval TSVolumeWarmupDuration = 2.0;
 
 @implementation TSVolumeKeyMonitor {
     dispatch_source_t _timer;
     float _lastVolume;
     BOOL _running;
-    NSInteger _warmupTicks;
+    double _warmupUntil;
 }
 
 + (instancetype)shared {
@@ -55,7 +62,8 @@ static const NSTimeInterval TSVolumePollInterval = 0.2;
     }
 
     _lastVolume = [self _currentVolume];
-    _warmupTicks = 3; // 启动后 0.6s 内只校准基准音量, 不触发按键回调
+    // 启动后 2s 内只校准基准音量, 不触发按键回调
+    _warmupUntil = CACurrentMediaTime() + TSVolumeWarmupDuration;
 
     dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
     _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
@@ -87,9 +95,10 @@ static const NSTimeInterval TSVolumePollInterval = 0.2;
     if (fabsf(vol - _lastVolume) < 0.001f) return;
     _lastVolume = vol;
     // 启动初期仅校准基准: 吸收会话刚激活时读值从 0/陈旧跳到真实值,
-    // 避免误触发, 也不影响后续真实按键的检测。
-    if (_warmupTicks > 0) {
-        _warmupTicks--;
+    // 避免误触发。用时间窗口判断 (2s 后即恢复按键回调), 而不是按
+    // "音量变化次数"计数——否则用户前 3 次真实按键会被当成校准吸收,
+    // 表现为"冷启动后要按 4 次音量键才出弹窗"。
+    if (CACurrentMediaTime() < _warmupUntil) {
         return;
     }
     if (self.onVolumeKey) {
