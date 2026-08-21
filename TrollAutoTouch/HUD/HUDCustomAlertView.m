@@ -190,10 +190,17 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 #pragma mark - 展示 / 关闭
 
 - (void)show {
-    self.alpha = 0.0;
-    [UIView animateWithDuration:0.25 animations:^{
+    // App 在后台 (游戏在前台) 时跳过入场动画: 后台动画可能延迟/不执行,
+    // 导致弹窗停在 alpha=0 (只有白底/遮罩, 卡片按钮不可见)。
+    // 直接以最终状态显示, 内容由 TSHUDHost 的 CATransaction flush 同步到远程上下文。
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
         self.alpha = 1.0;
-    }];
+    } else {
+        self.alpha = 0.0;
+        [UIView animateWithDuration:0.25 animations:^{
+            self.alpha = 1.0;
+        }];
+    }
 
     if (_timeout > 0) {
         __weak typeof(self) weakSelf = self;
@@ -215,6 +222,23 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 - (void)_finishWithResult:(NSString *)result {
     if (_finished) return;
     _finished = YES;
+
+    // App 在后台时跳过淡出动画直接移除+回调: 动画 completion 在后台可能
+    // 延迟, 导致 resultBlock 迟迟不触发 (presentAlert 会一直等, 最坏 75s 超时),
+    // 且残留的弹窗视图会让 SBS 远程上下文出现内容/白底闪烁。
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+        void (^block)(NSString *) = self.resultBlock;
+        self.resultBlock = nil;
+        [self removeFromSuperview];
+        // 强制提交移除, 让 SBS 远程上下文立即清空, 避免后台 CA 节流导致
+        // 弹窗残影/白屏残留。
+        Class tx = NSClassFromString(@"CATransaction");
+        if (tx && [tx respondsToSelector:@selector(flush)]) { [tx flush]; }
+        if (block) {
+            block(result);
+        }
+        return;
+    }
 
     __weak typeof(self) weakSelf = self;
     [UIView animateWithDuration:0.2 animations:^{

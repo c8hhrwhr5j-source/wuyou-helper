@@ -99,6 +99,23 @@
 }
 
 - (void)show {
+    // App 在后台 (游戏在前台) 时跳过动画链:
+    // 后台 CA 动画可能延迟/不执行, 若靠 completion 链移除, toast 会
+    // 残留卡在 alpha=0 或一直占据远程上下文。改为直接显示 + 到时移除。
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+        self.alpha = 1.0;
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_duration * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            __strong typeof(self) self = weakSelf;
+            [self removeFromSuperview];
+            // 强制提交移除, 让 SBS 远程上下文立即清空。
+            Class tx = NSClassFromString(@"CATransaction");
+            if (tx && [tx respondsToSelector:@selector(flush)]) { [tx flush]; }
+        });
+        return;
+    }
+
     // 淡入
     self.alpha = 0.0;
     [UIView animateWithDuration:0.2 animations:^{

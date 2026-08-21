@@ -126,6 +126,32 @@ static void HUDLog(NSString *fmt, ...) {
     NSLog(@"%@", msg);
 }
 
+// 设置 CAContext 是否不透明 (运行时解析 setOpaque: 选择器)。
+// 关键: remoteContextWithOptions: 创建的远程上下文默认 opaque=YES (背景白色)。
+// 若不设为 NO, 当弹窗/toast 移除后 context 内容为空时, WindowServer 端会把
+// 整个上下文合成为全屏白色 → 全屏白屏, 且该层 (level 10000) 盖住 SpringBoard
+// 全部 UI (状态栏/home 手势区/锁屏), 表现为"HOME 无效、电源键黑屏但白屏不消"。
+// 置为 NO 后, 未被内容覆盖的区域按透明合成, 游戏画面正常透出。
+static void TSHUDSetContextOpaque(id ctx, BOOL opaque) {
+    if (!ctx) return;
+    SEL sel = NSSelectorFromString(@"setOpaque:");
+    if (sel && [ctx respondsToSelector:sel]) {
+        void (*fn)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))[ctx methodForSelector:sel];
+        if (fn) fn(ctx, sel, opaque);
+    }
+}
+
+// 主线程强制提交 Core Animation 事务:
+// App 处于后台时 (游戏在前台), CA 提交会被系统节流/跳过, 新添加的弹窗/toast
+// layer 可能一直不同步到 SBS 托管的远程上下文, 表现为"UI 已显示(白底/首帧)
+// 但按钮等控件不渲染"。显式 flush 绕过节流, 确保内容立即进入远程上下文。
+static void TSHUDFlushCATransaction(void) {
+    Class txClass = NSClassFromString(@"CATransaction");
+    if (txClass && [txClass respondsToSelector:@selector(flush)]) {
+        [txClass flush];
+    }
+}
+
 + (instancetype)shared {
     static TSHUDHost *instance = nil;
     static dispatch_once_t onceToken;
@@ -331,6 +357,8 @@ static void HUDLog(NSString *fmt, ...) {
                 void (*setLayerFn)(id, SEL, CALayer *) = (void (*)(id, SEL, CALayer *))[_sbsCAContext methodForSelector:setLayerSel];
                 if (setLayerFn) setLayerFn(_sbsCAContext, setLayerSel, _window.layer);
             }
+            // app 激活后 context 可能重建, 保持透明背景 (见 TSHUDSetContextOpaque 注释)
+            TSHUDSetContextOpaque(_sbsCAContext, NO);
             return ctxId;
         }
         _sbsCAContext = nil; // context 失效, 重建
@@ -375,12 +403,12 @@ static void HUDLog(NSString *fmt, ...) {
                     }
                     if (ctxId != 0) {
                         _sbsCAContext = ctx;
+                        // 关键修复: 远程上下文默认 opaque(白色背景), 置为透明,
+                        // 否则弹窗移除后 context 内容为空 → 全屏白屏 (见 TSHUDSetContextOpaque 注释)
+                        TSHUDSetContextOpaque(ctx, NO);
                         // [CATransaction flush] 提交渲染, 确保内容进入 context
-                        Class txClass = NSClassFromString(@"CATransaction");
-                        if (txClass && [txClass respondsToSelector:@selector(flush)]) {
-                            [txClass flush];
-                        }
-                        HUDLog(@"CAContext created explicitly: ctxId=%u", ctxId);
+                        TSHUDFlushCATransaction();
+                        HUDLog(@"CAContext created explicitly: ctxId=%u (opaque=NO)", ctxId);
                         return ctxId;
                     }
                     _sbsCAContext = nil;
@@ -572,6 +600,9 @@ static void HUDLog(NSString *fmt, ...) {
             [alert layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:alert];
             [alert show];
+            // 后台时 CA 提交会被节流/跳过, 显式 flush 确保弹窗内容
+            // (卡片/按钮) 立即同步到 SBS 托管的远程上下文, 否则只显示白底不渲染控件。
+            TSHUDFlushCATransaction();
         } @catch (NSException *e) {
             HUDLog(@"presentAlert exception: %@", e);
             dispatch_semaphore_signal(sem);
@@ -611,6 +642,8 @@ static void HUDLog(NSString *fmt, ...) {
             [toast layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:toast];
             [toast show];
+            // 后台时 CA 提交会被节流/跳过, 显式 flush 确保 toast 立即同步到远程上下文。
+            TSHUDFlushCATransaction();
         } @catch (NSException *e) {
             HUDLog(@"showToast exception: %@", e);
         }
