@@ -170,9 +170,13 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 // 多线程共享，因此用静态全局（ZXTouch 亦为全局）。
 static uint64_t s_senderID = 0;
 
-// 当前开机时间（绝对秒）。用于判断设备是否重启过（重启后 senderID 会变化）。
-static NSTimeInterval TSHIDCurrentBootTime(void) {
-    return [[NSDate date] timeIntervalSince1970] - [NSProcessInfo processInfo].systemUptime;
+// 系统自开机以来的"清醒"uptime（秒），单调递增、睡眠不增长、设备重启后归零重计。
+// 用它判断设备是否重启过：uptime 回退（current < saved）= 重启过，senderID 需重新获取；
+// uptime 未回退 = 未重启，可放心复用已保存的 senderID。
+// 注意: 不能再用 "绝对时间戳 - uptime"(推断开机时刻) 判据 —— 设备跨睡眠后该值
+// 会偏移约等于睡眠时长, 被误判为"重启"而丢掉 senderID, 导致脚本"识别到却不点击"。
+static NSTimeInterval TSHIDCurrentUptime(void) {
+    return [NSProcessInfo processInfo].systemUptime;
 }
 
 // 监听系统触摸屏(digitizer)事件，读取真实 senderID（ZXTouch setSenderIdCallback 同款）。
@@ -188,7 +192,7 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     s_senderID = sid;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setDouble:(double)sid forKey:kSenderIDDefaultsKey];
-    [ud setDouble:TSHIDCurrentBootTime() forKey:kSenderIDBootTimeDefaultsKey];
+    [ud setDouble:TSHIDCurrentUptime() forKey:kSenderIDBootTimeDefaultsKey];
     [ud synchronize];
     NSLog(@"[TSHIDEventTouch] 已获取触摸发送者 senderID: 0x%llX", sid);
     // 通知 Lua 桥接层，让"已获取 senderID"直接显示在脚本日志中
@@ -321,11 +325,17 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 - (void)_setupSenderID {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
-    NSTimeInterval savedBoot = [ud doubleForKey:kSenderIDBootTimeDefaultsKey];
+    NSTimeInterval savedUptime = [ud doubleForKey:kSenderIDBootTimeDefaultsKey];
+    NSTimeInterval currentUptime = TSHIDCurrentUptime();
 
-    if (saved != 0 && fabs(savedBoot - TSHIDCurrentBootTime()) <= 3) {
+    // 复用判据: 保存的 uptime 未回退 = 设备未重启 -> 已保存 senderID 仍然有效。
+    // savedUptime < 1e9 用于过滤旧版本写入的"开机绝对时间戳"(约 1.7e9 数量级),
+    // 该格式无法与 uptime 比较, 视为无效重新监听。
+    // 容差 1 秒: 系统 uptime 在保存与读取之间可能有的微小抖动。
+    if (saved != 0 && savedUptime > 0 && savedUptime < 1e9
+        && currentUptime >= savedUptime - 1.0) {
         s_senderID = saved;
-        NSLog(@"[TSHIDEventTouch] 设备未重启，复用已保存的 senderID: 0x%llX", s_senderID);
+        NSLog(@"[TSHIDEventTouch] 设备未重启(uptime 未回退)，复用已保存的 senderID: 0x%llX", s_senderID);
         return;
     }
 
@@ -650,9 +660,12 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     [self touchUpAtPoint:to index:0];
 }
 
-/// 让主 RunLoop 跑一会儿，保证 HID 事件被 backboardd 即时处理
+/// 触摸序列的间隔等待: 纯线程睡眠(与 tap 一致)。
+// HID 事件经 backboardd 异步处理, 无需等待 app 主 RunLoop;
+// 此前用 CFRunLoopRunInMode 在 Lua 后台线程(该线程 RunLoop 无 source)上会立即返回,
+// 导致 swipe 的 down/所有 move/up 在几微秒内连发、滑动间隔(dt)完全失效。
 - (void)_yieldRunLoopForSeconds:(NSTimeInterval)seconds {
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false);
+    [NSThread sleepForTimeInterval:seconds];
 }
 
 @end
