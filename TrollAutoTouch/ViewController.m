@@ -28,9 +28,15 @@
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) UIImageView *preview;
 @property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) dispatch_source_t logFlushTimer;
 @end
 
-@implementation ViewController
+@implementation ViewController {
+    // 日志聚合缓冲: _logBuffer 任意线程追加, 50ms 定时器在主线程批量合并
+    // 到 _logFull 并刷新 logView, 避免每条日志 O(n) 拼接刷爆主线程。
+    NSMutableString *_logBuffer;
+    NSMutableString *_logFull;
+}
 
 // "暂停 Lua"按钮的暂停/继续状态 (音量键面板也会同步更新它)
 static BOOL _luaPausedByButton = NO;
@@ -39,6 +45,18 @@ static BOOL _luaPausedByButton = NO;
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.08 blue:0.12 alpha:1.0];
     [self _buildUI];
+
+    // 日志 UI 刷新节流定时器: 每 50ms 批量合并一次日志。
+    // 脚本高频日志(循环里 logStr/print)时主线程只做受限长度的合并刷新,
+    // 不会因逐条 O(n) 拼接 logView.text 而 CPU 100% → App 假死/脚本停摆。
+    _logBuffer = [NSMutableString string];
+    _logFull = [NSMutableString string];
+    self.logFlushTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(self.logFlushTimer, dispatch_walltime(NULL, 0),
+                              (uint64_t)(50 * NSEC_PER_MSEC), (uint64_t)(10 * NSEC_PER_MSEC));
+    dispatch_source_set_event_handler(self.logFlushTimer, ^{ [self _flushLogView]; });
+    dispatch_resume(self.logFlushTimer);
+
     [self _log:@"TrollAutoTouch v2.0 已启动。"];
 
     // 设置 HUD 操作回调
@@ -502,16 +520,41 @@ static BOOL _luaPausedByButton = NO;
 #pragma mark - TSLogDelegate
 
 - (void)log:(NSString *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.logView.text = [NSString stringWithFormat:@"%@\n%@", self.logView.text ?: @"", message];
-    });
+    [self _log:message];
 }
 
+// 线程安全日志入口(任意线程可调用): 只追加到缓冲, 由 50ms 定时器批量刷新 UI。
+// 脚本高频日志时主线程每 50ms 只做一次受限长度的合并刷新, 不会因 O(n) 拼接而假死。
 - (void)_log:(NSString *)s {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.logView.text = [NSString stringWithFormat:@"%@\n%@", self.logView.text ?: @"", s];
-    });
-    NSLog(@"[VC] %@", s);
+    if (s.length == 0) return;
+    @synchronized (self) {
+        if (!_logBuffer) _logBuffer = [NSMutableString string];
+        [_logBuffer appendString:s];
+        [_logBuffer appendString:@"\n"];
+    }
+}
+
+// 主线程(50ms 定时器): 取走缓冲 → 合并到全量文本(截断上限) → 一次 setText。
+- (void)_flushLogView {
+    NSString *chunk = nil;
+    @synchronized (self) {
+        if (_logBuffer.length == 0) return;
+        chunk = [_logBuffer copy];
+        [_logBuffer setString:@""];
+    }
+    if (chunk.length == 0) return;
+    if (!_logFull) _logFull = [NSMutableString string];
+    [_logFull appendString:chunk];
+    // 限制日志最大长度, 超出丢弃最旧部分, 保证每次 setText 成本恒定
+    const NSUInteger kMaxLogLen = 200 * 1024;
+    if (_logFull.length > kMaxLogLen) {
+        [_logFull deleteCharactersInRange:NSMakeRange(0, _logFull.length - kMaxLogLen)];
+    }
+    self.logView.text = _logFull;
+    // 用户手动滚动时不打扰; 其余情况自动跟随最新日志
+    if (!self.logView.isDragging && !self.logView.isDecelerating) {
+        [self.logView scrollRangeToVisible:NSMakeRange(_logFull.length, 0)];
+    }
 }
 
 @end

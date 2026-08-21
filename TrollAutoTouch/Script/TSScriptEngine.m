@@ -1545,15 +1545,13 @@
 }
 
 - (void)log:(NSString *)msg {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.logDelegate log:msg];
-    });
+    // 直接回调 delegate: ViewController log: 内部已做线程安全聚合节流,
+    // 无需再向主线程逐条派发(高频日志时避免主线程队列堆积)。
+    [self.logDelegate log:msg];
 }
 
 - (void)logError:(NSString *)msg {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.logDelegate log:[NSString stringWithFormat:@"[ERROR] %@", msg]];
-    });
+    [self.logDelegate log:[NSString stringWithFormat:@"[ERROR] %@", msg]];
 }
 
 - (void)logWait {

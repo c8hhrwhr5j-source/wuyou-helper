@@ -6,6 +6,18 @@
 #import "TSAppNodeInfo.h"
 #import "TSHIDEventTouch.h"
 
+// 在主线程执行 block, 最多等待 timeoutMs 毫秒。主线程繁忙时调用线程
+// (脚本线程) 不会被无限阻塞, 避免 App 主线程卡顿拖死 Lua 脚本。
+static void RunOnMainWithTimeout(void (^block)(void), double timeoutMs) {
+    if ([NSThread isMainThread]) { block(); return; }
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        block();
+        dispatch_semaphore_signal(sema);
+    });
+    dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutMs * NSEC_PER_MSEC)));
+}
+
 #pragma mark - TSAppNode
 
 @implementation TSAppNode
@@ -44,13 +56,9 @@
 
 - (nullable TSAppNode *)fullTree {
     __block TSAppNode *root = nil;
-    if ([NSThread isMainThread]) {
+    RunOnMainWithTimeout(^{
         root = [self _buildTreeFromView:[self _keyWindow]];
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            root = [self _buildTreeFromView:[self _keyWindow]];
-        });
-    }
+    }, 500);
     return root;
 }
 
@@ -259,7 +267,7 @@
 
 - (BOOL)setText:(NSString *)text forNode:(TSAppNode *)node {
     __block BOOL ok = NO;
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    RunOnMainWithTimeout(^{
         UIView *view = (__bridge UIView *)(void *)node.address;
         if ([view isKindOfClass:[UITextField class]]) {
             [(UITextField *)view setText:text];
@@ -271,7 +279,7 @@
             [(UILabel *)view setText:text];
             ok = YES;
         }
-    });
+    }, 500);
     return ok;
 }
 

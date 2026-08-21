@@ -523,7 +523,14 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     if ([NSThread isMainThread]) {
         block();
     } else {
-        dispatch_sync(dispatch_get_main_queue(), block);
+        // 异步派发 + 500ms 超时: 即使主线程繁忙也不挂起 Lua 线程(避免假死)。
+        // 超时后 block 稍后照常执行并 signal, 信号量计数无害。
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            block();
+            dispatch_semaphore_signal(sema);
+        });
+        dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC));
     }
     return handled;
 }

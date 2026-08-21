@@ -118,13 +118,16 @@ static volatile BOOL _pauseRequested = NO;
 #pragma mark - 日志
 
 static void lua_log(NSString *msg) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 全部日志统一写入全局日志存储(设置页可查看)
-        [[TSLogStore shared] append:msg];
-        if ([TSLuaBridge shared].logHandler) {
-            [TSLuaBridge shared].logHandler(msg);
-        }
-    });
+    if (msg.length == 0) return;
+    // 全局日志存储: 内部线程安全 + 批量异步写文件, 不碰主线程。
+    [[TSLogStore shared] append:msg];
+    // UI 日志: 直接回调 logHandler。ViewController 的 _log: 内部按 50ms
+    // 聚合节流刷新(任意线程可调用), 不再逐条向主线程派发, 避免脚本高频
+    // 日志时主线程队列堆积 → App 假死/脚本停摆。
+    TSLuaBridge *bridge = [TSLuaBridge shared];
+    if (bridge.logHandler) {
+        bridge.logHandler(msg);
+    }
 }
 
 /// 把 Lua 字符串(UTF-8 字节)安全转为 NSString。
