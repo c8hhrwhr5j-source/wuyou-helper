@@ -224,7 +224,12 @@ static void TSHUDFlushCATransaction(void) {
         _contentView = [[UIView alloc] initWithFrame:_rootVC.view.bounds];
         _contentView.backgroundColor = [UIColor clearColor];
         _contentView.opaque = NO;
-        _contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        // 关键: 内容层不随窗口缩放 (autoresizingMask = None)。
+        // toast/alert 显示期间 _window.frame 会缩小到卡片实际区域 (见
+        // _resizeHostWindowToContent), 若内容层跟随窗口压缩, 卡片绝对坐标
+        // 全部错位/裁剪。保持全屏 frame 后, 卡片按"屏幕绝对坐标"定位,
+        // 缩小后的窗口恰好包住卡片 → 显示完整, 窗口外触摸穿透到前台 app。
+        _contentView.autoresizingMask = UIViewAutoresizingNone;
         [_rootVC.view addSubview:_contentView];
         // 窗口 hitTest 依据该容器做空白穿透 (命中容器本身 → 不消费触摸)
         _window.contentContainer = _contentView;
@@ -479,11 +484,63 @@ static void TSHUDFlushCATransaction(void) {
     }
 }
 
+// 把 SBS 托管窗口缩小到内容实际区域 (toast/alert 卡片), 窗口外触摸穿透到前台 app。
+//
+// 背景: SBS 系统级托管窗口在 SpringBoard 进程内按 layer frame 做命中测试,
+// app 内 hitTest 返回 nil 的"穿透"跨进程完全无效 → 全屏托管窗口必然吞掉
+// 整个屏幕的触摸 (表现为 "toast 显示期间点击无效"、"关闭公告按钮点不了")。
+// 这里把窗口 frame 缩到内容卡片区域, 只有卡片区域被系统级拦截:
+//  - toast (纯展示, 无交互): 卡片区域吞触摸可接受
+//  - alert (需点按钮): 卡片+按钮区域命中有效, 四周穿透到前台 app
+//  - 全屏 VC 承载 (ui.open 网页设置页): union 结果为全屏 → 自动保持全屏交互
+- (void)_resizeHostWindowToContent {
+    if (!_window || !_contentView) return;
+    // 未注册系统级托管 (前台降级模式): 窗口在 app 内, hitTest 已穿透, 无需缩小。
+    if (_registeredContextId == 0) {
+        [self _restoreHostWindowFrame];
+        return;
+    }
+    CGRect full = [UIScreen mainScreen].bounds;
+    CGRect unionRect = CGRectNull;
+    for (UIView *sub in _contentView.subviews) {
+        if (sub.hidden || sub.alpha <= 0.01) continue;
+        CGRect subRect = [_contentView convertRect:sub.bounds fromView:sub];
+        unionRect = CGRectIsNull(unionRect) ? subRect : CGRectUnion(unionRect, subRect);
+    }
+    if (CGRectIsNull(unionRect)) {
+        [self _restoreHostWindowFrame];
+        return;
+    }
+    // 内容坐标系 → 窗口坐标系 (contentView 可能带脚本方向旋转 transform)
+    CGRect winRect = [_contentView convertRect:unionRect toView:_window];
+    winRect = CGRectInset(winRect, -16.0, -16.0);       // 少量留白
+    winRect = CGRectIntersection(winRect, full);         // 不出屏
+    if (CGRectIsEmpty(winRect) ||
+        CGRectGetWidth(winRect) < 24.0 || CGRectGetHeight(winRect) < 24.0) {
+        // 计算异常时回退全屏, 保证内容一定可见
+        [self _restoreHostWindowFrame];
+        return;
+    }
+    if (!CGRectEqualToRect(_window.frame, winRect)) {
+        _window.frame = winRect;
+    }
+}
+
+// 恢复 SBS 托管窗口为全屏 (内容清空 / 旋转计算前)。
+- (void)_restoreHostWindowFrame {
+    if (!_window) return;
+    CGRect full = [UIScreen mainScreen].bounds;
+    if (!CGRectEqualToRect(_window.frame, full)) {
+        _window.frame = full;
+    }
+}
+
 - (void)_dropActiveContent {
     if (_activeContentCount > 0) _activeContentCount--;
     if (_activeContentCount == 0) {
-        // 内容清空: 立即注销系统级托管并隐藏窗口, 解除全屏触摸吞没。
-        // 窗口隐藏后下次 _bumpActiveContent 会重新显示并重新注册。
+        // 内容清空: 恢复全屏 frame, 注销系统级托管并隐藏窗口,
+        // 解除全屏触摸吞没。窗口隐藏后下次 _bumpActiveContent 会重新显示并重新注册。
+        [self _restoreHostWindowFrame];
         [self _unregisterAccessibilityHosting];
         _window.hidden = YES;
     }
@@ -608,6 +665,9 @@ static void TSHUDFlushCATransaction(void) {
 // 与 TSLuaBridge 坐标变换严格一致: 竖屏为基准, home右/左 旋转 ±90°。
 - (void)_applyScriptOrientation {
     if (!_window) return;
+    // 旋转计算基于全屏 bounds: 若窗口正被 toast/alert 缩小, 先恢复全屏
+    // 再按全屏尺寸计算 contentView 的 bounds/center。
+    [self _restoreHostWindowFrame];
     UIView *content = _contentView;
     if (!content) return;
 
@@ -687,6 +747,9 @@ static void TSHUDFlushCATransaction(void) {
             [alert layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:alert];
             [alert show];
+            // 弹窗只占屏幕局部 → 把 SBS 托管窗口缩到卡片区域,
+            // 卡片四周触摸穿透到前台 app (否则弹窗显示期间全屏点击无效)。
+            [self _resizeHostWindowToContent];
             // 后台时 CA 提交会被节流/跳过, 显式 flush 确保弹窗内容
             // (卡片/按钮) 立即同步到 SBS 托管的远程上下文, 否则只显示白底不渲染控件。
             TSHUDFlushCATransaction();
@@ -739,6 +802,9 @@ static void TSHUDFlushCATransaction(void) {
             [toast layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:toast];
             [toast show];
+            // toast 只占屏幕局部 → 把 SBS 托管窗口缩到 toast 区域,
+            // toast 之外的触摸穿透到前台 app (否则 toast 显示期间全屏点击无效)。
+            [self _resizeHostWindowToContent];
             // 后台时 CA 提交会被节流/跳过, 显式 flush 确保 toast 立即同步到远程上下文。
             TSHUDFlushCATransaction();
         } @catch (NSException *e) {
