@@ -501,6 +501,14 @@ static void TSHUDFlushCATransaction(void) {
         return;
     }
     CGRect full = [UIScreen mainScreen].bounds;
+    // ★ 关键: 计算前先把窗口恢复为全屏。
+    // convertRect:toView:_window 的结果是"窗口局部坐标" (相对窗口 bounds
+    // 原点 (0,0))。若窗口正处在上次 toast/alert 缩小后的状态 (frame.origin
+    // 非零), 直接用该结果设置 window.frame, 窗口会先移到"局部坐标"位置,
+    // 内容再按 frame.origin 偏移一次 → 卡片整体偏移 (toast 被移到屏幕右侧)。
+    // 从全屏状态计算时窗口局部坐标 == 屏幕绝对坐标, 结果唯一且正确。
+    [self _restoreHostWindowFrame];
+
     CGRect unionRect = CGRectNull;
     for (UIView *sub in _contentView.subviews) {
         if (sub.hidden || sub.alpha <= 0.01) continue;
@@ -521,9 +529,22 @@ static void TSHUDFlushCATransaction(void) {
         [self _restoreHostWindowFrame];
         return;
     }
-    if (!CGRectEqualToRect(_window.frame, winRect)) {
-        _window.frame = winRect;
-    }
+    [UIView performWithoutAnimation:^{
+        if (!CGRectEqualToRect(_window.frame, winRect)) {
+            _window.frame = winRect;
+        }
+        // ★ 关键: 窗口缩小后, 窗口局部坐标系原点 (bounds 原点) 在屏幕上的
+        // 位置 = window.frame.origin。内容层 (contentView) 保持全屏 frame
+        // 且不随窗口缩放, 卡片按屏幕绝对坐标定位, 但其窗口局部坐标 =
+        // 绝对坐标 - frame.origin, 超出窗口 bounds (0,0,w,h) 的部分会被
+        // 远程上下文裁剪/错位显示。把内容层整体平移到 (-frame.origin),
+        // 卡片即落在窗口局部坐标内 (相对窗口左上角留白处), 无论 SBS 按
+        // "窗口局部渲染"还是"frame 对齐"方式合成, 卡片都显示在原来的
+        // 屏幕绝对坐标 (toast 保持左右居中), 同时 alert 按钮仍位于窗口
+        // 触摸区域内 (可正常点击)。
+        _contentView.center = CGPointMake(CGRectGetMidX(full) - CGRectGetMinX(winRect),
+                                          CGRectGetMidY(full) - CGRectGetMinY(winRect));
+    }];
 }
 
 // 恢复 SBS 托管窗口为全屏 (内容清空 / 旋转计算前)。
@@ -532,6 +553,15 @@ static void TSHUDFlushCATransaction(void) {
     CGRect full = [UIScreen mainScreen].bounds;
     if (!CGRectEqualToRect(_window.frame, full)) {
         _window.frame = full;
+    }
+    // 还原内容层平移: 窗口恢复全屏后, 内容层需回到全屏原点对齐
+    // (center = 全屏中心), 否则下次 toast/alert 布局 (基于全屏坐标)
+    // 会带着缩小窗口时的平移偏移, 显示错位。
+    if (_contentView) {
+        CGPoint homeCenter = CGPointMake(CGRectGetMidX(full), CGRectGetMidY(full));
+        if (!CGPointEqualToPoint(_contentView.center, homeCenter)) {
+            _contentView.center = homeCenter;
+        }
     }
 }
 
