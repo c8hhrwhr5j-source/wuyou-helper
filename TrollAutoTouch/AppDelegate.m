@@ -55,6 +55,13 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // SBS 系统级托管为惰性注册: 仅在弹出弹窗/toast/承载 UI 时注册,
     // 内容清空即注销, 避免后台时全屏托管窗口吞掉整个屏幕的触摸。
     [[TSHUDHost shared] start];
+    // 冷启动预热: 预创建 SBS 托管所需的 CAContext (contextId 非零)。
+    // 否则冷启动后首次按音量键时, 托管注册首次创建 CAContext 常失败
+    // (app 刚启动 CA/WindowServer 管线未就绪), 而弹窗又因"未注册且后台"
+    // 立即中止注册重试 → 前几次按键弹窗被静默跳过,
+    // 表现为"启动 App 后要按 4 次音量键才弹出暂停/运行按钮"。
+    // 预热成功后首次按键即秒开弹窗 (只预创建 context, 不注册托管)。
+    [[TSHUDHost shared] prepareOverlayContext];
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
     return YES;

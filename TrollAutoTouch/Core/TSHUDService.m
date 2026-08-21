@@ -28,6 +28,9 @@
 
 - (void)warmUp {
     [[TSHUDHost shared] start];
+    // 预热 SBS 托管所需 CAContext: 首次按音量键弹窗即时可用。
+    // (只预创建 context, 不注册托管; 惰性托管行为不变。)
+    [[TSHUDHost shared] prepareOverlayContext];
 }
 
 - (nullable NSString *)showAlertWithTitle:(nullable NSString *)title

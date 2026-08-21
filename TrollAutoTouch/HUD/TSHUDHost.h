@@ -28,6 +28,25 @@ NS_ASSUME_NONNULL_BEGIN
 /// 幂等, 可重复调用。
 - (void)start;
 
+/// 预热: 预创建 CAContext (contextId 非零) 供 SBS 系统级托管复用。
+/// 解决"冷启动后首次按音量键要按多次才出暂停/运行弹窗"——
+/// 首次弹窗才惰性注册托管, 而 _acquireContextId 在 app 刚启动/后台时首次
+/// 创建 CAContext 常返回 ctxId=0 → 注册重试又被弹窗"未注册且后台"提前
+/// 中止 (活跃内容计数归零), 前几次按键弹窗被静默跳过。
+/// App 启动(前台激活)时预热成功后, 首次按键 _acquireContextId 立即返回
+/// 非零 ctxId → 托管注册即时完成 → 弹窗秒开。
+/// 只预创建 context 不注册托管 (惰性托管不变, 不残留全屏托管窗口吞触摸)。
+/// 可任意线程调用, 幂等。
+- (void)prepareOverlayContext;
+
+/// 等待 SBS 系统级托管注册完成 (弹窗路径兜底, 阻塞调用)。
+/// @param timeout 最长等待秒数
+/// @return YES 表示已注册成功 (或已判定彻底失败之外的可显示状态); NO 表示超时
+/// 调用前提: 调用前必须已 _bumpActiveContent 且等待期间不 drop,
+/// 否则 _registerAccessibilityHostingWithRetryCount: 的 0.5s 重试会因
+/// 无活跃内容而中止, 永远注册不上。
+- (BOOL)waitForAccessibilityHostingWithTimeout:(NSTimeInterval)timeout;
+
 /// 全局阻塞式弹窗: 在任意前台 App 之上显示自绘弹窗, 等待用户点击或超时。
 /// @param title   弹窗标题, 可为空
 /// @param message 弹窗内容

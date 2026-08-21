@@ -671,6 +671,75 @@ static void TSHUDFlushCATransaction(void) {
     }
 }
 
+#pragma mark - 预热 (冷启动时预创建 CAContext)
+
+// 冷启动后首次按音量键弹窗的根因 (用户反馈"启动 App 后要按 4 次音量键
+// 才弹出暂停/运行按钮, 之后每按一次正常; 杀进程重开后再次复现"):
+// 首次弹窗才惰性注册 SBS 托管 (_bumpActiveContent → _register...),
+// 而 _acquireContextId 在 app 刚启动(甚至已在后台)时首次创建
+// CAContext remoteContextWithOptions: 常返回 ctxId=0 → 注册走 0.5s 重试;
+// 但弹窗检查到"未注册且 app 不在前台"立即 _dropActiveContent (计数归零),
+// 0.5s 后重试回调发现活跃内容已清空 → 重试中止 → 托管永远注册不上,
+// 弹窗返回 nil 被静默跳过。用户连按多次, 直到某次 CAContext 创建成功
+// (CA/WindowServer 管线就绪), 弹窗才出现。
+// 修复①: App 启动(前台激活)时预创建 CAContext 缓存到 _sbsCAContext,
+// 首次按键时 _acquireContextId 立即返回非零 ctxId → 托管注册即时完成。
+// 只预创建 context, 不注册 SBS 托管 (惰性托管不变, 不残留全屏托管窗口)。
+- (void)prepareOverlayContext {
+    [self ensureStartedOnMainThread];
+    if (_startupFailedSBS) return;
+
+    // 主线程同步创建一次 (CAContext/窗口 layer 操作必须在主线程)
+    __block unsigned cid = 0;
+    if ([NSThread isMainThread]) {
+        cid = [self _acquireContextId];
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            cid = [self _acquireContextId];
+        });
+    }
+    if (cid != 0) {
+        HUDLog(@"prepareOverlayContext: ready (ctxId=%u)", cid);
+        return;
+    }
+
+    // 首次创建失败 (启动早期 CA/WindowServer 连接未就绪):
+    // 后台轮询重试, 直到 contextId 非零 (每 0.2s, 最多 40 次 ≈ 8s)。
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        for (int i = 0; i < 40; i++) {
+            if (self->_startupFailedSBS) return;
+            __block unsigned ctx = 0;
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                ctx = [self _acquireContextId];
+            });
+            if (ctx != 0) {
+                HUDLog(@"prepareOverlayContext: done (ctxId=%u, attempt=%d)", ctx, i + 1);
+                return;
+            }
+            usleep(200 * 1000);
+        }
+        HUDLog(@"prepareOverlayContext: give up (ctxId still 0 after 8s)");
+    });
+}
+
+// 等待 SBS 系统级托管注册完成 (弹窗路径兜底, 修复②)。
+// 冷启动后首次按键时, 若预热未及时完成 (或直接走首次弹窗), 托管注册
+// 需要时间 (CAContext 首次创建失败 → 0.5s 重试, 最多 10 次 ≈ 5s)。
+// 等待期间调用方必须保持 _activeContentCount > 0 (不 drop),
+// 否则注册重试会因无活跃内容而中止。
+// 线程安全: _registeredContextId/_startupFailedSBS 主线程写, 本方法在
+// 后台线程读 (标量读, 与弹窗主线程写无竞态窗口; 原代码多处同此模式)。
+- (BOOL)waitForAccessibilityHostingWithTimeout:(NSTimeInterval)timeout {
+    if (_registeredContextId != 0) return YES;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
+        if (_registeredContextId != 0) return YES;
+        if (_startupFailedSBS) return NO;
+        usleep(200 * 1000);
+    }
+    return _registeredContextId != 0;
+}
+
 #pragma mark - 脚本方向 (screen.init)
 
 // 设置脚本坐标系方向并旋转 HUD 内容层。
@@ -747,20 +816,10 @@ static void TSHUDFlushCATransaction(void) {
     __block NSString *result = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // 主线程显示弹窗 (前置条件已满足: 系统级托管已注册, 或 app 前台可见)。
+    // 抽出为独立 block, 供"注册就绪后延迟显示"复用。
+    void (^showOnMain)(void) = ^{
         @try {
-            // 先计入活跃内容并确保系统级托管注册 (惰性托管), 再判断可见性:
-            // 首次后台弹窗此刻才注册 SBS, 注册成功则 contentView 可挂载。
-            [self _bumpActiveContent];
-            if (_registeredContextId == 0 &&
-                [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-                // SBS 托管注册失败 且 app 不在前台: 弹窗不可见, 补平计数后
-                // 直接返回 nil (脚本继续执行, 不永久阻塞)。
-                [self _dropActiveContent];
-                HUDLog(@"presentAlert skipped: not foreground & SBS not registered");
-                dispatch_semaphore_signal(sem);
-                return;
-            }
             UIView *host = [self _displayContentView];
             HUDCustomAlertView *alert = [[HUDCustomAlertView alloc] initWithTitle:title
                                                                           message:message
@@ -788,11 +847,51 @@ static void TSHUDFlushCATransaction(void) {
             [self _dropActiveContent];
             dispatch_semaphore_signal(sem);
         }
+    };
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            // 先计入活跃内容并确保系统级托管注册 (惰性托管), 再判断可见性:
+            // 首次后台弹窗此刻才注册 SBS, 注册成功则 contentView 可挂载。
+            [self _bumpActiveContent];
+            if (_registeredContextId == 0 &&
+                [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+                // SBS 托管尚未注册 且 app 不在前台: 不能立即放弃——
+                // 冷启动后首次按键时托管注册需要时间 (CAContext 首次创建
+                // 可能失败 → 0.5s 重试), 若此刻 _dropActiveContent (计数归零),
+                // 重试回调会发现活跃内容已清空而中止, 弹窗被静默跳过,
+                // 表现为"要按多次音量键才出弹窗"。
+                // 改为: 保持活跃内容 (不 drop), 后台等待注册完成 (最长 6s),
+                // 注册成功后再显示; app 中途回前台也可直接显示 (前台降级路径)。
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    BOOL ready = [self waitForAccessibilityHostingWithTimeout:6.0];
+                    BOOL appActive = [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (ready || appActive) {
+                            showOnMain();
+                        } else {
+                            // 注册彻底失败 (重试耗尽/类缺失) 且仍在后台:
+                            // 补平计数, 返回 nil, 调用方回退静默切换/前台处理。
+                            HUDLog(@"presentAlert skipped: SBS hosting not registered after wait");
+                            [self _dropActiveContent];
+                            dispatch_semaphore_signal(sem);
+                        }
+                    });
+                });
+                return;
+            }
+            showOnMain();
+        } @catch (NSException *e) {
+            HUDLog(@"presentAlert exception: %@", e);
+            [self _dropActiveContent];
+            dispatch_semaphore_signal(sem);
+        }
     });
 
     // 超时兜底: 防 SBS 托管失败导致弹窗不可见时永久阻塞。
     // timeout>0 时 HUDCustomAlertView 内部超时会自动关闭; 此处额外保护。
-    NSTimeInterval maxWait = (timeout > 0 ? timeout : 60.0) + 15.0;
+    // +6s 覆盖注册等待 (最长 6s)。
+    NSTimeInterval maxWait = (timeout > 0 ? timeout : 60.0) + 15.0 + 6.0;
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(maxWait * NSEC_PER_SEC)));
     return result;
 }
