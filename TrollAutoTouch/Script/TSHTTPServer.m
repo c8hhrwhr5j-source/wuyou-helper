@@ -635,17 +635,19 @@ static NSData *WSTextFrame(NSString *text) {
     dispatch_source_set_event_handler(timer, ^{
         if (!streaming) { dispatch_source_cancel(timer); return; }
 
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            @autoreleasepool {
-                UIImage *img = [[TSScreenCapture shared] captureImage];
-                NSData *jpeg = UIImageJPEGRepresentation(img, 0.4);
+        // 截屏/编码都在后台队列执行: captureImage 内部已走后台安全的
+        // surface 缓存路径, 不再需要 dispatch_sync 主线程(那会以 10fps 阻塞 UI)。
+        @autoreleasepool {
+            UIImage *img = [[TSScreenCapture shared] captureImage];
+            NSData *jpeg = img ? UIImageJPEGRepresentation(img, 0.4) : nil;
+            if (jpeg) {
                 NSString *part = [NSString stringWithFormat:@"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %lu\r\n\r\n",
                                   (unsigned long)jpeg.length];
                 send(clientFd, part.UTF8String, part.length, 0);
                 send(clientFd, jpeg.bytes, jpeg.length, 0);
                 send(clientFd, "\r\n", 2, 0);
             }
-        });
+        }
     });
     dispatch_resume(timer);
 

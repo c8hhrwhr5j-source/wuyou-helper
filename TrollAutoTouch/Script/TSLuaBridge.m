@@ -448,14 +448,33 @@ static void luaStopHook(lua_State *L, lua_Debug *ar) {
 /// 取整屏 RGBA 像素，返回给调用方(需 free)
 /// 若已 screen.keep()/keepScreen(true) 缓存，则直接返回缓存副本(不再重复截屏，找色找图性能极大提升)；
 /// 无缓存则新截屏(截屏偶尔会失败，重试最多 3 次)。
+/// 限频: 距上次成功截屏 < 60ms 时直接复用上次像素副本 —— 防止无 mSleep 的死循环脚本
+/// 以最大频率反复截屏，把设备 CPU(全屏像素转储)打满导致整体卡顿"假死"。60ms≈16fps，
+/// 对找色脚本足够；脚本带 mSleep(≥100ms) 时不受影响。
 static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
     // 优先复用 keep 缓存: screen.keep() 后多次 findColor/findColors/getColor 读取同一帧像素
     if ([[TSScreenCapture shared] getCachedPixels:pxOut width:wOut height:hOut]) {
         return YES;
     }
+    // 限频复用上次像素(本函数只在 Lua 后台队列线程调用, static 无并发问题)
+    static NSTimeInterval lastGrabAt = 0;
+    static uint8_t *lastPx = NULL;
+    static int lastW = 0, lastH = 0;
+    NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if (lastPx && lastW > 0 && lastH > 0 && (now - lastGrabAt) < 0.06) {
+        uint8_t *copy = malloc((size_t)lastW * (size_t)lastH * 4);
+        if (copy) {
+            memcpy(copy, lastPx, (size_t)lastW * (size_t)lastH * 4);
+            *pxOut = copy; *wOut = lastW; *hOut = lastH;
+            return YES;
+        }
+    }
     // 截屏偶尔会失败(帧缓冲 surface 未就绪/主线程忙/动画中)，重试最多 3 次
     for (int attempt = 0; attempt < 3; attempt++) {
         if ([[TSScreenCapture shared] captureScreenToRGBA:pxOut width:wOut height:hOut] && *pxOut) {
+            if (lastPx) { free(lastPx); }
+            lastPx = *pxOut; lastW = *wOut; lastH = *hOut;
+            lastGrabAt = now;
             return YES;
         }
         if (attempt < 2) {

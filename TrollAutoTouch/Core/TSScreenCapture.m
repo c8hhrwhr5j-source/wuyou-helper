@@ -62,6 +62,12 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     uint8_t  *_cachedPixels;
     int       _cachedWidth;
     int       _cachedHeight;
+    // UIScreen createScreenIOSurface 缓存:
+    // surface 绑定主屏渲染管线, 内容由 WindowServer 持续更新, 可长期复用。
+    // 后台线程直接读缓存 surface, 避免高频 findColor 每次阻塞/占用主线程。
+    IOSurfaceRef _cachedScreenSurface;   // 主线程创建, 跨线程读取(锁保护)
+    NSTimeInterval _cachedSurfaceTime;   // 创建时刻(用于异步刷新节流)
+    BOOL _surfaceRefreshPending;         // 异步刷新进行中标志
 }
 @end
 
@@ -332,6 +338,101 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 // **全屏 IOSurface**, 由系统在 WindowServer 侧创建/维护 —— 无需自行 IOSurfaceCreate,
 // 不依赖 contextId/CARenderServer, 后台/切到其他 App 后仍能取到真实屏幕像素。
 // 拿到 surface 后复用 _dumpIOSurface: 转储链路(优先加速器, 失败直读)读 RGBA。
+// 必须在主线程调用(createScreenIOSurface 是 UIScreen/UIWindow 相关私有方法)。
+// 返回的 IOSurface 绑定主屏渲染管线, 内容由 WindowServer 持续更新, 可长期复用。
+- (IOSurfaceRef)_createUIScreenSurface {
+    if (!_iosurfaceHandle) { return NULL; }
+    IOSurfaceGetTypeIDFunc typeIdFn = (IOSurfaceGetTypeIDFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetTypeID");
+    if (!typeIdFn) { return NULL; }
+
+    SEL sel = NSSelectorFromString(@"createScreenIOSurface");
+    if (!sel) { return NULL; }
+
+    // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
+    // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
+    // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
+    // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
+    NSMutableArray *candidates = [NSMutableArray array];
+    [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](逆向+社区首选)
+    [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](个别版本)
+    [candidates addObject:[UIScreen mainScreen]];                 // -[UIScreen createScreenIOSurface](旧版代码路径)
+    @try {
+        UIApplication *app = [UIApplication sharedApplication];
+        if (app) {
+            UIWindow *kw = [app valueForKey:@"keyWindow"];
+            if (kw) { [candidates addObject:kw]; }                // -[keyWindow createScreenIOSurface]
+            NSArray *wins = [app valueForKey:@"windows"];
+            for (UIWindow *w in wins) {
+                if (w && w != kw) { [candidates addObject:w]; }
+            }
+        }
+    } @catch (NSException *e) { }
+
+    for (id target in candidates) {
+        if (!target) { continue; }
+        @try {
+            if (![target respondsToSelector:sel]) { continue; }
+            NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+            if (!sig || sig.methodReturnLength < sizeof(void *)) { continue; }
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            inv.target = target;
+            inv.selector = sel;
+            [inv invoke];
+            __unsafe_unretained IOSurfaceRef ios = NULL;
+            [inv getReturnValue:&ios];
+            if (ios && CFGetTypeID(ios) == typeIdFn()) {
+                return ios;
+            }
+        } @catch (NSException *e) { }
+    }
+    return NULL;
+}
+
+// ---- 缓存: 复用同一个绑定主屏渲染管线的 surface, 后台线程直接读像素, 不再每次阻塞主线程 ----
+
+- (IOSurfaceRef)_getCachedScreenSurface {
+    @synchronized (self) {
+        if (!_cachedScreenSurface) { return NULL; }
+        return (IOSurfaceRef)CFRetain(_cachedScreenSurface);
+    }
+}
+
+- (void)_setCachedScreenSurface:(IOSurfaceRef)s {
+    @synchronized (self) {
+        if (_cachedScreenSurface) { CFRelease(_cachedScreenSurface); _cachedScreenSurface = NULL; }
+        if (s) {
+            _cachedScreenSurface = (IOSurfaceRef)CFRetain(s);
+            _cachedSurfaceTime = [NSProcessInfo processInfo].systemUptime;
+        } else {
+            _cachedSurfaceTime = 0;
+        }
+    }
+}
+
+// 异步请求主线程刷新缓存 surface(节流: 距上次创建 ≥ 400ms 才派发), 不阻塞调用线程。
+// 高频 findColor 只触发几次/秒的轻量主线程任务, UI 不再被截屏拖死。
+- (void)_requestScreenSurfaceRefresh {
+    BOOL needDispatch = NO;
+    @synchronized (self) {
+        if (_surfaceRefreshPending) { return; }
+        if (_cachedSurfaceTime > 0 &&
+            ([NSProcessInfo processInfo].systemUptime - _cachedSurfaceTime) < 0.4) {
+            return;
+        }
+        _surfaceRefreshPending = YES;
+        needDispatch = YES;
+    }
+    if (!needDispatch) { return; }
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) { return; }
+        IOSurfaceRef s = [self _createUIScreenSurface];
+        [self _setCachedScreenSurface:s];
+        @synchronized (self) { self->_surfaceRefreshPending = NO; }
+    });
+}
+
 - (BOOL)_captureUIScreenIOSurfaceToRGBA:(uint8_t **)pixelsOut
                                   width:(int *)widthOut
                                  height:(int *)heightOut {
@@ -339,106 +440,62 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         TSSetLastError(@"路径0 UIScreenSurface: IOSurface 框架加载失败");
         return NO;
     }
-    IOSurfaceGetTypeIDFunc typeIdFn = (IOSurfaceGetTypeIDFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetTypeID");
-    if (!typeIdFn) {
-        TSSetLastError(@"路径0 UIScreenSurface: IOSurfaceGetTypeID 符号不可用");
-        return NO;
+
+    // 1) 优先用缓存 surface: 后台线程直接读像素(纯 C API, 不碰主线程)。
+    //    surface 绑定主屏渲染管线, 内容持续更新, 反复读同一 surface 即可拿到新帧。
+    IOSurfaceRef cached = [self _getCachedScreenSurface];
+    if (cached) {
+        // 异步刷新缓存(节流), 保持 surface 换新帧; 不阻塞、不占主线程。
+        [self _requestScreenSurfaceRefresh];
+        uint8_t *px = NULL; int w = 0, h = 0;
+        BOOL ok = [self _dumpIOSurface:cached pixelsOut:&px width:&w height:&h] && px
+                  && ![self _isAllZeroPixels:px width:w height:h];
+        CFRelease(cached);
+        if (ok) {
+            self.lastError = nil;
+            *pixelsOut = px; *widthOut = w; *heightOut = h;
+            return YES;
+        }
+        if (px) { free(px); }
+        // 缓存读失败(全 0 等) → 丢弃缓存, 走重新创建
+        [self _setCachedScreenSurface:NULL];
     }
 
-    // createScreenIOSurface 必须在主线程调用(UIScreen/UIWindow 相关操作), 非主线程时异步派发 + 超时
-    __block IOSurfaceRef surf = NULL;
-    __block NSString *lastTry = @"未尝试";
-    void (^getSurfaceBlock)(void) = ^{
-        @autoreleasepool {
-            SEL sel = NSSelectorFromString(@"createScreenIOSurface");
-            if (!sel) { lastTry = @"selector 创建失败"; return; }
-
-            // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
-            // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
-            // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
-            // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
-            NSMutableArray *candidates = [NSMutableArray array];
-            [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](逆向+社区首选)
-            [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](个别版本)
-            [candidates addObject:[UIScreen mainScreen]];                 // -[UIScreen createScreenIOSurface](旧版代码路径)
-            @try {
-                UIApplication *app = [UIApplication sharedApplication];
-                if (app) {
-                    UIWindow *kw = [app valueForKey:@"keyWindow"];
-                    if (kw) { [candidates addObject:kw]; }                // -[keyWindow createScreenIOSurface]
-                    NSArray *wins = [app valueForKey:@"windows"];
-                    for (UIWindow *w in wins) {
-                        if (w && w != kw) { [candidates addObject:w]; }
-                    }
-                }
-            } @catch (NSException *e) {
-                NSLog(@"[TSScreenCapture] 枚举窗口候选异常: %@", e);
-            }
-
-            for (id target in candidates) {
-                NSString *targetDesc = NSStringFromClass([target class]);
-                if (!target) { continue; }
-                @try {
-                    if (![target respondsToSelector:sel]) {
-                        NSLog(@"[TSScreenCapture] 候选 %@ 无 createScreenIOSurface", targetDesc);
-                        continue;
-                    }
-                    NSMethodSignature *sig = [target methodSignatureForSelector:sel];
-                    if (!sig || sig.methodReturnLength < sizeof(void *)) {
-                        NSLog(@"[TSScreenCapture] 候选 %@ 签名异常", targetDesc);
-                        continue;
-                    }
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    inv.target = target;
-                    inv.selector = sel;
-                    [inv invoke];
-                    __unsafe_unretained IOSurfaceRef ios = NULL;
-                    [inv getReturnValue:&ios];
-                    if (ios && CFGetTypeID(ios) == typeIdFn()) {
-                        lastTry = targetDesc;
-                        surf = ios;
-                        NSLog(@"[TSScreenCapture] 候选 %@ createScreenIOSurface 返回 IOSurface %p", targetDesc, ios);
-                        break;
-                    } else {
-                        NSLog(@"[TSScreenCapture] 候选 %@ 返回空/非 IOSurface(%p)", targetDesc, ios);
-                    }
-                } @catch (NSException *e) {
-                    NSLog(@"[TSScreenCapture] 候选 %@ createScreenIOSurface 异常: %@", targetDesc, e);
-                }
-            }
-        }
-    };
+    // 2) 无缓存/缓存失效: 创建新 surface(createScreenIOSurface 必须主线程), 成功后缓存复用。
     if ([NSThread isMainThread]) {
-        getSurfaceBlock();
+        IOSurfaceRef s = [self _createUIScreenSurface];
+        [self _setCachedScreenSurface:s];
     } else {
+        // 首次创建才同步等待主线程(主线程空闲时毫秒级完成), 之后全部走缓存路径。
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_main_queue(), ^{
-            getSurfaceBlock();
+            IOSurfaceRef s = [self _createUIScreenSurface];
+            [self _setCachedScreenSurface:s];
             dispatch_semaphore_signal(sema);
         });
-        if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC)) != 0) {
-            TSSetLastError(@"路径0 UIScreenSurface: 主线程调用超时");
-            return NO;
-        }
+        dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC));
     }
+    IOSurfaceRef surf = [self _getCachedScreenSurface];
     if (!surf) {
-        TSSetLastError(@"路径0 UIScreenSurface: 全部候选均未返回 IOSurface(最后: %@, 需 iOS12+ 且 TrollStore 全权限环境)", lastTry);
-        NSLog(@"[TSScreenCapture] 全部候选均未返回 IOSurface (最后尝试: %@)", lastTry);
+        TSSetLastError(@"路径0 UIScreenSurface: 全部候选均未返回 IOSurface(需 iOS12+ 且 TrollStore 全权限环境)");
         return NO;
     }
 
+    // 3) 读像素(后台线程)
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (![self _dumpIOSurface:surf pixelsOut:&px width:&w height:&h] || !px) {
+    BOOL ok = [self _dumpIOSurface:surf pixelsOut:&px width:&w height:&h] && px;
+    CFRelease(surf);
+    if (!ok) {
         TSSetLastError(@"路径0 UIScreenSurface: surface 读取失败");
+        [self _setCachedScreenSurface:NULL];
         return NO;
     }
     if ([self _isAllZeroPixels:px width:w height:h]) {
         TSSetLastError(@"路径0 UIScreenSurface: 截到空内容(全 0)");
-        NSLog(@"[TSScreenCapture] createScreenIOSurface(候选 %@) 截到空内容", lastTry);
         free(px);
+        [self _setCachedScreenSurface:NULL];
         return NO;
     }
-    NSLog(@"[TSScreenCapture] createScreenIOSurface(候选 %@) 截屏成功 %dx%d", lastTry, w, h);
     self.lastError = nil;
     *pixelsOut = px; *widthOut = w; *heightOut = h;
     return YES;
@@ -1106,6 +1163,7 @@ static const char *_gsSurfaceKeys[] = {
 
 - (void)dealloc {
     if (_cachedPixels) { free(_cachedPixels); _cachedPixels = NULL; }
+    if (_cachedScreenSurface) { CFRelease(_cachedScreenSurface); _cachedScreenSurface = NULL; }
 }
 
 @end
