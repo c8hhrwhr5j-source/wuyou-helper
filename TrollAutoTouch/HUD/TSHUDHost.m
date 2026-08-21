@@ -126,20 +126,24 @@ static void HUDLog(NSString *fmt, ...) {
     NSLog(@"%@", msg);
 }
 
-// 设置 CAContext 是否不透明 (运行时解析 setOpaque: 选择器)。
-// 关键: remoteContextWithOptions: 创建的远程上下文默认 opaque=YES (背景白色)。
-// 若不设为 NO, 当弹窗/toast 移除后 context 内容为空时, WindowServer 端会把
-// 整个上下文合成为全屏白色 → 全屏白屏, 且该层 (level 10000) 盖住 SpringBoard
-// 全部 UI (状态栏/home 手势区/锁屏), 表现为"HOME 无效、电源键黑屏但白屏不消"。
-// 置为 NO 后, 未被内容覆盖的区域按透明合成, 游戏画面正常透出。
-static void TSHUDSetContextOpaque(id ctx, BOOL opaque) {
-    if (!ctx) return;
-    SEL sel = NSSelectorFromString(@"setOpaque:");
-    if (sel && [ctx respondsToSelector:sel]) {
-        void (*fn)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))[ctx methodForSelector:sel];
-        if (fn) fn(ctx, sel, opaque);
-    }
-}
+// 全屏白屏的根因与修复策略 (重要):
+// CAContext 是私有类, iOS/macOS 私有头均确认它没有任何 opaque/背景色属性,
+// 也没有 setOpaque: 方法。因此旧实现"远程上下文默认 opaque=YES、运行时调用
+// setOpaque:NO 置透明"的方案是无效的 (respondsToSelector 检查直接失败, 静默
+// 无操作), 白屏问题并未被修复。
+//
+// 实际机制: remoteContextWithOptions: 创建的远程上下文在 WindowServer 端有
+// 默认合成背景 (白色)。只要 context 内的 layer 树没有覆盖整个屏面的"已提交
+// 内容", 未被内容覆盖的区域就会按白色合成。本宿主窗口本身全透明 (clearColor),
+// 内容为空时 CA 不会把透明空 layer 提交成像素 → 整块区域保持默认白色。
+// 该 context 被 SBS 托管在 level 10000 (高于 SpringBoard 全部 UI), 结果就是
+// 全屏白屏 + 状态栏/HOME 手势区/锁屏全部被遮挡, 表现为"HOME 无响应"。
+//
+// 真正的修复在 start 里的"全屏透明垫层": 在窗口 layer 树底部永远挂一个覆盖
+// 整个屏面的近透明视图 (alpha=0.01, 与旧渲染锚点同色), 让远程上下文任意时刻
+// 都有覆盖全屏的已提交内容 → 整屏按 alpha≈0 合成, 游戏画面正常透出, 白屏
+// 不再出现。这也是 Go 版参考实现 (__fbInstallCAContextOverlay) 能正常工作的
+// 原因: 其 layer 树始终有全屏内容。
 
 // 主线程强制提交 Core Animation 事务:
 // App 处于后台时 (游戏在前台), CA 提交会被系统节流/跳过, 新添加的弹窗/toast
@@ -171,6 +175,7 @@ static void TSHUDFlushCATransaction(void) {
         _window = [[TSHUDHostWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         _window.windowLevel = UIWindowLevelStatusBar + 100;
         _window.backgroundColor = [UIColor clearColor];
+        _window.opaque = NO; // 透明窗口: layer.opaque 必须为 NO, 否则整窗按不透明合成
 
         // iOS 13+ scene-based app: 手动创建的 UIWindow 必须挂到某个
         // UIWindowScene, 否则不会参与渲染, layer 拿不到 CAContext
@@ -186,26 +191,39 @@ static void TSHUDFlushCATransaction(void) {
 
         _rootVC = [[UIViewController alloc] init];
         _rootVC.view.backgroundColor = [UIColor clearColor];
+        _rootVC.view.opaque = NO; // 透明合成前提: layer.opaque=NO
         _window.rootViewController = _rootVC;
+
+        // 全屏透明垫层 (白屏修复的关键, 取代旧 1x1 渲染锚点):
+        // ① 窗口 layer 树必须真正参与离屏渲染, layer 才会被分配 CAContext
+        //    (contextId≠0)。纯 clearColor 的空内容会被系统优化掉 → contextId=0
+        //    → SBS 托管永远失败。alpha=0.01 的近透明色: 肉眼不可见, 强制渲染。
+        // ② 远程上下文 (remoteContextWithOptions:) 在 WindowServer 端默认白色
+        //    合成背景, 若 context 内没有覆盖整个屏面的已提交内容, 未被覆盖的
+        //    区域按白色合成 → 全屏白屏 (level 10000 盖住 SpringBoard 全部 UI,
+        //    HOME 失效)。旧 1x1 锚点只能强制 context 存在, 1x1 之外仍是未渲染
+        //    区域 → 依旧白屏。本垫层铺满整个屏面 (位于内容层之下, 不随脚本
+        //    方向旋转), 保证 context 任意时刻都有覆盖全屏的已提交透明内容。
+        // 代价: 全屏约 1% 的黑色着色 (alpha=0.01), 肉眼不可见; findColor 的
+        // 相似度容差 (通常 ≥0.9) 完全覆盖该偏移, 不影响找色。
+        // 注意: 必须加在 _contentView 之前 (位于其下); userInteractionEnabled=NO
+        // 使 hitTest 返回 nil, 不拦截任何触摸。
+        UIView *backdrop = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        backdrop.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.01];
+        backdrop.layer.opaque = NO;
+        backdrop.userInteractionEnabled = NO;
+        backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [_rootVC.view addSubview:backdrop];
 
         // 内容容器: 所有弹窗/toast 挂载在此, 脚本方向旋转只作用于容器,
         // rootVC.view 保持系统管理 (frame 始终跟随 window.bounds, 不受旋转影响)。
         _contentView = [[UIView alloc] initWithFrame:_rootVC.view.bounds];
         _contentView.backgroundColor = [UIColor clearColor];
+        _contentView.opaque = NO;
         _contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [_rootVC.view addSubview:_contentView];
         // 窗口 hitTest 依据该容器做空白穿透 (命中容器本身 → 不消费触摸)
         _window.contentContainer = _contentView;
-
-        // 渲染锚点: 窗口内容必须真正参与离屏渲染, layer 才会被分配
-        // CAContext (contextId≠0)。纯 clearColor 的空内容会被系统优化掉,
-        // 导致 contextId 一直是 0 (ctxId=0 → SBS 托管永远失败)。
-        // 用 alpha=0.01 的近透明色: 肉眼不可见, 但强制窗口渲染。
-        UIView *anchor = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
-        anchor.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.01];
-        anchor.hidden = NO;
-        anchor.userInteractionEnabled = NO; // 渲染锚点不参与触摸, 避免吞掉 (0,0) 处点击
-        [_contentView addSubview:anchor];
 
         // ★ 关键: iOS 13+ 手动创建的 UIWindow 必须 makeKeyAndVisible
         // 才会被 scene 纳入渲染管线并分配 CAContext。
@@ -357,8 +375,10 @@ static void TSHUDFlushCATransaction(void) {
                 void (*setLayerFn)(id, SEL, CALayer *) = (void (*)(id, SEL, CALayer *))[_sbsCAContext methodForSelector:setLayerSel];
                 if (setLayerFn) setLayerFn(_sbsCAContext, setLayerSel, _window.layer);
             }
-            // app 激活后 context 可能重建, 保持透明背景 (见 TSHUDSetContextOpaque 注释)
-            TSHUDSetContextOpaque(_sbsCAContext, NO);
+            // app 激活后 context 可能重建: 重新 setLayer 挂上窗口 layer,
+            // 并 flush 确保全屏透明垫层等已有内容进入重建后的上下文 (否则
+            // 后台 CA 提交被节流, 上下文可能保持"无内容→白屏")。
+            TSHUDFlushCATransaction();
             return ctxId;
         }
         _sbsCAContext = nil; // context 失效, 重建
@@ -379,10 +399,16 @@ static void TSHUDFlushCATransaction(void) {
             }
         }
         if (caContextClass) {
-            // [CAContext remoteContextWithOptions:@{@"kCAContextIgnoresHitTest": @YES}]
+            // [CAContext remoteContextWithOptions:@{...}]
             SEL remoteSel = NSSelectorFromString(@"remoteContextWithOptions:");
             if (remoteSel && [caContextClass respondsToSelector:remoteSel]) {
-                NSDictionary *opts = @{@"kCAContextIgnoresHitTest": @YES};
+                // kCAContextIgnoresHitTest: 触摸穿透 (不拦截下层 app 的触摸)。
+                // kCAContextUseAlpha: 请求带 alpha 通道的 surface (透明合成前提;
+                // 该 key 在 iOS 运行时即使被忽略也无害, 全屏垫层仍兜底)。
+                NSDictionary *opts = @{
+                    @"kCAContextIgnoresHitTest": @YES,
+                    @"kCAContextUseAlpha": @YES,
+                };
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 id ctx = [caContextClass performSelector:remoteSel withObject:opts];
@@ -403,12 +429,13 @@ static void TSHUDFlushCATransaction(void) {
                     }
                     if (ctxId != 0) {
                         _sbsCAContext = ctx;
-                        // 关键修复: 远程上下文默认 opaque(白色背景), 置为透明,
-                        // 否则弹窗移除后 context 内容为空 → 全屏白屏 (见 TSHUDSetContextOpaque 注释)
-                        TSHUDSetContextOpaque(ctx, NO);
-                        // [CATransaction flush] 提交渲染, 确保内容进入 context
+                        // [CATransaction flush] 提交渲染: 把全屏透明垫层等已有
+                        // 内容一次性提交进远程上下文。不 flush 的话后台时 CA
+                        // 提交被节流, context 可能保持"无内容 → 白屏"。
+                        // 透明性由①带 alpha 的 surface + ②全屏透明垫层共同保证
+                        // (CAContext 没有 setOpaque: 方法, 无 API 可调)。
                         TSHUDFlushCATransaction();
-                        HUDLog(@"CAContext created explicitly: ctxId=%u (opaque=NO)", ctxId);
+                        HUDLog(@"CAContext created explicitly: ctxId=%u (alpha surface + fullscreen backdrop)", ctxId);
                         return ctxId;
                     }
                     _sbsCAContext = nil;
