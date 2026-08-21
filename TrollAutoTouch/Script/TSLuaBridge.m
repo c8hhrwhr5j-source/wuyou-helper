@@ -1429,6 +1429,12 @@ static BOOL TS_ScriptUIExists(NSString *name) {
 //                 点"‹ 返回"   → 返回 false (按默认配置继续)
 //   阻塞期间可点主界面"停止"取消: 返回 false 并强制关闭设置页。
 //   用法: 在 main.lua 开头写死 if ui.open("main") then ... end
+//
+//   非前台场景: App 在后台 (游戏等 app 在前台) 时, iOS 会暂停 App 的渲染,
+//   即使 HUD 远程上下文托管成功, WKWebView 网页内容也无法提交 → 设置页空白。
+//   因此 ui.open 触发时若 App 不在前台, 先把本 App 切回前台恢复渲染, 等约
+//   1 秒后再显示设置页; 设置页关闭后自动切回原前台 App, 脚本流程不被中断。
+//   若 1 秒后仍未切回前台 (切前台失败), 回退到 TSHUDHost 系统级层承载。
 static int l_ui_open(lua_State *L) {
     const char *nameC = luaL_checkstring(L, 1);
     NSString *name = [NSString stringWithUTF8String:nameC];
@@ -1441,7 +1447,12 @@ static int l_ui_open(lua_State *L) {
     __block BOOL ran = NO;
     __block BOOL finished = NO;
     __block TSScriptUIViewController *vc = nil;
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // 打开设置页前的前台 App (仅"强制切回本 App"路径使用):
+    // 设置页关闭后切回该 App, 保证脚本流程连续 (游戏自动化不被中断)。
+    __block NSString *prevFrontBid = nil;
+
+    // 显示设置页 (主线程)。强制切到前台后延迟调用, 确保 App 渲染已恢复。
+    void (^showScriptUI)(void) = ^{
         BOOL appActive = ([UIApplication sharedApplication].applicationState == UIApplicationStateActive);
         vc = [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
         vc.onFinish = ^(BOOL didRun) {
@@ -1450,11 +1461,19 @@ static int l_ui_open(lua_State *L) {
                 finished = YES;
                 dispatch_semaphore_signal(sem);
             }
+            // 若 ui.open 之前把本 App 强制切到前台 (原本在游戏等 app),
+            // 设置页关闭后切回原前台 App, 脚本继续在原 App 上执行。
+            if (prevFrontBid.length > 0) {
+                NSString *bid = prevFrontBid;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [[TSAppManager shared] openApp:bid];
+                });
+            }
         };
         if (!appActive) {
-            // App 在后台 (游戏等 app 在前台): 主窗口 present 不可见。
-            // 改用 TSHUDHost 系统级层承载网页设置页 (挂到 SpringBoard accessibility
-            // 托管层), 使设置界面直接弹出到任意前台 App 之上。
+            // 延迟 1 秒后仍不在前台 (切前台失败): 回退到 TSHUDHost 系统级层
+            // 承载 (原逻辑), 挂上去能看到就看, 看不到也不阻塞脚本。
             vc.hostedInHUD = YES;
             BOOL shown = [[TSHUDHost shared] presentViewControllerInHUD:vc];
             if (!shown) {
@@ -1476,12 +1495,34 @@ static int l_ui_open(lua_State *L) {
         UIViewController *top = keyWindow.rootViewController;
         while (top.presentedViewController) top = top.presentedViewController;
         if (!top) {
-            // 无可用窗口(如 App 后台), 直接结束等待, 避免 Lua 永久卡死
+            // 无可用窗口, 直接结束等待, 避免 Lua 永久卡死
             finished = YES;
             dispatch_semaphore_signal(sem);
             return;
         }
         [top presentViewController:vc animated:YES completion:nil];
+    };
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+            // App 不在前台 (游戏等 app 在前台): 后台时 iOS 暂停 App 渲染,
+            // 即使 HUD 远程上下文托管成功, WKWebView 网页内容也无法提交到
+            // 系统层 → 设置页空白。先把本 App 切回前台恢复渲染, 等约 1 秒
+            // (页面加载 + 渲染稳定) 后再显示设置页。
+            NSLog(@"[TrollAutoTouch] ui.open(%@): App 不在前台, 先切回前台(1s)再显示", name);
+            prevFrontBid = [[TSAppManager shared] frontBid];
+            if (prevFrontBid.length == 0 ||
+                [prevFrontBid isEqualToString:[NSBundle mainBundle].bundleIdentifier]) {
+                prevFrontBid = nil; // 本就在本 App / 获取失败, 无需切回
+            }
+            [[TSAppManager shared] openApp:[NSBundle mainBundle].bundleIdentifier];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                showScriptUI();
+            });
+            return;
+        }
+        showScriptUI();
     });
 
     // Lua 线程阻塞等待: 分段等待并检查停止标志, 保证点"停止"后设置页立即关闭
