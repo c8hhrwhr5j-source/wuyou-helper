@@ -12,6 +12,7 @@
 @implementation TSAudioKeepAlive {
     AVAudioEngine *_engine;
     AVAudioPlayerNode *_player;
+    NSInteger _refCount;
 }
 
 + (instancetype)shared {
@@ -23,8 +24,12 @@
     return inst;
 }
 
+// 引用计数: TAS 服务开启期间常驻持有 1 份, 脚本运行再 +1;
+// stop 只减计数, 归零才真正停止引擎。保证服务开启时音频会话始终激活,
+// 音量键轮询的 outputVolume 读值实时可用。
 - (void)start {
     @synchronized (self) {
+        _refCount++;
         if (_engine) return; // 已在运行
 
         NSError *err = nil;
@@ -69,6 +74,8 @@
 
 - (void)stop {
     @synchronized (self) {
+        if (_refCount > 0) _refCount--;
+        if (_refCount > 0) return; // 仍有其他持有者, 保持引擎运行
         if (!_engine) return;
         [_player stop];
         [_engine stop];

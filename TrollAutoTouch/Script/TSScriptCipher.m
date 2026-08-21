@@ -21,19 +21,21 @@ static const uint32_t kDelta = 0x9E3779B9;
 static void xxtea_encrypt(uint32_t *v, uint32_t n, const uint32_t key[4]) {
     if (n == 0) return;
     if (n == 1) { v[0] += key[0]; return; }
-    uint32_t y = v[n - 1];
+    // 标准 XXTEA: z 为末尾/上一轮结果, y 为下一字, 与下方 xxtea_decrypt 严格互逆。
+    uint32_t z = v[n - 1];
     uint32_t sum = 0;
     uint32_t rounds = 6 + 52 / n;
     do {
         sum += kDelta;
         uint32_t e = (sum >> 2) & 3;
         for (uint32_t p = 0; p < n - 1; p++) {
-            uint32_t z = v[p + 1];
+            uint32_t y = v[p + 1];
             v[p] += (((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum ^ y) + (key[(p & 3) ^ e] ^ z)));
-            y = v[p];
+            z = v[p];
         }
-        uint32_t z = v[0];
-        v[n - 1] += (((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum ^ y) + (key[((n - 1) & 3) ^ e] ^ z)));
+        uint32_t y = v[0];
+        // 关键: z 必须更新为新的末字, 供下一轮首个 MX 使用 (否则与解密不互逆)
+        z = v[n - 1] += (((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum ^ y) + (key[((n - 1) & 3) ^ e] ^ z)));
     } while (--rounds);
 }
 
@@ -54,6 +56,8 @@ static void xxtea_decrypt(uint32_t *v, uint32_t n, const uint32_t key[4]) {
         }
         z = v[n - 1];
         v[0] -= (((z >> 5 ^ y << 2) + (y >> 3 ^ z << 4)) ^ ((sum ^ y) + (key[0 ^ e] ^ z)));
+        // 关键: y 必须更新为新的 v[0], 供下一轮首个 MX 使用 (否则与加密不互逆)
+        y = v[0];
         sum -= kDelta;
     } while (--rounds);
 }

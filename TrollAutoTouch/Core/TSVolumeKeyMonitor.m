@@ -21,6 +21,7 @@ static const NSTimeInterval TSVolumePollInterval = 0.2;
     dispatch_source_t _timer;
     float _lastVolume;
     BOOL _running;
+    NSInteger _warmupTicks;
 }
 
 + (instancetype)shared {
@@ -33,14 +34,28 @@ static const NSTimeInterval TSVolumePollInterval = 0.2;
 }
 
 - (float)_currentVolume {
-    // 只读属性, 不激活/不修改 AudioSession, 对后台播放/系统音量零影响。
     return [AVAudioSession sharedInstance].outputVolume;
 }
 
 - (void)start {
     if (_running) return;
     _running = YES;
+
+    // 关键: 激活音频会话(Playback + 混播), 让 outputVolume 读值实时可用。
+    // 会话未激活时 iOS 不会向 App 推送音量变化, 读值会停滞在旧值/0,
+    // 表现为"空闲时按音量键检测不到变化 → 无法启动脚本"。
+    NSError *err = nil;
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    if (![session setCategory:AVAudioSessionCategoryPlayback
+                 withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                       error:&err]) {
+        NSLog(@"[TSVolumeKeyMonitor] 设置 audio session 失败: %@", err);
+    } else {
+        [session setActive:YES error:NULL];
+    }
+
     _lastVolume = [self _currentVolume];
+    _warmupTicks = 3; // 启动后 0.6s 内只校准基准音量, 不触发按键回调
 
     dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
     _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
@@ -71,6 +86,12 @@ static const NSTimeInterval TSVolumePollInterval = 0.2;
     // 不会误判, 又能吸收读值抖动。
     if (fabsf(vol - _lastVolume) < 0.001f) return;
     _lastVolume = vol;
+    // 启动初期仅校准基准: 吸收会话刚激活时读值从 0/陈旧跳到真实值,
+    // 避免误触发, 也不影响后续真实按键的检测。
+    if (_warmupTicks > 0) {
+        _warmupTicks--;
+        return;
+    }
     if (self.onVolumeKey) {
         self.onVolumeKey();
     }

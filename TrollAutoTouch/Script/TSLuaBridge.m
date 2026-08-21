@@ -1891,13 +1891,17 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 //   空闲未运行 → 弹"运行脚本/取消"选择(运行当前选中脚本);
 //   脚本运行中 → App 前台弹选择菜单; App 后台(游戏等)走 HUD 系统级弹窗
 //              (SBSAccessibilityWindowHostingController 托管, 可覆盖游戏)。
+// 音量键防抖时间戳(仅主线程访问): 单次按键可能产生音量一次变化,
+// 快速连按/音量回跳在 0.8s 内忽略; 弹窗关闭时重置为 0, 避免吞掉
+// 紧接着的下一次按键(如"取消后马上再按")。
+static NSTimeInterval g_lastVolumeKeyAt = 0;
+static const NSTimeInterval g_volumeKeyDebounce = 0.8;
+
 - (void)_handleVolumeKey {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 防抖: 单次按键可能产生音量一次变化, 快速连按/音量回跳在 0.8s 内忽略。
-        static NSTimeInterval s_lastKeyAt = 0;
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        if ((now - s_lastKeyAt) < 0.8) return;
-        s_lastKeyAt = now;
+        if ((now - g_lastVolumeKeyAt) < g_volumeKeyDebounce) return;
+        g_lastVolumeKeyAt = now;
 
         // 诊断日志: 确认音量键轮询已触发 + 当前脚本运行状态, 便于排查"按音量没反应"
         lua_log([NSString stringWithFormat:@"[音量键] 按下 (isRunning=%d, appState=%ld)",
@@ -1930,6 +1934,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     vm.onVolumeKey = ^{
         [weakSelf _handleVolumeKey];
     };
+    // TAS 服务开启期间常驻静音保活: 音频会话始终激活, outputVolume 读值
+    // 实时可用, 空闲时按音量键也能被检测到; 引用计数与脚本运行互不干扰。
+    [[TSAudioKeepAlive shared] start];
     [vm start];
     lua_log(@"[音量键] 常驻监听已启动 (TAS 服务开)");
 }
@@ -1937,6 +1944,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 - (void)stopGlobalVolumeMonitoring {
     [TSVolumeKeyMonitor shared].onVolumeKey = nil;
     [[TSVolumeKeyMonitor shared] stop];
+    [[TSAudioKeepAlive shared] stop];
     lua_log(@"[音量键] 常驻监听已停止 (TAS 服务关)");
 }
 
@@ -1952,6 +1960,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     if (!name.length) {
         dispatch_async(dispatch_get_main_queue(), ^{
             s_idleMenuShowing = NO;
+            g_lastVolumeKeyAt = 0;
             [[TSHUDHost shared] showToast:@"未选中脚本，请先在配置页选中" duration:1.2 hidden:NO];
         });
         lua_log(@"[音量键] 空闲: 未选中脚本, 忽略");
@@ -1961,6 +1970,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             s_idleMenuShowing = NO;
+            g_lastVolumeKeyAt = 0;
             [[TSHUDHost shared] showToast:@"所选脚本已不存在" duration:1.2 hidden:NO];
         });
         lua_log(@"[音量键] 空闲: 选中脚本不存在, 忽略");
@@ -1976,6 +1986,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
                                                                      timeout:0];
         dispatch_async(dispatch_get_main_queue(), ^{
             s_idleMenuShowing = NO;
+            g_lastVolumeKeyAt = 0; // 弹窗关闭后立即允许再次按键触发
             if ([clicked isEqualToString:@"运行"]) {
                 NSString *content = [[TSToolExecutor shared] readTextFile:path];
                 if ([TSScriptCipher isEncryptedContent:content]) {

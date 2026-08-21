@@ -179,7 +179,7 @@
         return;
     }
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"加密脚本"
-                                                                    message:[NSString stringWithFormat:@"将 %@ 加密为 %@？\n加密后脚本仍可运行，但无法以明文查看源码。", e.name, newName]
+                                                                    message:[NSString stringWithFormat:@"将 %@ 加密为 %@？\n加密后脚本仍可运行，但无法以明文查看源码。\n原始 .lua 文件会保留。", e.name, newName]
                                                              preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"加密" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         NSString *cipher = [TSScriptCipher encryptScript:plain];
@@ -187,16 +187,12 @@
             [self _alert:@"加密失败" msg:@"生成加密脚本失败"];
             return;
         }
-        if ([[TSToolExecutor shared] writeTextFile:newPath content:cipher] &&
-            [[TSToolExecutor shared] removeItem:e.path]) {
-            // 若加密的正是音量键选中的脚本, 同步选中状态 (名字不变, 后缀变了)
-            if ([[TSScriptListViewController selectedScriptName] isEqualToString:e.name]) {
-                [TSScriptListViewController setSelectedScriptName:newName];
-            }
+        // 只新建 .tas, 保留原始 .lua (便于后续修改/重新加密); 选中状态不变
+        if ([[TSToolExecutor shared] writeTextFile:newPath content:cipher]) {
             [self _reload];
-            [[TSHUDHost shared] showToast:@"已加密" duration:1.2 hidden:NO];
+            [[TSHUDHost shared] showToast:@"已加密，原 .lua 已保留" duration:1.2 hidden:NO];
         } else {
-            [self _alert:@"加密失败" msg:@"写入或删除文件失败"];
+            [self _alert:@"加密失败" msg:@"写入文件失败"];
         }
     }]];
     [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
