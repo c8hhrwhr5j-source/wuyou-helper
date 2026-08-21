@@ -20,6 +20,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 最近的全部日志（最多保留 2000 条，带时间戳，两类日志合并）
 @property (nonatomic, readonly) NSArray<NSString *> *logs;
 
+/// 按日志来源返回内存日志（最多各保留 2000 条，带时间戳）:
+///   fileName == "debug.log" → 脚本主动日志 (main.lua 的 log/logStr/print)
+///   其他 (如 "touch.log")   → 程序自身日志
+/// 供设置页"查看脚本日志"/"查看系统日志"按来源分别展示。
+- (NSArray<NSString *> *)logsForFile:(NSString *)fileName;
+
 /// 程序自身日志文件完整路径 /var/mobile/touch/log/touch.log
 @property (nonatomic, readonly) NSString *logFilePath;
 

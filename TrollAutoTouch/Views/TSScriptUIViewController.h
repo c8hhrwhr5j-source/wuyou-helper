@@ -34,6 +34,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 是否由网页"取消"按钮触发关闭 (只读, 供脚本内 ui.open() 判断是否已自行关闭)。
 @property (nonatomic, readonly) BOOL cancelRequested;
 
+/// HUD 承载模式: YES 表示该页面由 TSHUDHost 系统级层承载 (App 在后台、
+/// 游戏等 app 在前台时 ui.open 弹出), 其 view 直接挂到 HUD 内容层而不是
+/// 被 present。关闭时直接从 HUD 层移除 view, 不再走 dismissViewControllerAnimated:。
+@property (nonatomic, assign) BOOL hostedInHUD;
+
 @end
 
 NS_ASSUME_NONNULL_END

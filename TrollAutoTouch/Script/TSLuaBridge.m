@@ -21,6 +21,7 @@
 
 #import "TSLuaBridge.h"
 #import "../Common/TSLogStore.h"
+#import "../HUD/TSHUDHost.h"
 #import <UIKit/UIKit.h>
 
 NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningStateChanged";
@@ -1441,7 +1442,31 @@ static int l_ui_open(lua_State *L) {
     __block BOOL finished = NO;
     __block TSScriptUIViewController *vc = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 找到当前可 present 的顶层控制器(主窗口), 与 TSShowBlockingAlert 一致
+        BOOL appActive = ([UIApplication sharedApplication].applicationState == UIApplicationStateActive);
+        vc = [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
+        vc.onFinish = ^(BOOL didRun) {
+            if (!finished) {
+                ran = didRun;
+                finished = YES;
+                dispatch_semaphore_signal(sem);
+            }
+        };
+        if (!appActive) {
+            // App 在后台 (游戏等 app 在前台): 主窗口 present 不可见。
+            // 改用 TSHUDHost 系统级层承载网页设置页 (挂到 SpringBoard accessibility
+            // 托管层), 使设置界面直接弹出到任意前台 App 之上。
+            vc.hostedInHUD = YES;
+            BOOL shown = [[TSHUDHost shared] presentViewControllerInHUD:vc];
+            if (!shown) {
+                // HUD 不可用 (SBS 未托管成功 且 app 不在前台): 挂上去也看不到,
+                // 直接结束等待, 避免 Lua 永久卡死 (脚本按默认配置继续)。
+                vc = nil;
+                finished = YES;
+                dispatch_semaphore_signal(sem);
+            }
+            return;
+        }
+        // App 前台: 在主窗口 present (原逻辑)
         NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
         UIWindow *keyWindow = nil;
         for (UIWindow *w in windows) {
@@ -1456,14 +1481,6 @@ static int l_ui_open(lua_State *L) {
             dispatch_semaphore_signal(sem);
             return;
         }
-        vc = [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
-        vc.onFinish = ^(BOOL didRun) {
-            if (!finished) {
-                ran = didRun;
-                finished = YES;
-                dispatch_semaphore_signal(sem);
-            }
-        };
         [top presentViewController:vc animated:YES completion:nil];
     });
 
@@ -1479,7 +1496,12 @@ static int l_ui_open(lua_State *L) {
         // 不再重复 dismiss。
         if (vc && !vc.cancelRequested) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [vc dismissViewControllerAnimated:NO completion:nil];
+                if (vc.hostedInHUD) {
+                    // HUD 承载模式: 直接移除 view (未被 present, dismiss 无效)
+                    [[TSHUDHost shared] dismissViewControllerFromHUD:vc];
+                } else {
+                    [vc dismissViewControllerAnimated:NO completion:nil];
+                }
             });
         }
         lua_pushboolean(L, 0);

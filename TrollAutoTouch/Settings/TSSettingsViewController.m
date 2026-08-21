@@ -223,7 +223,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     // TAS 服务关闭时列表不收缩: 远程访问/触摸显示/悬浮窗等开关始终可见
     if (section == 0) return 5;
-    return 2; // 通用: 查看日志 + 性能面板
+    return 3; // 通用: 查看脚本日志 + 查看系统日志 + 性能面板
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
@@ -232,7 +232,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.section == 1) {
-        if (ip.row == 1) {
+        if (ip.row == 2) {
             // 性能面板: 作为表格行随主界面上下滑动
             UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"perf"];
             c.backgroundColor = [TSColors card];
@@ -250,10 +250,17 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
         UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"action"];
         c.backgroundColor = [TSColors card];
-        c.textLabel.text = @"查看日志";
         c.textLabel.textColor = [TSColors label];
         c.textLabel.font = [UIFont systemFontOfSize:15];
-        c.imageView.image = [self _icon:@"list.bullet.rectangle"];
+        if (ip.row == 0) {
+            // 查看脚本日志: main.lua 主动 log/logStr/print (debug.log)
+            c.textLabel.text = @"查看脚本日志";
+            c.imageView.image = [self _icon:@"text.bubble"];
+        } else {
+            // 查看系统日志: 程序自身日志 (touch.log)
+            c.textLabel.text = @"查看系统日志";
+            c.imageView.image = [self _icon:@"list.bullet.rectangle"];
+        }
         c.imageView.tintColor = [TSColors tint];
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         c.selectionStyle = UITableViewCellSelectionStyleDefault;
@@ -300,15 +307,17 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
-    if (ip.section == 1 && ip.row == 1) return 160;
+    if (ip.section == 1 && ip.row == 2) return 160;
     return 44;
 }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
-    if (ip.section == 1 && ip.row == 0) {
-        TSLogViewController *vc = [[TSLogViewController alloc] init];
+    if (ip.section == 1) {
+        // row0 = 查看脚本日志(debug.log), row1 = 查看系统日志(touch.log)
+        TSLogViewController *vc = [[TSLogViewController alloc]
+                                   initWithMode:(ip.row == 0 ? @"script" : @"system")];
         [self.navigationController pushViewController:vc animated:YES];
         return;
     }

@@ -33,7 +33,9 @@ static NSDateFormatter *LogTimeFormatter(void) {
 }
 
 @implementation TSLogStore {
-    NSMutableArray<NSString *> *_logs;
+    NSMutableArray<NSString *> *_logs;             // 合并日志(全部, 向后兼容)
+    NSMutableArray<NSString *> *_touchLogs;        // 程序自身日志(touch.log 来源)
+    NSMutableArray<NSString *> *_debugLogs;        // 脚本主动日志(debug.log 来源)
     NSMutableArray<NSString *> *_filePending;      // 待写 touch.log 的日志行(锁保护)
     NSMutableArray<NSString *> *_debugPending;     // 待写 debug.log 的日志行(锁保护)
 }
@@ -51,6 +53,8 @@ static NSDateFormatter *LogTimeFormatter(void) {
     self = [super init];
     if (self) {
         _logs = [NSMutableArray array];
+        _touchLogs = [NSMutableArray array];
+        _debugLogs = [NSMutableArray array];
         _filePending = [NSMutableArray array];
         _debugPending = [NSMutableArray array];
         [self _loadHistoryFromFile];
@@ -58,10 +62,16 @@ static NSDateFormatter *LogTimeFormatter(void) {
     return self;
 }
 
-/// 启动时从本地日志文件加载历史，保证关闭重开 app 后日志仍可见
+/// 启动时从本地日志文件加载历史，保证关闭重开 app 后日志仍可见。
+/// 两个日志文件分别加载到对应来源数组, 并合并进 _logs。
 - (void)_loadHistoryFromFile {
     [TSPaths ensureDirectoriesExist];
-    NSString *content = [NSString stringWithContentsOfFile:self.logFilePath
+    [self _loadFile:self.logFilePath into:_touchLogs];
+    [self _loadFile:self.debugLogFilePath into:_debugLogs];
+}
+
+- (void)_loadFile:(NSString *)path into:(NSMutableArray<NSString *> *)source {
+    NSString *content = [NSString stringWithContentsOfFile:path
                                                   encoding:NSUTF8StringEncoding
                                                      error:nil];
     if (content.length == 0) return;
@@ -69,7 +79,11 @@ static NSDateFormatter *LogTimeFormatter(void) {
     @synchronized (self) {
         for (NSString *line in lines) {
             if (line.length == 0) continue;
+            [source addObject:line];
             [_logs addObject:line];
+            if (source.count > kMaxLogCount) {
+                [source removeObjectsInRange:NSMakeRange(0, source.count - kMaxLogCount)];
+            }
             if (_logs.count > kMaxLogCount) {
                 [_logs removeObjectsInRange:NSMakeRange(0, _logs.count - kMaxLogCount)];
             }
@@ -92,13 +106,23 @@ static NSDateFormatter *LogTimeFormatter(void) {
     }
 }
 
+// 按来源返回内存日志: "debug.log" → 脚本主动日志, 其他 → 程序自身日志。
+// 供设置页"查看脚本日志"/"查看系统日志"分别展示, 来源互不混入。
+- (NSArray<NSString *> *)logsForFile:(NSString *)fileName {
+    @synchronized (self) {
+        if ([fileName isEqualToString:@"debug.log"]) return [_debugLogs copy];
+        return [_touchLogs copy];
+    }
+}
+
 // 默认入口: 程序自身产生的日志 → touch.log
 - (void)append:(NSString *)message {
     [self append:message toFile:@"touch.log"];
 }
 
 // 分类入口: fileName 为 log 目录下的文件名 ("touch.log" 或 "debug.log")。
-// 两类日志统一进内存 _logs(UI 查看日志时全部可见), 落盘按文件分流:
+// 两类日志统一进内存 _logs(向后兼容), 并按来源分别进 _touchLogs/_debugLogs
+// (设置页"查看系统日志/脚本日志"按来源展示), 落盘按文件分流:
 //   touch.log = 程序自身日志(引擎诊断/运行时/senderID/脚本启停等)
 //   debug.log = main.lua 主动写入的 log/logStr/print
 - (void)append:(NSString *)message toFile:(NSString *)fileName {
@@ -113,6 +137,12 @@ static NSDateFormatter *LogTimeFormatter(void) {
         [_logs addObject:line];
         if (_logs.count > kMaxLogCount) {
             [_logs removeObjectsInRange:NSMakeRange(0, _logs.count - kMaxLogCount)];
+        }
+        // 来源分离: debug.log → 脚本日志数组, 其余 → 程序自身日志数组
+        NSMutableArray *sourceLogs = [fileName isEqualToString:@"debug.log"] ? _debugLogs : _touchLogs;
+        [sourceLogs addObject:line];
+        if (sourceLogs.count > kMaxLogCount) {
+            [sourceLogs removeObjectsInRange:NSMakeRange(0, sourceLogs.count - kMaxLogCount)];
         }
         // 批量落盘: 攒满一批立即写; 否则 1s 兜底, 避免逐条 open/close 文件
         NSMutableArray *pending = [fileName isEqualToString:@"debug.log"] ? _debugPending : _filePending;
@@ -129,6 +159,8 @@ static NSDateFormatter *LogTimeFormatter(void) {
 - (void)clear {
     @synchronized (self) {
         [_logs removeAllObjects];
+        [_touchLogs removeAllObjects];
+        [_debugLogs removeAllObjects];
         [_filePending removeAllObjects];
         [_debugPending removeAllObjects];
         [[NSFileManager defaultManager] removeItemAtPath:self.logFilePath error:nil];

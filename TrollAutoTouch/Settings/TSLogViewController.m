@@ -7,7 +7,9 @@
 #import "../Common/TSLogStore.h"
 #import "../Common/TSPaths.h"
 
-@interface TSLogViewController ()
+@interface TSLogViewController () {
+    NSString *_mode;   // @"script" = 脚本日志, @"system" = 系统日志
+}
 
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) NSTimer *refreshTimer;
@@ -16,13 +18,42 @@
 
 @implementation TSLogViewController
 
+- (instancetype)initWithMode:(NSString *)mode {
+    self = [super init];
+    if (self) {
+        _mode = [mode isEqualToString:@"script"] ? @"script" : @"system";
+    }
+    return self;
+}
+
+- (instancetype)init {
+    return [self initWithMode:@"system"];
+}
+
+// 页面展示名: 脚本日志 / 系统日志
+- (NSString *)_displayName {
+    return [_mode isEqualToString:@"script"] ? @"脚本日志" : @"系统日志";
+}
+
+// 来源文件名: debug.log(脚本主动日志) / touch.log(程序自身日志)
+- (NSString *)_fileName {
+    return [_mode isEqualToString:@"script"] ? @"debug.log" : @"touch.log";
+}
+
+// 对应日志文件完整路径
+- (NSString *)_filePath {
+    return [_mode isEqualToString:@"script"]
+        ? [TSLogStore shared].debugLogFilePath
+        : [TSLogStore shared].logFilePath;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     self.view.backgroundColor = [TSColors bg];
 
     UILabel *title = [[UILabel alloc] init];
-    title.text = @"运行日志";
+    title.text = [self _displayName];
     title.font = [UIFont boldSystemFontOfSize:17];
     title.textColor = [TSColors label];
     [title sizeToFit];
@@ -68,18 +99,22 @@
 }
 
 - (void)_refresh {
-    // 顶部显示日志文件路径，便于用户在本地找到历史日志。
-    // 落盘分类: touch.log = 程序自身日志, debug.log = main.lua 主动 log/logStr/print。
-    NSString *touchPath = [TSLogStore shared].logFilePath;
-    NSString *debugPath = [TSLogStore shared].debugLogFilePath;
+    // 顶部标注日志来源, 界面清晰区分两类日志; 并显示对应文件路径便于本地查找。
     NSMutableString *content = [NSMutableString string];
-    [content appendString:[NSString stringWithFormat:@"程序日志: %@\n", touchPath]];
-    [content appendString:[NSString stringWithFormat:@"脚本日志: %@\n", debugPath]];
+    if ([_mode isEqualToString:@"script"]) {
+        [content appendString:@"脚本日志 (main.lua 主动 log/logStr/print)\n"];
+    } else {
+        [content appendString:@"系统日志 (程序自身日志)\n"];
+    }
+    [content appendString:[NSString stringWithFormat:@"文件: %@\n", [self _filePath]]];
     [content appendString:@"────────────────────────\n"];
-    [content appendString:[[[TSLogStore shared].logs componentsJoinedByString:@"\n"]
+    // 仅展示本来源的日志, 另一类日志不混入
+    NSArray<NSString *> *lines = [[TSLogStore shared] logsForFile:[self _fileName]];
+    [content appendString:[[lines componentsJoinedByString:@"\n"]
                            stringByAppendingString:@"\n"]];
     _textView.text = content;
 
+    // 自动滚动到最新日志明细
     if (content.length > 0) {
         [_textView scrollRangeToVisible:NSMakeRange(content.length - 1, 1)];
     }
@@ -91,13 +126,15 @@
 }
 
 - (void)_copy {
-    // 复制全部日志内容到剪贴板(不含文件路径头)
-    NSString *logs = [[[TSLogStore shared].logs componentsJoinedByString:@"\n"]
+    // 复制当前来源的日志内容到剪贴板(不含文件路径头)
+    NSArray<NSString *> *lines = [[TSLogStore shared] logsForFile:[self _fileName]];
+    NSString *logs = [[lines componentsJoinedByString:@"\n"]
                       stringByAppendingString:@"\n"];
     UIPasteboard.generalPasteboard.string = logs;
 
+    NSString *msg = [_mode isEqualToString:@"script"] ? @"已复制脚本日志" : @"已复制系统日志";
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:nil
-                                                               message:@"已复制全部日志"
+                                                               message:msg
                                                         preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:ac animated:YES completion:^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

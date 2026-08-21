@@ -650,6 +650,76 @@ static void TSHUDFlushCATransaction(void) {
     });
 }
 
+#pragma mark - 承载 UIViewController (App 后台时 ui.open 网页设置页)
+
+- (BOOL)presentViewControllerInHUD:(UIViewController *)vc {
+    if (!vc) return NO;
+    [self ensureStartedOnMainThread];
+    __block BOOL shown = NO;
+    if ([NSThread isMainThread]) {
+        shown = [self _attachVCToHUD:vc];
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            shown = [self _attachVCToHUD:vc];
+        });
+    }
+    return shown;
+}
+
+- (void)dismissViewControllerFromHUD:(UIViewController *)vc {
+    if (!vc) return;
+    if ([NSThread isMainThread]) {
+        [self _detachVCFromHUD:vc];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _detachVCFromHUD:vc];
+        });
+    }
+}
+
+// 把 vc.view 全屏挂到 HUD 内容层, 并手动触发 appearance 回调。
+// UIView 级承载不经过 UIKit 的 present 流程, viewWillAppear:/viewDidAppear:
+// 不会自动调用, 需用 beginAppearanceTransition:/endAppearanceTransition: 补齐。
+- (BOOL)_attachVCToHUD:(UIViewController *)vc {
+    @try {
+        // 可见性检查: 与 presentAlert 一致。SBS 未托管成功 且 app 不在前台时,
+        // 挂上去也看不到, 返回 NO 让调用方立即结束阻塞等待。
+        if (_registeredContextId == 0 &&
+            [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+            HUDLog(@"presentViewControllerInHUD skipped: not foreground & SBS not registered");
+            return NO;
+        }
+        UIView *host = [self _displayContentView];
+        if (!host) return NO;
+        // 全屏铺满内容层; 内容层随脚本坐标系旋转, 网页设置页跟随 (横屏游戏时横屏显示)
+        vc.view.frame = host.bounds;
+        vc.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [vc beginAppearanceTransition:YES animated:NO];
+        [host addSubview:vc.view];
+        [vc endAppearanceTransition];
+        // 后台时 CA 提交会被节流/跳过, 显式 flush 确保网页设置页立即同步到远程上下文。
+        TSHUDFlushCATransaction();
+        HUDLog(@"presentViewControllerInHUD attached: %@", NSStringFromClass([vc class]));
+        return YES;
+    } @catch (NSException *e) {
+        HUDLog(@"presentViewControllerInHUD exception: %@", e);
+        return NO;
+    }
+}
+
+- (void)_detachVCFromHUD:(UIViewController *)vc {
+    @try {
+        if (vc.view.superview == nil) return;
+        [vc beginAppearanceTransition:NO animated:NO];
+        [vc.view removeFromSuperview];
+        [vc endAppearanceTransition];
+        // 后台时 CA 提交会被节流/跳过, 显式 flush 确保移除立即同步。
+        TSHUDFlushCATransaction();
+    } @catch (NSException *e) {
+        HUDLog(@"dismissViewControllerFromHUD exception: %@", e);
+    }
+}
+
 #pragma mark - 状态诊断
 
 // 供脚本日志/诊断界面查询 HUD 宿主的真实注册状态。

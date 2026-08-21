@@ -6,6 +6,7 @@
 #import "TSScriptUIViewController.h"
 #import "TSHTTPServer.h"
 #import "TSLuaBridge.h"
+#import "TSHUDHost.h"
 #import <WebKit/WebKit.h>
 
 @interface TSScriptUIViewController () <WKNavigationDelegate>
@@ -83,6 +84,13 @@
 #pragma mark - 操作
 
 - (void)_dismissAndFinish:(BOOL)didRun {
+    if (_hostedInHUD) {
+        // HUD 承载模式: 页面由 TSHUDHost 系统级层承载 (App 后台时 ui.open 弹出),
+        // 未被 present, 直接移除 view 并手动 flush, 确保后台也能立刻消失。
+        [[TSHUDHost shared] dismissViewControllerFromHUD:self];
+        if (self.onFinish) self.onFinish(didRun);
+        return;
+    }
     [self dismissViewControllerAnimated:YES completion:^{
         if (self.onFinish) self.onFinish(didRun);
     }];

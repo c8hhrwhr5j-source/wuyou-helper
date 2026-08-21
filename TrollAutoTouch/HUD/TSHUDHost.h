@@ -60,6 +60,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// 供弹窗/toast 在旋转坐标系下布局使用。
 - (CGSize)scriptContentSize;
 
+/// 在系统级 HUD 层承载一个全屏 UIViewController (其 view 直接挂到 HUD 内容层)。
+/// 用于 App 在后台、游戏等 app 在前台时, ui.open 的网页设置页也能直接弹出
+/// 到任意前台 App 之上。非阻塞, 可在任意线程调用 (内部派发主线程挂载)。
+/// @param vc 要承载的 view controller, 内部会全屏铺满内容层并触发 appearance 回调
+/// @return 是否成功显示; SBS 未托管成功 且 app 不在前台时返回 NO (调用方应视为不可用)
+- (BOOL)presentViewControllerInHUD:(UIViewController *)vc;
+
+/// 从 HUD 层移除之前承载的 UIViewController 的 view。
+/// 线程安全: 内部派发主线程执行。
+- (void)dismissViewControllerFromHUD:(UIViewController *)vc;
+
 /// 当前 HUD 宿主状态描述 (SBS 类可用性 / 是否已注册系统级托管 / 失败标志 / 前后台)。
 /// 供诊断日志输出, 避免"已就绪"这类误导性信息。
 - (NSString *)registrationStatusDescription;
