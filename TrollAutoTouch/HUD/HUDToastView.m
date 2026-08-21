@@ -109,6 +109,8 @@
                        dispatch_get_main_queue(), ^{
             __strong typeof(self) self = weakSelf;
             [self removeFromSuperview];
+            // 通知宿主: 内容清空 → 注销系统级托管 + 隐藏窗口
+            if (self.onRemoved) self.onRemoved();
             // 强制提交移除, 让 SBS 远程上下文立即清空。
             Class tx = NSClassFromString(@"CATransaction");
             if (tx && [tx respondsToSelector:@selector(flush)]) { [tx flush]; }
@@ -129,6 +131,8 @@
             self.alpha = 0.0;
         } completion:^(BOOL done) {
             [self removeFromSuperview];
+            // 通知宿主: 内容清空 → 注销系统级托管 + 隐藏窗口
+            if (self.onRemoved) self.onRemoved();
         }];
     }];
 }

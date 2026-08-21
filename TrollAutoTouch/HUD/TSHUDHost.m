@@ -95,6 +95,10 @@ static Class TSHUDHostingClass(void) {
     // 脚本坐标系方向 (对应 Lua screen.init): 0=home在下(竖屏) 1=home在右 2=home在左。
     // 用于旋转 HUD 内容层, 使 toast/弹窗在横屏游戏中横屏显示 (与脚本坐标系一致)。
     NSInteger _scriptOrientation;
+    // 活跃内容计数: >0 表示 HUD 内容层有实际内容(弹窗/toast/承载VC)。
+    // 只有有内容时才注册 SBS 系统级托管并保持窗口可见; 内容清空(计数=0)时
+    // 注销托管 + 隐藏窗口, 避免后台时全屏托管窗口吞掉整个屏幕的触摸。
+    NSInteger _activeContentCount;
 }
 
 // 启动日志落盘到 /tmp/hud_startup.log, 便于在无 Xcode 环境下排查启动/崩溃路径。
@@ -242,14 +246,10 @@ static void TSHUDFlushCATransaction(void) {
         HUDLog(@"TSHUDHost start: window ok (key=%d)",
                (_window.isKeyWindow ? 1 : 0));
 
-        // iOS 15+: 把窗口注册到 SpringBoard 的 accessibility 窗口层。
-        // 延迟到首轮 runloop 之后执行 (窗口显示后 layer 需一轮
-        // runloop 才绑定 CAContext)。整个调用链都 try-catch 保护, 失败只降级
-        // (弹窗仅在 app 前台时可见), 绝不让主 App 崩溃。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [self _registerAccessibilityHostingWithRetryCount:10];
-        });
+        // 系统级托管 (SBS) 改为惰性注册: 启动时不注册, 由 _bumpActiveContent
+        // (有弹窗/toast/承载VC 内容时) 触发。理由: 全屏托管窗口只要注册在,
+        // App 后台时就会吞掉整个屏幕的触摸 ("其他应用/主屏幕点击无反应"严重BUG)。
+        // 窗口本身保持创建 (app 内透明, hitTest 穿透, 不托管时不影响任何触摸)。
 
         // app 激活后 window 的 CAContext 可能重建 (contextId 变化), 重新注册
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -347,7 +347,11 @@ static void TSHUDFlushCATransaction(void) {
     // 之前因没有 scene / 重试耗尽而标记失败时, 补挂 scene 后重置标记再试一次
     if (_startupFailedSBS && !sceneAttached) return;
     _startupFailedSBS = NO;
-    [self _registerAccessibilityHostingWithRetryCount:10];
+    // 惰性托管: 仅当 HUD 内容层有实际内容时才注册系统级托管,
+    // 无内容时保持未托管 (避免后台时全屏托管窗口吞掉整屏触摸)。
+    if (_activeContentCount > 0) {
+        [self _registerAccessibilityHostingWithRetryCount:10];
+    }
 }
 
 #pragma mark - 系统级窗口托管 (SBSAccessibilityWindowHostingController)
@@ -455,6 +459,53 @@ static void TSHUDFlushCATransaction(void) {
     return 0;
 }
 
+#pragma mark - 活跃内容计数 (有内容才托管, 无内容立即解除)
+
+// 核心修复 (用户报告的严重BUG: 只能在本应用内触摸, 其他应用/主屏幕点击无反应):
+// SBS 系统级托管窗口 (level 10000, 全屏) 只要注册在, App 后台时 (其他 app/
+// 主屏幕在前台) SpringBoard 层的触摸命中就会落到这个全屏窗口并把事件吞掉
+// (app 内的 hitTest 穿透只在本进程前台分发时生效, 跨进程时无效), 表现为
+// "其他应用和主屏幕点击任何地方都没有反应, 只有本 App 内能触摸"。
+// 因此托管必须"按需": 有弹窗/toast/承载VC 内容时才注册, 内容清空立即注销。
+- (void)_bumpActiveContent {
+    if (!_started) [self start];
+    _activeContentCount++;
+    if (_activeContentCount == 1) {
+        // 首次出现内容: 确保窗口可见并注册系统级托管 (已注册/注册失败则跳过)
+        _window.hidden = NO;
+        if (_registeredContextId == 0 && !_startupFailedSBS) {
+            [self _registerAccessibilityHostingWithRetryCount:10];
+        }
+    }
+}
+
+- (void)_dropActiveContent {
+    if (_activeContentCount > 0) _activeContentCount--;
+    if (_activeContentCount == 0) {
+        // 内容清空: 立即注销系统级托管并隐藏窗口, 解除全屏触摸吞没。
+        // 窗口隐藏后下次 _bumpActiveContent 会重新显示并重新注册。
+        [self _unregisterAccessibilityHosting];
+        _window.hidden = YES;
+    }
+}
+
+- (void)_unregisterAccessibilityHosting {
+    if (_registeredContextId == 0) return;
+    unsigned ctxId = _registeredContextId;
+    _registeredContextId = 0;
+    @try {
+        if (!_sbsHostingCtrl) return;
+        SEL unregSel = NSSelectorFromString(@"unregisterWindowWithContextID:");
+        if ([_sbsHostingCtrl respondsToSelector:unregSel]) {
+            void (*fn)(id, SEL, unsigned) = (void (*)(id, SEL, unsigned))[_sbsHostingCtrl methodForSelector:unregSel];
+            if (fn) fn(_sbsHostingCtrl, unregSel, ctxId);
+            HUDLog(@"accessibility window hosting unregistered: contextId=%u (no active content)", ctxId);
+        }
+    } @catch (NSException *e) {
+        HUDLog(@"accessibility hosting unregister exception: %@", e);
+    }
+}
+
 - (BOOL)_registerAccessibilityHostingWithRetryCount:(NSInteger)retryCount {
     if (retryCount <= 0) {
         HUDLog(@"accessibility hosting: retry exhausted, fallback to foreground");
@@ -470,7 +521,9 @@ static void TSHUDFlushCATransaction(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 __strong typeof(self) self = weakSelf;
-                if (self && !self->_startupFailedSBS) {
+                // 内容可能已消失 (弹窗已关/toast 已移除): 无活跃内容时不再重试
+                // 注册, 避免后台残留全屏托管窗口吞掉整个屏幕的触摸。
+                if (self && !self->_startupFailedSBS && self->_activeContentCount > 0) {
                     [self _registerAccessibilityHostingWithRetryCount:retryCount - 1];
                 }
             });
@@ -601,19 +654,23 @@ static void TSHUDFlushCATransaction(void) {
                                      timeout:(NSTimeInterval)timeout {
     [self ensureStartedOnMainThread];
 
-    // 若窗口未成功托管到系统级 且 app 不在前台, 弹窗不可见,
-    // 直接返回 nil (脚本继续执行, 不永久阻塞)。
-    if (_registeredContextId == 0 &&
-        [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-        HUDLog(@"presentAlert skipped: not foreground & SBS not registered");
-        return nil;
-    }
-
     __block NSString *result = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            // 先计入活跃内容并确保系统级托管注册 (惰性托管), 再判断可见性:
+            // 首次后台弹窗此刻才注册 SBS, 注册成功则 contentView 可挂载。
+            [self _bumpActiveContent];
+            if (_registeredContextId == 0 &&
+                [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+                // SBS 托管注册失败 且 app 不在前台: 弹窗不可见, 补平计数后
+                // 直接返回 nil (脚本继续执行, 不永久阻塞)。
+                [self _dropActiveContent];
+                HUDLog(@"presentAlert skipped: not foreground & SBS not registered");
+                dispatch_semaphore_signal(sem);
+                return;
+            }
             UIView *host = [self _displayContentView];
             HUDCustomAlertView *alert = [[HUDCustomAlertView alloc] initWithTitle:title
                                                                           message:message
@@ -621,6 +678,9 @@ static void TSHUDFlushCATransaction(void) {
                                                                           timeout:timeout
                                                                          onResult:^(NSString *r) {
                 result = r;
+                // 弹窗关闭 (HUDCustomAlertView 已自动移除自身):
+                // 活跃内容清空 → 注销系统级托管 + 隐藏窗口, 解除全屏触摸吞没。
+                [self _dropActiveContent];
                 dispatch_semaphore_signal(sem);
             }];
             // 按旋转后的内容层尺寸布局 (横屏时卡片在横屏坐标系下居中)
@@ -632,6 +692,7 @@ static void TSHUDFlushCATransaction(void) {
             TSHUDFlushCATransaction();
         } @catch (NSException *e) {
             HUDLog(@"presentAlert exception: %@", e);
+            [self _dropActiveContent];
             dispatch_semaphore_signal(sem);
         }
     });
@@ -654,10 +715,14 @@ static void TSHUDFlushCATransaction(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // 可见性检查: 与 presentAlert 一致。SBS 未托管成功 且 app 不在前台时,
-            // toast 加在窗口上也看不到, 记日志便于排查 (不再静默失败)。
+            // 先计入活跃内容并确保系统级托管注册 (惰性托管), 再判断可见性:
+            // 首次后台 toast 此刻才注册 SBS, 注册成功则 contentView 可挂载。
+            [self _bumpActiveContent];
             if (_registeredContextId == 0 &&
                 [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+                // SBS 托管注册失败 且 app 不在前台: toast 加在窗口上也看不到,
+                // 补平计数后返回, 记日志便于排查 (不再静默失败)。
+                [self _dropActiveContent];
                 HUDLog(@"showToast skipped (not foreground & SBS not registered): %@", text);
                 return;
             }
@@ -665,6 +730,11 @@ static void TSHUDFlushCATransaction(void) {
             HUDToastView *toast = [[HUDToastView alloc] initWithText:text
                                                             duration:duration
                                                               hidden:hidden];
+            // toast 自动消失时回调: 清空活跃内容 → 注销系统级托管 + 隐藏窗口
+            __weak typeof(self) weakSelf = self;
+            toast.onRemoved = ^{
+                [weakSelf _dropActiveContent];
+            };
             // 按旋转后的内容层尺寸布局 (横屏时 toast 在横屏坐标系下显示)
             [toast layoutInContainerSize:[self scriptContentSize]];
             [host addSubview:toast];
@@ -673,6 +743,7 @@ static void TSHUDFlushCATransaction(void) {
             TSHUDFlushCATransaction();
         } @catch (NSException *e) {
             HUDLog(@"showToast exception: %@", e);
+            [self _dropActiveContent];
         }
     });
 }
@@ -709,15 +780,22 @@ static void TSHUDFlushCATransaction(void) {
 // 不会自动调用, 需用 beginAppearanceTransition:/endAppearanceTransition: 补齐。
 - (BOOL)_attachVCToHUD:(UIViewController *)vc {
     @try {
-        // 可见性检查: 与 presentAlert 一致。SBS 未托管成功 且 app 不在前台时,
-        // 挂上去也看不到, 返回 NO 让调用方立即结束阻塞等待。
+        // 先计入活跃内容并确保系统级托管注册 (惰性托管), 再判断可见性:
+        // 首次后台承载 VC 此刻才注册 SBS, 注册成功则 contentView 可挂载。
+        [self _bumpActiveContent];
         if (_registeredContextId == 0 &&
             [UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+            // SBS 托管注册失败 且 app 不在前台: 挂上去也看不到, 补平计数后
+            // 返回 NO 让调用方立即结束阻塞等待。
+            [self _dropActiveContent];
             HUDLog(@"presentViewControllerInHUD skipped: not foreground & SBS not registered");
             return NO;
         }
         UIView *host = [self _displayContentView];
-        if (!host) return NO;
+        if (!host) {
+            [self _dropActiveContent];
+            return NO;
+        }
         // 全屏铺满内容层; 内容层随脚本坐标系旋转, 网页设置页跟随 (横屏游戏时横屏显示)
         vc.view.frame = host.bounds;
         vc.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -730,16 +808,19 @@ static void TSHUDFlushCATransaction(void) {
         return YES;
     } @catch (NSException *e) {
         HUDLog(@"presentViewControllerInHUD exception: %@", e);
+        [self _dropActiveContent];
         return NO;
     }
 }
 
 - (void)_detachVCFromHUD:(UIViewController *)vc {
     @try {
-        if (vc.view.superview == nil) return;
+        if (vc.view.superview == nil) return; // 未挂载: 未 bump, 无需 drop
         [vc beginAppearanceTransition:NO animated:NO];
         [vc.view removeFromSuperview];
         [vc endAppearanceTransition];
+        // 活跃内容清空 → 注销系统级托管 + 隐藏窗口, 解除全屏触摸吞没
+        [self _dropActiveContent];
         // 后台时 CA 提交会被节流/跳过, 显式 flush 确保移除立即同步。
         TSHUDFlushCATransaction();
     } @catch (NSException *e) {
@@ -760,8 +841,10 @@ static void TSHUDFlushCATransaction(void) {
     NSString *failState = _startupFailedSBS ? @"startupFailedSBS=YES" : @"startupFailedSBS=NO";
     NSString *fgState = ([UIApplication sharedApplication].applicationState == UIApplicationStateActive)
         ? @"app=foreground" : @"app=background";
-    return [NSString stringWithFormat:@"HUD 宿主状态: %@ | %@ | %@ | %@",
-            clsState, ctxState, failState, fgState];
+    // 活跃内容计数: 无内容时必然未托管 (惰性托管), 有内容时才系统级托管
+    NSString *activeState = [NSString stringWithFormat:@"activeContent=%ld", (long)_activeContentCount];
+    return [NSString stringWithFormat:@"HUD 宿主状态: %@ | %@ | %@ | %@ | %@",
+            clsState, ctxState, failState, fgState, activeState];
 }
 
 @end

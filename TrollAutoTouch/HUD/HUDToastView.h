@@ -31,6 +31,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 加入父视图后调用: 淡入显示, 启动到时淡出计时。
 - (void)show;
 
+/// 视图自动消失(从父视图移除)时回调。
+/// 宿主(TSHUDHost)用它来清空活跃内容计数并解除系统级托管。
+@property (nonatomic, copy, nullable) void (^onRemoved)(void);
+
 @end
 
 NS_ASSUME_NONNULL_END

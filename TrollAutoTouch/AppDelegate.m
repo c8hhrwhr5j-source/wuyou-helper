@@ -51,8 +51,9 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     }
 
     // ── 预热进程内 HUD 宿主（单 App 架构）──
-    // 提前创建全屏透明窗口并注册 SBS 系统级托管, 使脚本音量键弹窗/
-    // 阻塞确认等全局弹窗即时可用; 失败仅降级, 不影响主流程。
+    // 提前创建 HUD 全屏透明窗口 (窗口内 hitTest 穿透, 不托管时不影响触摸)。
+    // SBS 系统级托管为惰性注册: 仅在弹出弹窗/toast/承载 UI 时注册,
+    // 内容清空即注销, 避免后台时全屏托管窗口吞掉整个屏幕的触摸。
     [[TSHUDHost shared] start];
 
     NSLog(@"[TrollAutoTouch] App 启动完成");
