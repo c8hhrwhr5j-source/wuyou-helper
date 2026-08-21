@@ -68,10 +68,14 @@
 }
 
 - (void)_refresh {
-    // 顶部显示日志文件路径，便于用户在本地找到历史日志
-    NSString *path = [TSPaths pathForLog:@"touch.log"];
+    // 顶部显示日志文件路径，便于用户在本地找到历史日志。
+    // 落盘分类: touch.log = 程序自身日志, debug.log = main.lua 主动 log/logStr/print。
+    NSString *touchPath = [TSLogStore shared].logFilePath;
+    NSString *debugPath = [TSLogStore shared].debugLogFilePath;
     NSMutableString *content = [NSMutableString string];
-    [content appendString:[NSString stringWithFormat:@"日志文件: %@\n%@\n", path, @"────────────────────────"]];
+    [content appendString:[NSString stringWithFormat:@"程序日志: %@\n", touchPath]];
+    [content appendString:[NSString stringWithFormat:@"脚本日志: %@\n", debugPath]];
+    [content appendString:@"────────────────────────\n"];
     [content appendString:[[[TSLogStore shared].logs componentsJoinedByString:@"\n"]
                            stringByAppendingString:@"\n"]];
     _textView.text = content;

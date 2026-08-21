@@ -117,6 +117,7 @@ static volatile BOOL _pauseRequested = NO;
 
 #pragma mark - 日志
 
+// 程序自身产生的日志(引擎诊断/运行时/toast 记录等) → 写 touch.log + UI
 static void lua_log(NSString *msg) {
     if (msg.length == 0) return;
     // 全局日志存储: 内部线程安全 + 批量异步写文件, 不碰主线程。
@@ -124,6 +125,17 @@ static void lua_log(NSString *msg) {
     // UI 日志: 直接回调 logHandler。ViewController 的 _log: 内部按 50ms
     // 聚合节流刷新(任意线程可调用), 不再逐条向主线程派发, 避免脚本高频
     // 日志时主线程队列堆积 → App 假死/脚本停摆。
+    TSLuaBridge *bridge = [TSLuaBridge shared];
+    if (bridge.logHandler) {
+        bridge.logHandler(msg);
+    }
+}
+
+// main.lua 主动写入的日志(log/logStr/print) → 写 debug.log + UI。
+// 与程序自身日志(touch.log)严格分流, 两类日志不混在一个文件。
+static void lua_script_log(NSString *msg) {
+    if (msg.length == 0) return;
+    [[TSLogStore shared] append:msg toFile:@"debug.log"];
     TSLuaBridge *bridge = [TSLuaBridge shared];
     if (bridge.logHandler) {
         bridge.logHandler(msg);
@@ -288,14 +300,16 @@ static int l_global_print(lua_State *L) {
         [s appendString:luaToNSString(str, len)];
         lua_pop(L, 1);
     }
-    lua_log([NSString stringWithFormat:@"[Lua] %@", s]);
+    // 脚本主动 print → debug.log
+    lua_script_log([NSString stringWithFormat:@"[Lua] %@", s]);
     return 0;
 }
 
 static int l_global_logStr(lua_State *L) {
     size_t len = 0;
     const char *s = luaL_checklstring(L, 1, &len);
-    lua_log([NSString stringWithFormat:@"[Lua] %@", luaToNSString(s, len)]);
+    // 脚本主动 log/logStr → debug.log
+    lua_script_log([NSString stringWithFormat:@"[Lua] %@", luaToNSString(s, len)]);
     return 0;
 }
 

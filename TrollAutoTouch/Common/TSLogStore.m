@@ -34,7 +34,8 @@ static NSDateFormatter *LogTimeFormatter(void) {
 
 @implementation TSLogStore {
     NSMutableArray<NSString *> *_logs;
-    NSMutableArray<NSString *> *_filePending; // 待写文件的日志行(锁保护)
+    NSMutableArray<NSString *> *_filePending;      // 待写 touch.log 的日志行(锁保护)
+    NSMutableArray<NSString *> *_debugPending;     // 待写 debug.log 的日志行(锁保护)
 }
 
 + (instancetype)shared {
@@ -51,6 +52,7 @@ static NSDateFormatter *LogTimeFormatter(void) {
     if (self) {
         _logs = [NSMutableArray array];
         _filePending = [NSMutableArray array];
+        _debugPending = [NSMutableArray array];
         [self _loadHistoryFromFile];
     }
     return self;
@@ -79,14 +81,29 @@ static NSDateFormatter *LogTimeFormatter(void) {
     return [TSPaths pathForLog:@"touch.log"];
 }
 
+/// debug.log 文件完整路径（脚本主动 log/logStr/print 输出）
+- (NSString *)debugLogFilePath {
+    return [TSPaths pathForLog:@"debug.log"];
+}
+
 - (NSArray<NSString *> *)logs {
     @synchronized (self) {
         return [_logs copy];
     }
 }
 
+// 默认入口: 程序自身产生的日志 → touch.log
 - (void)append:(NSString *)message {
+    [self append:message toFile:@"touch.log"];
+}
+
+// 分类入口: fileName 为 log 目录下的文件名 ("touch.log" 或 "debug.log")。
+// 两类日志统一进内存 _logs(UI 查看日志时全部可见), 落盘按文件分流:
+//   touch.log = 程序自身日志(引擎诊断/运行时/senderID/脚本启停等)
+//   debug.log = main.lua 主动写入的 log/logStr/print
+- (void)append:(NSString *)message toFile:(NSString *)fileName {
     if (message.length == 0) return;
+    if (fileName.length == 0) fileName = @"touch.log";
 
     NSString *line = [NSString stringWithFormat:@"[%@] %@",
                       [LogTimeFormatter() stringFromDate:[NSDate date]], message];
@@ -98,8 +115,9 @@ static NSDateFormatter *LogTimeFormatter(void) {
             [_logs removeObjectsInRange:NSMakeRange(0, _logs.count - kMaxLogCount)];
         }
         // 批量落盘: 攒满一批立即写; 否则 1s 兜底, 避免逐条 open/close 文件
-        [_filePending addObject:line];
-        if (_filePending.count >= kFileFlushBatch) flushNow = YES;
+        NSMutableArray *pending = [fileName isEqualToString:@"debug.log"] ? _debugPending : _filePending;
+        [pending addObject:line];
+        if (pending.count >= kFileFlushBatch) flushNow = YES;
     }
     if (flushNow) {
         [self _flushFile];
@@ -112,16 +130,18 @@ static NSDateFormatter *LogTimeFormatter(void) {
     @synchronized (self) {
         [_logs removeAllObjects];
         [_filePending removeAllObjects];
+        [_debugPending removeAllObjects];
         [[NSFileManager defaultManager] removeItemAtPath:self.logFilePath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:self.debugLogFilePath error:nil];
     }
 }
 
 #pragma mark - File
 
-// 立即派发一次批量落盘
+// 立即派发一次批量落盘(两个日志文件都排空)
 - (void)_flushFile {
     dispatch_async(LogFileQueue(), ^{
-        [self _drainFilePending];
+        [self _drainAllPending];
     });
 }
 
@@ -129,37 +149,43 @@ static NSDateFormatter *LogTimeFormatter(void) {
 - (void)_scheduleLazyFlush {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    LogFileQueue(), ^{
-        [self _drainFilePending];
+        [self _drainAllPending];
     });
 }
 
-- (void)_drainFilePending {
-    NSArray<NSString *> *batch = nil;
-    @synchronized (self) {
-        if (_filePending.count == 0) return;
-        batch = [_filePending copy];
-        [_filePending removeAllObjects];
-    }
-    [self _appendLinesToFile:batch];
+- (void)_drainAllPending {
+    [self _drainPending:_filePending  path:self.logFilePath];
+    [self _drainPending:_debugPending path:self.debugLogFilePath];
 }
 
-- (void)_appendLinesToFile:(NSArray<NSString *> *)lines {
-    if (lines.count == 0) return;
+// 从指定 pending 队列取走一批并追加到对应文件
+- (void)_drainPending:(NSMutableArray<NSString *> *)pending path:(NSString *)path {
+    NSArray<NSString *> *batch = nil;
+    @synchronized (self) {
+        if (pending.count == 0) return;
+        batch = [pending copy];
+        [pending removeAllObjects];
+    }
+    [self _appendLinesToFile:batch path:path];
+}
+
+- (void)_appendLinesToFile:(NSArray<NSString *> *)lines path:(NSString *)path {
+    if (lines.count == 0 || path.length == 0) return;
     [TSPaths ensureDirectoriesExist];
 
     // 日志文件上限 5MB: 超出则重置, 只保留最新批次, 防止无限膨胀
     NSDictionary *attrs = [[NSFileManager defaultManager]
-                           attributesOfItemAtPath:self.logFilePath error:nil];
+                           attributesOfItemAtPath:path error:nil];
     if (attrs && [attrs[NSFileSize] unsignedLongLongValue] > kMaxLogFileBytes) {
-        [[NSFileManager defaultManager] removeItemAtPath:self.logFilePath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
     }
 
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:self.logFilePath];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
     if (!fh) {
-        [[NSFileManager defaultManager] createFileAtPath:self.logFilePath
+        [[NSFileManager defaultManager] createFileAtPath:path
                                                 contents:nil
                                               attributes:nil];
-        fh = [NSFileHandle fileHandleForWritingAtPath:self.logFilePath];
+        fh = [NSFileHandle fileHandleForWritingAtPath:path];
     }
     if (fh) {
         @try {
