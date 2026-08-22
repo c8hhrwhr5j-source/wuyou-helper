@@ -1261,16 +1261,32 @@ if x then
 end
 ```
 
-#### screen.findColors(mainColor, x, y, w, h, offsets, [, sim, offSim])
+#### screen.findColors(...)
 
-多点找色。`offsets` 为偏移点数组：
+多点找色。支持两种调用形式：
+
+**形式一：偏移点数组**（`mainColor` + `offsets` 表，`offsets` 也可放在区域参数之后）
 
 ```lua
-local x, y = screen.findColors(0xff0000, 0, 0, 400, 800, {
+local x, y = screen.findColors(0xff0000, {
     {x=10, y=5, color=0xffffff},
     {x=20, y=-5, color=0x000000}
-}, 0.9, 0.85)
+}, 0, 0, 400, 800, 0.9, 0.85)
 ```
+
+**形式二：颜色模板字符串**（对齐 AutoGo `images.FindMultiColors` 风格）
+
+```lua
+-- findColors(x1, y1, x2, y2, colorsStr[, sim])
+-- colorsStr 格式: "主色,dx,dy,颜色,dx,dy,颜色,..."
+--   第一个元素是主色，之后每 3 个元素一组 {dx, dy, color} 为一个偏移点（偏移在前、颜色在后）
+--   上例即: 主色 4a9a10 + 偏移点 (1,-1)429a10、(2,-1)4a9e10、(3,-1)4a9a10、(4,-1)4aa608、(5,-1)429a10
+-- 颜色可带 "RRGGBB-偏色" 后缀(偏色忽略)；x2/y2 传 0 表示使用屏幕最大宽高；sim 相似度 0.1~1.0，默认 0.9
+local x, y = screen.findColors(378, 547, 402, 569,
+    "4a9a10,1,-1,429a10,2,-1,4a9e10,3,-1,4a9a10,4,-1,4aa608,5,-1,429a10", 0.9)
+```
+
+两种形式均返回第一个匹配点的 `x, y`；无匹配返回 `nil`。
 
 ---
 

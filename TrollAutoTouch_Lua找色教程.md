@@ -47,7 +47,9 @@ local x, y = findColor(0x00FF00, {x=100, y=200, width=300, height=400}, 0.9)
 
 ### 2.2 多点找色 `findColors`
 
-适合找"由多个固定颜色点组成"的目标（比如图标、按钮特征）。
+适合找"由多个固定颜色点组成"的目标（比如图标、按钮特征）。共有两种调用方式。
+
+#### 方式一：偏移点数组（`主色 + 偏移表`）
 
 ```lua
 -- 偏移表：相对主色点的 dx/dy 和对应颜色
@@ -61,11 +63,101 @@ local x, y = findColors(0xFF0000, offsets, 0.9)
 
 -- 区域多点找色: findColors(主色, 偏移表, x, y, w, h, 相似度, 偏移点相似度)
 local x, y = findColors(0xFF0000, offsets, 100, 100, 200, 200, 0.9, 0.85)
+
+-- 区域用 table 形式: findColors(主色, 偏移表, {x=,y=,width=,height=}, 相似度)
+local x, y = findColors(0xFF0000, offsets, {x=100, y=100, width=200, height=200}, 0.9)
+```
+
+> 偏移表也支持 `{ {10, 0, 0x00FF00}, {0, 10, 0x0000FF} }` 这种数组形式（dx, dy, color）。
+> `sim` 是主色相似度（默认 0.9），`offSim` 是偏移点相似度（默认等于 `sim`）。
+
+#### 方式二：颜色模板字符串（AutoGo `images.FindMultiColors` 风格）
+
+用**一行字符串**同时描述"区域 + 主色 + 所有偏移点"，适合从取色工具里直接复制出来的数据。
+
+```
+findColors(x1, y1, x2, y2, colorsStr, sim)
+```
+
+| 参数 | 说明 |
+|---|---|
+| `x1, y1` | 区域左上角坐标 |
+| `x2, y2` | 区域右下角坐标；传 `0` 表示使用屏幕最大宽高 |
+| `colorsStr` | 颜色模板字符串，格式见下 |
+| `sim` | 相似度，0.1~1.0，默认 0.9 |
+
+**颜色模板字符串格式**：
+
+```
+主色, 偏移x, 偏移y, 颜色, 偏移x, 偏移y, 颜色, ...
+```
+
+- 第 **1** 个元素是**主色**（基准点），6 位 hex 颜色，如 `4a9a10`
+- 之后每 **3 个元素一组** = 一个偏移点，顺序是 `偏移x, 偏移y, 颜色`（偏移在前、颜色在后）
+- 偏移是相对主色点的坐标差，可为负数
+- 颜色可带 `-偏色` 后缀（如 `ffccff-151515`），偏色会被忽略，统一由 `sim` 控制
+
+**示例**：`"4a9a10,1,-1,429a10,2,-1,4a9e10,3,-1,4a9a10,4,-1,4aa608,5,-1,429a10"`
+
+解析为：主色 `4a9a10`，偏移点 `(1,-1)429a10`、`(2,-1)4a9e10`、`(3,-1)4a9a10`、`(4,-1)4aa608`、`(5,-1)429a10`，共 5 个。
+
+```lua
+-- 在区域 (378,547)-(402,569) 内找"主色4a9a10 + 5个偏移点"，相似度 0.9
+local x, y = findColors(378, 547, 402, 569,
+    "4a9a10,1,-1,429a10,2,-1,4a9e10,3,-1,4a9a10,4,-1,4aa608,5,-1,429a10", 0.9)
+if x then
+    tap(x, y)
+end
+
+-- 区域右下角传 0 = 使用屏幕最大宽高
+local x2, y2 = findColors(100, 200, 0, 0, "bd2c31,-10,13,732429,0,22,732421", 0.9)
+```
+
+> 方式二需要引擎支持（重新编译安装新版 App 后可用）。旧版引擎请用下面的 Lua 解析函数，
+> 效果完全相同，新旧引擎通用：
+
+```lua
+-- 颜色模板字符串区域多点找色（新旧引擎通用）
+-- AREA[名称] = {x1, y1, x2, y2, 颜色模板字符串, 相似度}
+function findArea(str)
+    local t = AREA[str]
+    if t == nil then
+        logStr("findArea: 区域不存在: " .. tostring(str))
+        return false
+    end
+    local x1, y1, x2, y2 = t[1], t[2], t[3], t[4]
+    local colorsStr = t[5]
+    local sim = t[6] or 0.9
+
+    -- 按逗号拆分
+    local parts = {}
+    for p in string.gmatch(tostring(colorsStr), "[^,]+") do
+        parts[#parts + 1] = p
+    end
+    -- "RRGGBB-偏色" → 0xRRGGBB
+    local function hexColor(s)
+        local dash = string.find(s, "-")
+        if dash then s = string.sub(s, 1, dash - 1) end
+        return tonumber("0x" .. s)
+    end
+    local mainColor = hexColor(parts[1])
+    local offsets = {}
+    local i = 2
+    while i + 2 <= #parts do
+        offsets[#offsets + 1] = {
+            x = tonumber(parts[i]),
+            y = tonumber(parts[i + 1]),
+            color = hexColor(parts[i + 2]),
+        }
+        i = i + 3
+    end
+    -- 转成方式一调用（区域 x,y,w,h）
+    local x, y = findColors(mainColor, offsets, x1, y1, x2 - x1, y2 - y1, sim)
+    return x ~= nil
+end
 ```
 
 **返回值**：找到返回 `x, y`（主色点坐标），未找到返回 `nil`。
-
-> 偏移表也支持 `{ {10, 0, 0x00FF00}, {0, 10, 0x0000FF} }` 这种数组形式。
 
 ### 2.3 模板找图 `findImage`
 
@@ -434,7 +526,8 @@ logStr("自动任务结束")
 | 函数 | 说明 |
 |---|---|
 | `findColor(c[, x,y,w,h][, sim])` | 单点找色 → x,y |
-| `findColors(c, offsets[, x,y,w,h][, sim][, offSim])` | 多点找色 → x,y |
+| `findColors(c, offsets[, x,y,w,h][, sim][, offSim])` | 多点找色(偏移表) → x,y |
+| `findColors(x1,y1,x2,y2, colorsStr[, sim])` | 多点找色(颜色模板字符串, AutoGo风格) → x,y |
 | `findImage(path[, accuracy][, x,y,w,h])` | 模板找图 → x,y |
 | `getColor(x, y)` | 取色 → 0xRRGGBB |
 | `tap(x, y[, dur])` | 点击 |

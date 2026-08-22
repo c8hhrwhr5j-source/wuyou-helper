@@ -540,6 +540,60 @@ static NSArray<NSDictionary *> *l_parseOffsets(lua_State *L, int idx) {
     return offsets;
 }
 
+/// 判断是否为合法颜色规格: "RRGGBB" / "#RRGGBB" / "0xRRGGBB" / "RRGGBB-偏色"(6位hex)
+static BOOL tsIsHexColor(NSString *spec) {
+    spec = [spec stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!spec.length) return NO;
+    NSRange dash = [spec rangeOfString:@"-"];
+    if (dash.location != NSNotFound) {
+        NSString *dashPart = [spec substringFromIndex:dash.location + 1];
+        if (dashPart.length != 6) return NO;
+        spec = [spec substringToIndex:dash.location];
+    }
+    if ([spec hasPrefix:@"#"]) spec = [spec substringFromIndex:1];
+    if ([spec hasPrefix:@"0x"] || [spec hasPrefix:@"0X"]) spec = [spec substringFromIndex:2];
+    if (spec.length != 6) return NO;
+    for (NSUInteger k = 0; k < spec.length; k++) {
+        unichar ch = [spec characterAtIndex:k];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) return NO;
+    }
+    return YES;
+}
+
+/// 解析颜色规格为整数 0xRRGGBB(色偏后缀忽略)
+static int tsParseHexColor(NSString *spec) {
+    spec = [spec stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!spec.length) return 0;
+    NSRange dash = [spec rangeOfString:@"-"];
+    if (dash.location != NSNotFound) spec = [spec substringToIndex:dash.location];
+    if ([spec hasPrefix:@"#"]) spec = [spec substringFromIndex:1];
+    if ([spec hasPrefix:@"0x"] || [spec hasPrefix:@"0X"]) spec = [spec substringFromIndex:2];
+    unsigned int v = 0;
+    [[NSScanner scannerWithString:spec] scanHexInt:&v];
+    return (int)(v & 0xFFFFFF);
+}
+
+/// 解析颜色模板字符串(AutoGo images.FindMultiColors 风格):
+///   格式: "主色,dx,dy,颜色,dx,dy,颜色,..."
+///   第一个元素为主色, 之后每 3 个元素一组 {dx, dy, color} 为一个偏移点(偏移在前, 颜色在后)
+///   颜色支持 "RRGGBB-偏色" 后缀(偏色忽略, 统一用 sim 控制)
+static void tsParseMultiColorString(NSString *str, int *mainColorOut,
+                                    NSMutableArray<NSDictionary *> *offsetsOut) {
+    if (!str.length) return;
+    NSArray<NSString *> *parts = [str componentsSeparatedByString:@","];
+    NSInteger n = (NSInteger)parts.count;
+    if (n < 1) return;
+    int mainColor = tsParseHexColor(parts[0]);
+    if (mainColorOut) *mainColorOut = mainColor;
+    for (NSInteger i = 1; i + 2 < n; i += 3) {
+        if (!tsIsHexColor(parts[i + 2])) continue;   // 非法偏移点跳过
+        double dx = [parts[i] doubleValue];
+        double dy = [parts[i + 1] doubleValue];
+        int c = tsParseHexColor(parts[i + 2]);
+        [offsetsOut addObject:@{@"x": @(dx), @"y": @(dy), @"color": @(c)}];
+    }
+}
+
 /// 单点找色: findColor(color[, x, y, w, h][, sim])
 /// 调用形式:
 ///   findColor(color)             全屏, sim=0.9
@@ -581,23 +635,70 @@ static int l_screen_findColor(lua_State *L) {
     return 2;
 }
 
-/// 多点找色: findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim])
+/// 多点找色:
+///   风格1(偏移点table): findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim])
+///   风格2(AutoGo images.FindMultiColors): findColors(x1, y1, x2, y2, colorsStr[, sim])
+///     colorsStr 颜色模板字符串: "主色,dx,dy,颜色,dx,dy,颜色,..." 主色在前,
+///     之后每 3 项一组 {dx, dy, color} 为偏移点; 颜色支持 "RRGGBB-偏色" 后缀(偏色忽略)
+///     x2/y2 为 0 表示使用屏幕最大宽高
 static int l_screen_findColors(lua_State *L) {
-    int mainColor = (int)luaL_checkinteger(L, 1);
-    NSArray<NSDictionary *> *offsets = l_parseOffsets(L, 2);
-    int next = 3;
-    CGRect rect = l_optRect(L, 3, &next);
-    CGFloat sim = (CGFloat)luaL_optnumber(L, next, 0.9);
-    CGFloat offSim = (CGFloat)luaL_optnumber(L, next + 1, sim);
+    int mainColor = 0;
+    NSMutableArray<NSDictionary *> *offsets = [NSMutableArray array];
+    CGRect rect;
+    CGFloat sim = 0.9, offSim = 0.9;
+
+    if (lua_gettop(L) >= 5 && lua_isnumber(L, 1) && lua_isnumber(L, 2)
+        && lua_isnumber(L, 3) && lua_isnumber(L, 4) && lua_isstring(L, 5)) {
+        // ---- 风格2: findColors(x1, y1, x2, y2, colorsStr[, sim]) ----
+        CGFloat x1 = luaL_checknumber(L, 1);
+        CGFloat y1 = luaL_checknumber(L, 2);
+        CGFloat x2 = luaL_checknumber(L, 3);
+        CGFloat y2 = luaL_checknumber(L, 4);
+        NSString *colorsStr = [NSString stringWithUTF8String:luaL_checkstring(L, 5)];
+        if (lua_gettop(L) >= 6 && lua_isnumber(L, 6)) sim = (CGFloat)lua_tonumber(L, 6);
+        if (sim <= 0 || sim > 1) sim = 0.9;
+        offSim = sim;
+
+        tsParseMultiColorString(colorsStr, &mainColor, offsets);
+        if (offsets.count == 0) {
+            lua_log(@"findColors: 颜色模板字符串解析失败(无偏移点)");
+            lua_pushnil(L); return 1;
+        }
+        // x2/y2 为 0 时使用屏幕最大宽高(脚本坐标系=竖屏物理像素)
+        CGSize ss = screenPixelSize();
+        if (x2 <= 0) x2 = ss.width;
+        if (y2 <= 0) y2 = ss.height;
+        if (x2 < x1) { CGFloat t = x1; x1 = x2; x2 = t; }
+        if (y2 < y1) { CGFloat t = y1; y1 = y2; y2 = t; }
+        rect = CGRectMake(x1, y1, x2 - x1, y2 - y1);
+    } else {
+        // ---- 风格1: findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim]) ----
+        mainColor = (int)luaL_checkinteger(L, 1);
+        if (lua_istable(L, 2)) {
+            // 标准顺序: (mainColor, offsets, x,y,w,h, sim, offSim)
+            [offsets addObjectsFromArray:l_parseOffsets(L, 2)];
+            int next = 3;
+            rect = l_optRect(L, 3, &next);
+            sim = (CGFloat)luaL_optnumber(L, next, 0.9);
+            offSim = (CGFloat)luaL_optnumber(L, next + 1, sim);
+        } else {
+            // 文档顺序: (mainColor, x,y,w,h, offsets, sim, offSim)
+            int next = 2;
+            rect = l_optRect(L, 2, &next);
+            [offsets addObjectsFromArray:l_parseOffsets(L, next)];
+            sim = (CGFloat)luaL_optnumber(L, next + 1, 0.9);
+            offSim = (CGFloat)luaL_optnumber(L, next + 2, sim);
+        }
+    }
 
     rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) {
         NSString *err = [TSScreenCapture shared].lastError;
         if (err.length) {
-            lua_log([NSString stringWithFormat:@"findColor 截屏失败: %@", err]);
+            lua_log([NSString stringWithFormat:@"findColors 截屏失败: %@", err]);
         } else {
-            lua_log(@"findColor 截屏失败(全部路径均失败, 无详细错误)");
+            lua_log(@"findColors 截屏失败(全部路径均失败, 无详细错误)");
         }
         lua_pushnil(L); return 1;
     }

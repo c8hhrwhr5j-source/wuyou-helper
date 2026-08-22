@@ -1,6 +1,8 @@
 APP = "com.tencent.rxcq" -- APP 包名
 
 AREA={
+        ["每日签到"]	       ={1123, 41, 1161, 79, "bd2c31,-10,13,732429,0,22,732421,12,11,7b2029,0,11,d6d3c6,-7,4,efd7c6,8,20,ce9252,-7,19,cea67b,5,6,e7cfb5", 0.9},
+
         ["游戏公告"]	       ={{  668,  492, 0xA57531},{  958,  161, 0xBD2831},{  843,  173, 0x5A5D63},{  573,  514, 0x393431},{  680,  167, 0xEFC794},{  669,  523, 0x8C4518}},
 	    ["选区进入游戏"]	   ={{  884,  526, 0xEF7510},{  891,  514, 0xFFBA10},{  855,  534, 0xDEC39C},{  921,  556, 0xC63800},{  857,  517, 0xEF9610},{  938,  539, 0xCEAE8C}},
 	    ["选择角色"]	       ={{  700,  671, 0xF79E18},{  599,  677, 0xAD4510},{  632,  679, 0xF7EFCE},{  721,  701, 0xB5A284},{  699,  712, 0xC63400},{  650,  712, 0xDE4108}},
@@ -24,6 +26,44 @@ function rgbbj(str)
     end
     keepScreen(false)
     return ok
+end
+
+-- 多点找色（区域模板字符串）：按 AREA[str] = {x1, y1, x2, y2, colorsStr, sim} 解析并区域找色
+function findArea(str)
+    local t = AREA[str]
+    if t == nil then
+        logStr("脚本错误，请截图或拍照这个提示给脚本管理，findArea错误内容:" .. tostring(str))
+        error("findArea: 区域不存在: " .. tostring(str))
+    end
+    local x1, y1, x2, y2 = t[1], t[2], t[3], t[4]
+    local colorsStr = t[5]
+    local sim = t[6] or 0.9
+
+    -- 解析颜色模板字符串: "主色,dx,dy,颜色,dx,dy,颜色,..."（主色在前，之后每 3 项一组偏移坐标+颜色）
+    local parts = {}
+    for p in string.gmatch(tostring(colorsStr), "[^,]+") do
+        parts[#parts + 1] = p
+    end
+    -- 颜色可能带 "RRGGBB-偏色" 后缀，去掉后缀再转 0xRRGGBB
+    local function hexColor(s)
+        local dash = string.find(s, "-")
+        if dash then s = string.sub(s, 1, dash - 1) end
+        return tonumber("0x" .. s)
+    end
+    local mainColor = hexColor(parts[1])
+    local offsets = {}
+    local i = 2
+    while i + 2 <= #parts do
+        offsets[#offsets + 1] = {
+            x = tonumber(parts[i]),
+            y = tonumber(parts[i + 1]),
+            color = hexColor(parts[i + 2]),
+        }
+        i = i + 3
+    end
+    -- 用偏移点数组形式调用 findColors(主色, 偏移数组, x, y, w, h, sim)，兼容旧引擎
+    local x, y = findColors(mainColor, offsets, x1, y1, x2 - x1, y2 - y1, sim)
+    return x ~= nil
 end
 
 -- 单点RGB找色（范围）：bj(x, y, color, err)，x/y 为脚本坐标，color 为 0xRRGGBB
@@ -58,6 +98,7 @@ function main()
         closeNotice= true, -- 关闭游戏公告
         enterArea  = true, -- 选区进入游戏
         chooseRole = true, -- 选择角色
+        qiandao    = true, -- 每日签到
     }
     if type(settings) == "table" then
         for k, v in pairs(settings) do
@@ -87,6 +128,10 @@ function main()
             click(606,671,728,709) -- 进入游戏
             sleep(500)
             toast("进入游戏")
+        elseif findArea("每日签到") then
+            click(1132, 49, 1153, 70) -- 关闭每日签到
+            sleep(500)
+            toast("关闭每日签到")
         end
     end
 end

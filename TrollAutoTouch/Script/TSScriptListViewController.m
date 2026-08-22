@@ -12,6 +12,7 @@
 #import "../Common/TSPaths.h"
 #import "TSLuaBridge.h"
 #import "TSScriptCipher.h"
+#import "TSScriptEditorViewController.h"
 #import "../HUD/TSHUDHost.h"
 
 @interface TSScriptListViewController () <UITableViewDelegate, UITableViewDataSource>
@@ -60,6 +61,12 @@
     _tableView.rowHeight  = 52;
     [self.view addSubview:_tableView];
 
+    // 下拉刷新: 下拉到顶回弹时刷新脚本列表
+    UIRefreshControl *refreshControl = [[UIRefreshControl alloc] init];
+    [refreshControl addTarget:self action:@selector(_reload) forControlEvents:UIControlEventValueChanged];
+    refreshControl.tintColor = [TSColors tint];
+    _tableView.refreshControl = refreshControl;
+
     [self _setupNavBar];
 
     // 脚本运行状态变化时刷新"运行中"标记
@@ -92,10 +99,17 @@
     [title sizeToFit];
     self.navigationItem.titleView = title;
 
+    // 左上角: 新建脚本 "+"
     UIBarButtonItem *add = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                                                                           target:self
                                                                           action:@selector(_addScript)];
-    self.navigationItem.rightBarButtonItem = add;
+    self.navigationItem.leftBarButtonItem = add;
+
+    // 右上角: 刷新脚本列表
+    UIBarButtonItem *refresh = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                                                                             target:self
+                                                                             action:@selector(_reload)];
+    self.navigationItem.rightBarButtonItem = refresh;
 }
 
 - (void)_reload {
@@ -112,6 +126,11 @@
         return [b.modificationDate compare:a.modificationDate];
     }];
     [_tableView reloadData];
+
+    // 下拉刷新触发时，结束刷新动画
+    if (_tableView.refreshControl.isRefreshing) {
+        [_tableView.refreshControl endRefreshing];
+    }
 }
 
 #pragma mark - Actions
@@ -239,7 +258,7 @@
     if (_scripts.count == 0) {
         cell.textLabel.text = @"暂无脚本";
         cell.textLabel.textColor = [TSColors tertiaryLabel];
-        cell.detailTextLabel.text = @"点击右上角 + 创建新脚本";
+        cell.detailTextLabel.text = @"点击左上角 + 创建新脚本";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         if (@available(iOS 13.0, *)) {
             cell.imageView.image = [UIImage systemImageNamed:@"tray"];
@@ -322,6 +341,9 @@
             [self _encryptScript:e];
         }]];
     }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"✏️ 重命名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self _renameScript:e];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         [self _deleteScript:e];
     }]];
@@ -356,21 +378,50 @@
 
 #pragma mark - Helpers
 
+// 编辑: 打开全屏文本编辑器 (右上角"保存" / 左上角"取消")
 - (void)_editScript:(TSFileEntry *)e {
     // .tas 加密脚本禁止以明文查看/编辑源码
     if ([e.path.pathExtension.lowercaseString isEqualToString:@"tas"]) {
         [self _alert:@"加密脚本" msg:@"该脚本已加密，无法查看源码。"];
         return;
     }
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:[@"编辑 " stringByAppendingString:e.name]
-                                                                message:nil
+    TSScriptEditorViewController *editor = [[TSScriptEditorViewController alloc] init];
+    editor.filePath = e.path;
+    [self.navigationController pushViewController:editor animated:YES];
+}
+
+// 重命名: 仅修改主名, 保留原扩展名 (.lua/.tas)
+- (void)_renameScript:(TSFileEntry *)e {
+    NSString *ext = e.path.pathExtension; // lua / tas
+    NSString *oldBase = [e.name stringByDeletingPathExtension];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"重命名脚本"
+                                                                message:[NSString stringWithFormat:@"修改 %@ 的前缀名（扩展名 .%@ 保持不变）", e.name, ext]
                                                          preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = [[TSToolExecutor shared] readTextFile:e.path] ?: @"";
-        tf.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        tf.text = oldBase;
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [[TSToolExecutor shared] writeTextFile:e.path content:ac.textFields[0].text ?: @""];
+    [ac addAction:[UIAlertAction actionWithTitle:@"重命名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *base = ac.textFields[0].text ?: @"";
+        base = [base stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (base.length == 0) return;
+        NSString *newName = [base stringByAppendingPathExtension:ext];
+        if ([newName isEqualToString:e.name]) return; // 未修改
+        NSString *newPath = [TSPaths pathForLua:newName];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:newPath]) {
+            [self _alert:@"重命名失败" msg:[NSString stringWithFormat:@"同名文件 %@ 已存在", newName]];
+            return;
+        }
+        if (![[TSToolExecutor shared] moveItem:e.path to:newPath]) {
+            [self _alert:@"重命名失败" msg:@"文件移动失败"];
+            return;
+        }
+        // 重命名的是当前选中脚本 → 同步更新选中状态
+        if ([[TSScriptListViewController selectedScriptName] isEqualToString:e.name]) {
+            [TSScriptListViewController setSelectedScriptName:newName];
+        }
         [self _reload];
     }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
