@@ -279,6 +279,22 @@ static CGPoint tsScriptToActualPoint(CGPoint p) {
 static CGRect tsScriptToActualRect(CGRect r) {
     return tsTransformPixelRect(r, s_scriptOrientation, 0, tsPortraitPixelSize());
 }
+// 偏移点向量旋转: 脚本坐标系(横屏方向) -> 竖屏buffer坐标系。
+// rect 由 tsScriptToActualRect 旋转到竖屏buffer, 偏移向量必须同步旋转,
+// 否则横屏(init 1/2)下偏移点方向错位 90°, 导致多点找色"主色命中但偏移点不匹配"。
+//   home右(1): 向量(dx,dy) -> (-dy, dx);  home左(2): 向量(dx,dy) -> (dy, -dx);  竖屏(0): 恒等
+static void tsRotateOffsets(NSMutableArray<NSDictionary *> *offsets, NSInteger from) {
+    if (from == 0 || offsets.count == 0) return;
+    for (NSUInteger i = 0; i < offsets.count; i++) {
+        NSDictionary *o = offsets[i];
+        CGFloat dx = [o[@"x"] doubleValue];
+        CGFloat dy = [o[@"y"] doubleValue];
+        CGFloat nx, ny;
+        if (from == 1) { nx = -dy; ny = dx; }   // home 右
+        else           { nx = dy;  ny = -dx; }  // home 左
+        offsets[i] = @{@"x": @(nx), @"y": @(ny), @"color": o[@"color"]};
+    }
+}
 // buffer(竖屏物理方向, 像素) -> 脚本坐标系(像素): findColor/findColors/findImage/OCR 返回值用,
 // 否则 init(1) 下拿到的是截屏缓冲坐标, 直接 click 会二次错位。
 static CGPoint tsBufferToScriptPoint(CGPoint p) {
@@ -692,6 +708,7 @@ static int l_screen_findColors(lua_State *L) {
     }
 
     rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
+    tsRotateOffsets(offsets, s_scriptOrientation);  // 偏移点同步旋转, 否则横屏下方向错位
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) {
         NSString *err = [TSScreenCapture shared].lastError;
