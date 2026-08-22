@@ -37,13 +37,22 @@ NS_ASSUME_NONNULL_BEGIN
                          screenSize:(CGSize)screenSize;
 
 /// 找多色: 以主色定位，主色命中后再校验若干偏移点颜色。
+// 颜色匹配采用 AutoGo images.FindMultiColors 的逐通道偏色判定:
+//   |R1-R2|<=tolR && |G1-G2|<=tolG && |B1-B2|<=tolB
+// 容差来源: 主色用 mainTolR/G/B(全 0 时由 sim 生成 (1-sim)*255/通道);
+//          偏移点字典可带 tolR/tolG/tolB 键, 缺失时由 offsetSim 生成 (1-offsetSim)*255/通道。
 /// @param mainColor 主色 0xRRGGBB
-/// @param offsets   偏移点 [{@"x":dx,@"y":dy,@"color":0xRRGGBB}, ...]
+/// @param offsets   偏移点 [{@"x":dx,@"y":dy,@"color":0xRRGGBB,@"tolR":?,@"tolG":?,@"tolB":?}, ...]
+/// @param direction 扫描方向(AutoGo dir): 0=左→右/上→下, 1=右→左/上→下, 2=左→右/下→上, 3=右→左/下→上
 + (nullable TSColorResult *)findMultiColor:(int)mainColor
                                       rect:(CGRect)rect
-                                mainColorSim:(CGFloat)sim
+                               mainColorSim:(CGFloat)sim
+                                  mainTolR:(uint8_t)mainTolR
+                                  mainTolG:(uint8_t)mainTolG
+                                  mainTolB:(uint8_t)mainTolB
                                    offsets:(NSArray<NSDictionary *> *)offsets
-                               offsetSim:(CGFloat)offsetSim
+                                  offsetSim:(CGFloat)offsetSim
+                                  direction:(int)direction
                                     pixels:(const uint8_t *)pixels
                                      width:(int)w height:(int)h
                                 screenSize:(CGSize)screenSize;

@@ -1,7 +1,7 @@
 APP = "com.tencent.rxcq" -- APP 包名
 
 AREA={
-        ["每日签到"]	       ={1123, 41, 1161, 79, "0xbd2c31,-10,13,0x732429,0,22,0x732421,12,11,0x7b2029,0,11,0xd6d3c6,-7,4,0xefd7c6,8,20,0xce9252,-7,19,0xcea67b,5,6,0xe7cfb5", 0.9},
+        ["每日签到"]	       ={1123, 41, 1161, 79, "b53031,0,9,efe3ce,-12,10,842029", 0.9},
 
         ["游戏公告"]	       ={{  668,  492, 0xA57531},{  958,  161, 0xBD2831},{  843,  173, 0x5A5D63},{  573,  514, 0x393431},{  680,  167, 0xEFC794},{  669,  523, 0x8C4518}},
 	    ["选区进入游戏"]	   ={{  884,  526, 0xEF7510},{  891,  514, 0xFFBA10},{  855,  534, 0xDEC39C},{  921,  556, 0xC63800},{  857,  517, 0xEF9610},{  938,  539, 0xCEAE8C}},
@@ -31,6 +31,8 @@ function rgbbj(str)
 end
 
 -- 多点找色（区域模板字符串）：按 AREA[str] = {x1, y1, x2, y2, colorsStr, sim} 解析并区域找色
+-- 匹配语义 = AutoGo images.FindMultiColors: 逐通道偏色 |R1-R2|<=tolR && |G1-G2|<=tolG && |B1-B2|<=tolB
+-- 颜色支持 "RRGGBB-偏色" 后缀(每通道独立容差), 无偏色时容差 = (1-sim)*255/通道
 function findArea(str)
     local t = AREA[str]
     if t == nil then
@@ -41,34 +43,8 @@ function findArea(str)
     local colorsStr = t[5]
     local sim = t[6] or 0.9
 
-    -- 解析颜色模板字符串: "主色,dx,dy,颜色,dx,dy,颜色,..."（主色在前，之后每 3 项一组偏移坐标+颜色）
-    local parts = {}
-    for p in string.gmatch(tostring(colorsStr), "[^,]+") do
-        parts[#parts + 1] = p
-    end
-    -- 颜色格式兼容: RRGGBB / #RRGGBB / 0xRRGGBB，可带 "-偏色" 后缀（偏色忽略）
-    local function hexColor(s)
-        local dash = string.find(s, "-")
-        if dash then s = string.sub(s, 1, dash - 1) end
-        s = s:gsub("^#", "")
-        if s:lower():sub(1, 2) == "0x" then
-            return tonumber(s)
-        end
-        return tonumber("0x" .. s)
-    end
-    local mainColor = hexColor(parts[1])
-    local offsets = {}
-    local i = 2
-    while i + 2 <= #parts do
-        offsets[#offsets + 1] = {
-            x = tonumber(parts[i]),
-            y = tonumber(parts[i + 1]),
-            color = hexColor(parts[i + 2]),
-        }
-        i = i + 3
-    end
-    -- 用偏移点数组形式调用 findColors(主色, 偏移数组, x, y, w, h, sim)，兼容旧引擎
-    local x, y = findColors(mainColor, offsets, x1, y1, x2 - x1, y2 - y1, sim)
+    -- 风格2(AutoGo FindMultiColors): 原样传给原生层解析, 支持 "RRGGBB-偏色" 逐通道容差
+    local x, y = findColors(x1, y1, x2, y2, colorsStr, sim)
     if x ~= nil then return true end
 
     -- 失败诊断: 区分"区域/坐标不对(主色未命中)"与"颜色偏差(主色命中但偏移点不匹配)"
@@ -79,6 +55,44 @@ function findArea(str)
             _diagTS[str] = now
             local sw, sh = getScreenSize()
             local c = getColor(math.floor((x1 + x2) / 2), math.floor((y1 + y2) / 2))
+
+            -- 解析模板(含偏色)用于诊断, 与原生 tsParseColorSpec 语义一致
+            local parts = {}
+            for p in string.gmatch(tostring(colorsStr), "[^,]+") do
+                parts[#parts + 1] = p
+            end
+            local function colorTol(s)
+                local body, bias = s, nil
+                local dash = string.find(s, "-")
+                if dash then body = string.sub(s, 1, dash - 1); bias = string.sub(s, dash + 1) end
+                body = body:gsub("^#", "")
+                local color
+                if body:lower():sub(1, 2) == "0x" then color = tonumber(body)
+                else color = tonumber("0x" .. body) end
+                local baseTol = math.floor((1 - sim) * 255)
+                local tr, tg, tb = baseTol, baseTol, baseTol
+                if bias and #bias == 6 then
+                    local v = tonumber("0x" .. bias) or 0
+                    tr = math.min(255, math.floor(v / 65536) % 256 + baseTol)
+                    tg = math.min(255, math.floor(v / 256) % 256 + baseTol)
+                    tb = math.min(255, v % 256 + baseTol)
+                end
+                return color, tr, tg, tb
+            end
+            local mainColor, mTR, mTG, mTB = colorTol(parts[1])
+            local offsets = {}
+            local i = 2
+            while i + 2 <= #parts do
+                local oc, tr, tg, tb = colorTol(parts[i + 2])
+                offsets[#offsets + 1] = { x = tonumber(parts[i]), y = tonumber(parts[i + 1]),
+                                          color = oc, tr = tr, tg = tg, tb = tb }
+                i = i + 3
+            end
+            local function chOk(oc, color, tr, tg, tb)
+                local orr, ogg, obb = math.floor(oc / 65536) % 256, math.floor(oc / 256) % 256, oc % 256
+                local er, eg, eb = math.floor(color / 65536) % 256, math.floor(color / 256) % 256, color % 256
+                return math.abs(orr - er) <= tr and math.abs(ogg - eg) <= tg and math.abs(obb - eb) <= tb
+            end
             local mx, my = findColor(mainColor, x1, y1, x2 - x1, y2 - y1, sim)
             if mx then
                 -- 主色命中但偏移点不匹配: 采样偏移点实际颜色, 定位第一个不匹配项
@@ -86,7 +100,7 @@ function findArea(str)
                 keepScreen(true)
                 for _, o in ipairs(offsets) do
                     local oc = getColor(mx + o.x, my + o.y)
-                    if not bj(mx + o.x, my + o.y, o.color, 25) then
+                    if not chOk(oc, o.color, o.tr, o.tg, o.tb) then
                         bad = string.format("偏移(%+d,%+d) 期望0x%06X 实际0x%06X", o.x, o.y, o.color, oc)
                         break
                     end
@@ -101,7 +115,7 @@ function findArea(str)
                         elseif _SCRIPT_ORI == 2 then rx, ry = o.y, -o.x
                         else rx, ry = o.x, o.y end
                         local oc2 = getColor(mx + rx, my + ry)
-                        if not bj(mx + rx, my + ry, o.color, 25) then
+                        if not chOk(oc2, o.color, o.tr, o.tg, o.tb) then
                             bad2 = string.format("旋转校验(%+d,%+d) 期望0x%06X 实际0x%06X", rx, ry, o.color, oc2)
                             break
                         end

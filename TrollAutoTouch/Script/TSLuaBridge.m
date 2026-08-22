@@ -525,7 +525,8 @@ static CGRect l_optRect(lua_State *L, int idx, int *nextIdx) {
     return CGRectZero;
 }
 
-/// 解析偏移点表: {{dx=,dy=,color=} 或 {dx,dy,color}, ...}
+/// 解析偏移点表: {{dx=,dy=,color=,tolR=,tolG=,tolB=} 或 {dx,dy,color}, ...}
+///   tolR/tolG/tolB 为逐通道容差(可选), tolerance 为统一三通道容差(可选)
 static NSArray<NSDictionary *> *l_parseOffsets(lua_State *L, int idx) {
     NSMutableArray *offsets = [NSMutableArray array];
     if (!lua_istable(L, idx)) return offsets;
@@ -539,16 +540,30 @@ static NSArray<NSDictionary *> *l_parseOffsets(lua_State *L, int idx) {
             lua_getfield(L, -1, "dx"); BOOL hasDx = !lua_isnil(L, -1); lua_pop(L, 1);
             lua_getfield(L, -1, "dy"); BOOL hasDy = !lua_isnil(L, -1); lua_pop(L, 1);
             lua_getfield(L, -1, "color"); BOOL hasColor = !lua_isnil(L, -1); lua_pop(L, 1);
+            // 可选逐通道容差
+            lua_getfield(L, -1, "tolR"); BOOL hasTolR = !lua_isnil(L, -1); lua_pop(L, 1);
+            lua_getfield(L, -1, "tolG"); BOOL hasTolG = !lua_isnil(L, -1); lua_pop(L, 1);
+            lua_getfield(L, -1, "tolB"); BOOL hasTolB = !lua_isnil(L, -1); lua_pop(L, 1);
+            lua_getfield(L, -1, "tolerance"); BOOL hasTol = !lua_isnil(L, -1); lua_pop(L, 1);
+            NSMutableDictionary *md = [NSMutableDictionary dictionary];
+            if (hasTolR) { lua_getfield(L, -1, "tolR"); md[@"tolR"] = @((int)lua_tointeger(L, -1)); lua_pop(L, 1); }
+            if (hasTolG) { lua_getfield(L, -1, "tolG"); md[@"tolG"] = @((int)lua_tointeger(L, -1)); lua_pop(L, 1); }
+            if (hasTolB) { lua_getfield(L, -1, "tolB"); md[@"tolB"] = @((int)lua_tointeger(L, -1)); lua_pop(L, 1); }
+            if (hasTol)  { lua_getfield(L, -1, "tolerance");
+                           int t = (int)lua_tointeger(L, -1); lua_pop(L, 1);
+                           md[@"tolR"] = md[@"tolG"] = md[@"tolB"] = @(t); }
             if (hasDx || hasDy || hasColor) {
                 lua_getfield(L, -1, "dx");  double dx = luaL_optnumber(L, -1, 0); lua_pop(L, 1);
                 lua_getfield(L, -1, "dy");  double dy = luaL_optnumber(L, -1, 0); lua_pop(L, 1);
                 lua_getfield(L, -1, "color"); int color = (int)luaL_optinteger(L, -1, 0); lua_pop(L, 1);
-                [offsets addObject:@{@"x": @(dx), @"y": @(dy), @"color": @(color)}];
+                md[@"x"] = @(dx); md[@"y"] = @(dy); md[@"color"] = @(color);
+                [offsets addObject:md];
             } else {
                 lua_rawgeti(L, -1, 1); double dx = luaL_optnumber(L, -1, 0); lua_pop(L, 1);
                 lua_rawgeti(L, -1, 2); double dy = luaL_optnumber(L, -1, 0); lua_pop(L, 1);
                 lua_rawgeti(L, -1, 3); int color = (int)luaL_optinteger(L, -1, 0); lua_pop(L, 1);
-                [offsets addObject:@{@"x": @(dx), @"y": @(dy), @"color": @(color)}];
+                md[@"x"] = @(dx); md[@"y"] = @(dy); md[@"color"] = @(color);
+                [offsets addObject:md];
             }
         }
         lua_pop(L, 1);
@@ -576,37 +591,64 @@ static BOOL tsIsHexColor(NSString *spec) {
     return YES;
 }
 
-/// 解析颜色规格为整数 0xRRGGBB(色偏后缀忽略)
-static int tsParseHexColor(NSString *spec) {
+/// AutoGo str2color: 解析颜色规格 "RRGGBB" / "#RRGGBB" / "0xRRGGBB" / "RRGGBB-偏色"(6位hex)
+///   每通道容差 = 偏色通道值 + (1-sim)*255; 无偏色后缀时仅 (1-sim)*255(每通道)
+static void tsParseColorSpec(NSString *spec, CGFloat sim,
+                             int *colorOut,
+                             uint8_t *tolROut, uint8_t *tolGOut, uint8_t *tolBOut) {
     spec = [spec stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (!spec.length) return 0;
+    uint8_t baseTol = sim > 0 ? (uint8_t)((1.0 - sim) * 255.0) : 0;
+    uint8_t tolR = baseTol, tolG = baseTol, tolB = baseTol;
+    int color = 0;
     NSRange dash = [spec rangeOfString:@"-"];
-    if (dash.location != NSNotFound) spec = [spec substringToIndex:dash.location];
+    if (dash.location != NSNotFound) {
+        NSString *dashPart = [spec substringFromIndex:dash.location + 1];
+        if (dashPart.length == 6) {
+            unsigned int v = 0;
+            [[NSScanner scannerWithString:dashPart] scanHexInt:&v];
+            tolR = (uint8_t)MIN(255, ((v >> 16) & 0xFF) + baseTol);
+            tolG = (uint8_t)MIN(255, ((v >> 8) & 0xFF) + baseTol);
+            tolB = (uint8_t)MIN(255, (v & 0xFF) + baseTol);
+        }
+        spec = [spec substringToIndex:dash.location];
+    }
     if ([spec hasPrefix:@"#"]) spec = [spec substringFromIndex:1];
     if ([spec hasPrefix:@"0x"] || [spec hasPrefix:@"0X"]) spec = [spec substringFromIndex:2];
-    unsigned int v = 0;
-    [[NSScanner scannerWithString:spec] scanHexInt:&v];
-    return (int)(v & 0xFFFFFF);
+    unsigned int c = 0;
+    [[NSScanner scannerWithString:spec] scanHexInt:&c];
+    color = (int)(c & 0xFFFFFF);
+    if (colorOut) *colorOut = color;
+    if (tolROut) *tolROut = tolR;
+    if (tolGOut) *tolGOut = tolG;
+    if (tolBOut) *tolBOut = tolB;
 }
 
 /// 解析颜色模板字符串(AutoGo images.FindMultiColors 风格):
 ///   格式: "主色,dx,dy,颜色,dx,dy,颜色,..."
 ///   第一个元素为主色, 之后每 3 个元素一组 {dx, dy, color} 为一个偏移点(偏移在前, 颜色在后)
-///   颜色支持 "RRGGBB-偏色" 后缀(偏色忽略, 统一用 sim 控制)
-static void tsParseMultiColorString(NSString *str, int *mainColorOut,
+///   颜色支持 "RRGGBB-偏色" 后缀(每通道独立容差, 无偏色时用 (1-sim)*255)
+static void tsParseMultiColorString(NSString *str, CGFloat sim,
+                                    int *mainColorOut,
+                                    uint8_t *mainTolROut, uint8_t *mainTolGOut, uint8_t *mainTolBOut,
                                     NSMutableArray<NSDictionary *> *offsetsOut) {
     if (!str.length) return;
     NSArray<NSString *> *parts = [str componentsSeparatedByString:@","];
     NSInteger n = (NSInteger)parts.count;
     if (n < 1) return;
-    int mainColor = tsParseHexColor(parts[0]);
+    int mainColor = 0; uint8_t mTR = 0, mTG = 0, mTB = 0;
+    tsParseColorSpec(parts[0], sim, &mainColor, &mTR, &mTG, &mTB);
     if (mainColorOut) *mainColorOut = mainColor;
+    if (mainTolROut) *mainTolROut = mTR;
+    if (mainTolGOut) *mainTolGOut = mTG;
+    if (mainTolBOut) *mainTolBOut = mTB;
     for (NSInteger i = 1; i + 2 < n; i += 3) {
         if (!tsIsHexColor(parts[i + 2])) continue;   // 非法偏移点跳过
         double dx = [parts[i] doubleValue];
         double dy = [parts[i + 1] doubleValue];
-        int c = tsParseHexColor(parts[i + 2]);
-        [offsetsOut addObject:@{@"x": @(dx), @"y": @(dy), @"color": @(c)}];
+        int c = 0; uint8_t tr = 0, tg = 0, tb = 0;
+        tsParseColorSpec(parts[i + 2], sim, &c, &tr, &tg, &tb);
+        [offsetsOut addObject:@{@"x": @(dx), @"y": @(dy), @"color": @(c),
+                                @"tolR": @(tr), @"tolG": @(tg), @"tolB": @(tb)}];
     }
 }
 
@@ -652,20 +694,24 @@ static int l_screen_findColor(lua_State *L) {
 }
 
 /// 多点找色:
-///   风格1(偏移点table): findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim])
-///   风格2(AutoGo images.FindMultiColors): findColors(x1, y1, x2, y2, colorsStr[, sim])
+///   风格1(偏移点table): findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim][, dir])
+///     偏移点项可带 tolR/tolG/tolB(逐通道容差)或 tolerance(统一容差)字段, 缺省时由 offSim 生成
+///   风格2(AutoGo images.FindMultiColors): findColors(x1, y1, x2, y2, colorsStr[, sim][, dir])
 ///     colorsStr 颜色模板字符串: "主色,dx,dy,颜色,dx,dy,颜色,..." 主色在前,
-///     之后每 3 项一组 {dx, dy, color} 为偏移点; 颜色支持 "RRGGBB-偏色" 后缀(偏色忽略)
-///     x2/y2 为 0 表示使用屏幕最大宽高
+///     之后每 3 项一组 {dx, dy, color} 为偏移点; 颜色支持 "RRGGBB-偏色" 后缀(逐通道容差)
+///     匹配为 AutoGo 逐通道偏色判定: |R1-R2|<=tolR && |G1-G2|<=tolG && |B1-B2|<=tolB
+///     x2/y2 为 0 表示使用屏幕最大宽高; dir 为扫描方向(0~3)
 static int l_screen_findColors(lua_State *L) {
     int mainColor = 0;
     NSMutableArray<NSDictionary *> *offsets = [NSMutableArray array];
     CGRect rect;
     CGFloat sim = 0.9, offSim = 0.9;
+    int dir = 0;
+    uint8_t mTR = 0, mTG = 0, mTB = 0;
 
     if (lua_gettop(L) >= 5 && lua_isnumber(L, 1) && lua_isnumber(L, 2)
         && lua_isnumber(L, 3) && lua_isnumber(L, 4) && lua_isstring(L, 5)) {
-        // ---- 风格2: findColors(x1, y1, x2, y2, colorsStr[, sim]) ----
+        // ---- 风格2: findColors(x1, y1, x2, y2, colorsStr[, sim][, dir]) ----
         CGFloat x1 = luaL_checknumber(L, 1);
         CGFloat y1 = luaL_checknumber(L, 2);
         CGFloat x2 = luaL_checknumber(L, 3);
@@ -674,8 +720,9 @@ static int l_screen_findColors(lua_State *L) {
         if (lua_gettop(L) >= 6 && lua_isnumber(L, 6)) sim = (CGFloat)lua_tonumber(L, 6);
         if (sim <= 0 || sim > 1) sim = 0.9;
         offSim = sim;
+        if (lua_gettop(L) >= 7 && lua_isnumber(L, 7)) dir = (int)lua_tointeger(L, 7);
 
-        tsParseMultiColorString(colorsStr, &mainColor, offsets);
+        tsParseMultiColorString(colorsStr, sim, &mainColor, &mTR, &mTG, &mTB, offsets);
         if (offsets.count == 0) {
             lua_log(@"findColors: 颜色模板字符串解析失败(无偏移点)");
             lua_pushnil(L); return 1;
@@ -688,22 +735,24 @@ static int l_screen_findColors(lua_State *L) {
         if (y2 < y1) { CGFloat t = y1; y1 = y2; y2 = t; }
         rect = CGRectMake(x1, y1, x2 - x1, y2 - y1);
     } else {
-        // ---- 风格1: findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim]) ----
+        // ---- 风格1: findColors(mainColor, offsets[, x, y, w, h][, sim][, offSim][, dir]) ----
         mainColor = (int)luaL_checkinteger(L, 1);
         if (lua_istable(L, 2)) {
-            // 标准顺序: (mainColor, offsets, x,y,w,h, sim, offSim)
+            // 标准顺序: (mainColor, offsets, x,y,w,h, sim, offSim, dir)
             [offsets addObjectsFromArray:l_parseOffsets(L, 2)];
             int next = 3;
             rect = l_optRect(L, 3, &next);
             sim = (CGFloat)luaL_optnumber(L, next, 0.9);
             offSim = (CGFloat)luaL_optnumber(L, next + 1, sim);
+            dir = (int)luaL_optinteger(L, next + 2, 0);
         } else {
-            // 文档顺序: (mainColor, x,y,w,h, offsets, sim, offSim)
+            // 文档顺序: (mainColor, x,y,w,h, offsets, sim, offSim, dir)
             int next = 2;
             rect = l_optRect(L, 2, &next);
             [offsets addObjectsFromArray:l_parseOffsets(L, next)];
             sim = (CGFloat)luaL_optnumber(L, next + 1, 0.9);
             offSim = (CGFloat)luaL_optnumber(L, next + 2, sim);
+            dir = (int)luaL_optinteger(L, next + 3, 0);
         }
     }
 
@@ -721,8 +770,10 @@ static int l_screen_findColors(lua_State *L) {
     }
     CGSize ss = screenPixelSize();
     TSColorResult *res = [TSColorFinder findMultiColor:mainColor rect:rect mainColorSim:sim
+                                             mainTolR:mTR mainTolG:mTG mainTolB:mTB
                                               offsets:offsets offsetSim:offSim
-                                              pixels:px width:w height:h screenSize:ss];
+                                             direction:dir
+                                               pixels:px width:w height:h screenSize:ss];
     free(px);
     if (!res) { lua_pushnil(L); return 1; }
     CGPoint pt = tsBufferToScriptPoint(res.point);   // buffer坐标 -> 脚本坐标系

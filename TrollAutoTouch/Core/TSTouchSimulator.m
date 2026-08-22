@@ -69,8 +69,10 @@
     TSColorResult *r = [TSColorFinder findMultiColor:mainColor
                                                  rect:rect
                                           mainColorSim:sim
+                                             mainTolR:0 mainTolG:0 mainTolB:0
                                                offsets:offsets
                                              offsetSim:offsetSim
+                                            direction:0
                                                  pixels:pixels
                                                   width:w height:h
                                              screenSize:screenSize];

@@ -86,15 +86,24 @@ done:
 + (TSColorResult *)findMultiColor:(int)mainColor
                               rect:(CGRect)rect
                        mainColorSim:(CGFloat)sim
+                          mainTolR:(uint8_t)mainTolR
+                          mainTolG:(uint8_t)mainTolG
+                          mainTolB:(uint8_t)mainTolB
                            offsets:(NSArray<NSDictionary *> *)offsets
                           offsetSim:(CGFloat)offsetSim
+                          direction:(int)direction
                             pixels:(const uint8_t *)pixels
                              width:(int)w height:(int)h
                         screenSize:(CGSize)screenSize {
     if (sim <= 0) sim = 0.9;
     if (offsetSim <= 0) offsetSim = sim;
-    int maxMain = (int)((1.0 - sim) * 3.0 * 255.0 * 255.0);
-    int maxOff  = (int)((1.0 - offsetSim) * 3.0 * 255.0 * 255.0);
+    // AutoGo str2color: 无偏色后缀时每通道容差 = (1-sim)*255
+    uint8_t baseTol = (uint8_t)((1.0 - sim) * 255.0);
+    uint8_t offTol  = (uint8_t)((1.0 - offsetSim) * 255.0);
+    if (mainTolR == 0 && mainTolG == 0 && mainTolB == 0) {
+        mainTolR = mainTolG = mainTolB = baseTol;
+    }
+    int mR = (mainColor >> 16) & 0xFF, mG = (mainColor >> 8) & 0xFF, mB = mainColor & 0xFF;
 
     CGFloat sx = (CGFloat)w / screenSize.width;
     CGFloat sy = (CGFloat)h / screenSize.height;
@@ -105,25 +114,43 @@ done:
     x0 = MAX(0, x0); y0 = MAX(0, y0);
     x1 = MIN(w, x1); y1 = MIN(h, y1);
 
-    for (int y = y0; y < y1; y++) {
-        const uint8_t *row = pixels + y * w * 4;
-        for (int x = x0; x < x1; x++) {
-            const uint8_t *c = row + x * 4;
-            int got = (c[0] << 16) | (c[1] << 8) | c[2];
-            if ([self colorDiffBetween:got and:mainColor] > maxMain) { continue; }
+    // AutoGo dir 扫描方向: 0=左→右/上→下, 1=右→左/上→下, 2=左→右/下→上, 3=右→左/下→上
+    int stepX = (direction == 1 || direction == 3) ? -1 : 1;
+    int stepY = (direction == 2 || direction == 3) ? -1 : 1;
+    int xs = stepX > 0 ? x0 : x1 - 1;
+    int ys = stepY > 0 ? y0 : y1 - 1;
+    int xe = stepX > 0 ? x1 : x0 - 1;
+    int ye = stepY > 0 ? y1 : y0 - 1;
 
-            // 主色命中，校验偏移点
+    for (int y = ys; y != ye; y += stepY) {
+        const uint8_t *row = pixels + y * w * 4;
+        for (int x = xs; x != xe; x += stepX) {
+            const uint8_t *c = row + x * 4;
+            // isColorMatch: 主色逐通道偏色判定
+            int dr = c[0] - mR; if (dr < 0) dr = -dr;
+            int dg = c[1] - mG; if (dg < 0) dg = -dg;
+            int db = c[2] - mB; if (db < 0) db = -db;
+            if (dr > mainTolR || dg > mainTolG || db > mainTolB) { continue; }
+
+            // 主色命中，校验偏移点(compareColorsInSequence)
             BOOL allOk = YES;
             for (NSDictionary *off in offsets) {
-                CGFloat dx = [off[@"x"] doubleValue];
-                CGFloat dy = [off[@"y"] doubleValue];
+                int dx = (int)([off[@"x"] doubleValue] * sx);
+                int dy = (int)([off[@"y"] doubleValue] * sy);
                 int oc = [off[@"color"] intValue];
-                int opx = x + (int)(dx * sx);
-                int opy = y + (int)(dy * sy);
+                NSNumber *tr = off[@"tolR"];
+                uint8_t oR = tr ? (uint8_t)tr.intValue : offTol;
+                NSNumber *tg = off[@"tolG"];
+                uint8_t oG = tg ? (uint8_t)tg.intValue : offTol;
+                NSNumber *tb = off[@"tolB"];
+                uint8_t oB = tb ? (uint8_t)tb.intValue : offTol;
+                int opx = x + dx, opy = y + dy;
                 if (opx < 0 || opx >= w || opy < 0 || opy >= h) { allOk = NO; break; }
-                const uint8_t *oc2 = pixels + (opy * w + opx) * 4;
-                int ogot = (oc2[0] << 16) | (oc2[1] << 8) | oc2[2];
-                if ([self colorDiffBetween:ogot and:oc] > maxOff) { allOk = NO; break; }
+                const uint8_t *o = pixels + (opy * w + opx) * 4;
+                int odr = o[0] - ((oc >> 16) & 0xFF); if (odr < 0) odr = -odr;
+                int odg = o[1] - ((oc >> 8) & 0xFF);  if (odg < 0) odg = -odg;
+                int odb = o[2] - (oc & 0xFF);         if (odb < 0) odb = -odb;
+                if (odr > oR || odg > oG || odb > oB) { allOk = NO; break; }
             }
             if (allOk) {
                 TSColorResult *r = [TSColorResult new];

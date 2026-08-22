@@ -494,8 +494,10 @@
     }
     CGSize ss = [UIScreen mainScreen].bounds.size;
     TSColorResult *res = [TSColorFinder findMultiColor:mainColor rect:rect mainColorSim:sim
+                                             mainTolR:0 mainTolG:0 mainTolB:0
                                               offsets:offsets offsetSim:sim
-                                              pixels:px width:w height:h screenSize:ss];
+                                             direction:0
+                                               pixels:px width:w height:h screenSize:ss];
     free(px);
     
     if (res) {
