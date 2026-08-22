@@ -610,9 +610,10 @@ static NSData *WSTextFrame(NSString *text) {
 - (void)serveScreenshot:(int)clientFd {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIImage *img = [[TSScreenCapture shared] captureImage];
-        NSData *jpeg = UIImageJPEGRepresentation(img, 0.6);
+        // 用 PNG 无损编码，保证颜色与原图完全一致（找色工具需要精确颜色）
+        NSData *png = UIImagePNGRepresentation(img);
         dispatch_async(self->_serverQueue, ^{
-            NSData *resp = HTTPResponse(200, @"OK", @"image/jpeg", jpeg ?: [NSData data], nil);
+            NSData *resp = HTTPResponse(200, @"OK", @"image/png", png ?: [NSData data], nil);
             send(clientFd, resp.bytes, resp.length, 0);
             close(clientFd);
         });
