@@ -32,6 +32,52 @@
 #import <unistd.h>
 #import <IOKit/IOKitLib.h>
 
+// MARK: - Display P3 广色域 → sRGB 转换
+// iPhone 7 及之后的屏幕为 Display P3 广色域，IOSurface 像素是 P3 值。
+// 若直接按 sRGB 解释/显示会整体偏淡、发灰，导致找色、取色颜色与手机屏幕不一致。
+// 此转换把所有像素统一到标准 sRGB，保证截图、取色、Lua 脚本比对颜色完全一致。
+// sRGB 屏（如 iPhone 6s）检测为 NO，行为与原版完全一致，无任何性能损失。
+static float _srgbToLinearLUT[256];
+static uint8_t _linearToSrgbLUT[4096];
+
+static void _initColorLUTs(void) {
+    for (int i = 0; i < 256; i++) {
+        double v = i / 255.0;
+        _srgbToLinearLUT[i] = (float)(v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
+    }
+    for (int i = 0; i < 4096; i++) {
+        double v = i / 4095.0;
+        double o = v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+        int b = (int)lround(o * 255.0);
+        _linearToSrgbLUT[i] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
+    }
+}
+
+static void _ensureColorLUTs(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ _initColorLUTs(); });
+}
+
+static inline uint8_t _srgbEncode(float lin) {
+    if (lin <= 0.0f) return 0;
+    if (lin >= 1.0f) return 255;
+    int idx = (int)(lin * 4095.0f + 0.5f);
+    return _linearToSrgbLUT[idx < 0 ? 0 : (idx > 4095 ? 4095 : idx)];
+}
+
+// 屏幕是否为 P3 广色域
+static BOOL _screenUsesP3(void) {
+    static BOOL p3 = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        UIScreen *screen = [UIScreen mainScreen];
+        if ([screen respondsToSelector:@selector(traitCollection)]) {
+            p3 = (screen.traitCollection.displayGamut == UIDisplayGamutP3);
+        }
+    });
+    return p3;
+}
+
 // ---------- IOSurface / IOMobileFramebuffer 私有接口 ----------
 typedef struct __IOSurface *IOSurfaceRef;
 
@@ -218,15 +264,34 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     }
 
     uint32_t fmt = pixelFormatFn ? pixelFormatFn(readSurface) : 0x42475241; // 默认假设 BGRA
+    // P3 广色域屏需要把像素转换到 sRGB（sRGB 屏为 NO，行为与原版一致）
+    BOOL p3ToSrgb = _screenUsesP3();
+    if (p3ToSrgb) {
+        _ensureColorLUTs();
+    }
     for (size_t y = 0; y < h; y++) {
         uint8_t *src = (uint8_t *)base + y * bpr;
         uint8_t *dst = out + y * w * 4;
         for (size_t x = 0; x < w; x++) {
             if (fmt == 0x42475241 /*BGRA*/) {
-                dst[x*4+0] = src[x*4+2]; // R
-                dst[x*4+1] = src[x*4+1]; // G
-                dst[x*4+2] = src[x*4+0]; // B
-                dst[x*4+3] = 255;
+                uint8_t R = src[x*4+2];
+                uint8_t G = src[x*4+1];
+                uint8_t B = src[x*4+0];
+                if (p3ToSrgb) {
+                    // Display P3 → sRGB（线性域 3x3 矩阵，D65 白点）
+                    float rl = _srgbToLinearLUT[R];
+                    float gl = _srgbToLinearLUT[G];
+                    float bl = _srgbToLinearLUT[B];
+                    dst[x*4+0] = _srgbEncode( 1.224940f*rl - 0.224940f*gl);
+                    dst[x*4+1] = _srgbEncode(-0.042057f*rl + 1.042057f*gl);
+                    dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
+                    dst[x*4+3] = 255;
+                } else {
+                    dst[x*4+0] = R;
+                    dst[x*4+1] = G;
+                    dst[x*4+2] = B;
+                    dst[x*4+3] = 255;
+                }
             } else {
                 dst[x*4+0] = src[x*4+0];
                 dst[x*4+1] = src[x*4+1];
