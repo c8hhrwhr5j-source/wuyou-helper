@@ -1,7 +1,7 @@
 APP = "com.tencent.rxcq" -- APP 包名
 
 AREA={
-        ["每日签到"]	       ={1123, 41, 1161, 79, "bd2c31,-10,13,732429,0,22,732421,12,11,7b2029,0,11,d6d3c6,-7,4,efd7c6,8,20,ce9252,-7,19,cea67b,5,6,e7cfb5", 0.9},
+        ["每日签到"]	       ={1123, 41, 1161, 79, "0xbd2c31,-10,13,0x732429,0,22,0x732421,12,11,0x7b2029,0,11,0xd6d3c6,-7,4,0xefd7c6,8,20,0xce9252,-7,19,0xcea67b,5,6,0xe7cfb5", 0.9},
 
         ["游戏公告"]	       ={{  668,  492, 0xA57531},{  958,  161, 0xBD2831},{  843,  173, 0x5A5D63},{  573,  514, 0x393431},{  680,  167, 0xEFC794},{  669,  523, 0x8C4518}},
 	    ["选区进入游戏"]	   ={{  884,  526, 0xEF7510},{  891,  514, 0xFFBA10},{  855,  534, 0xDEC39C},{  921,  556, 0xC63800},{  857,  517, 0xEF9610},{  938,  539, 0xCEAE8C}},
@@ -44,10 +44,14 @@ function findArea(str)
     for p in string.gmatch(tostring(colorsStr), "[^,]+") do
         parts[#parts + 1] = p
     end
-    -- 颜色可能带 "RRGGBB-偏色" 后缀，去掉后缀再转 0xRRGGBB
+    -- 颜色格式兼容: RRGGBB / #RRGGBB / 0xRRGGBB，可带 "-偏色" 后缀（偏色忽略）
     local function hexColor(s)
         local dash = string.find(s, "-")
         if dash then s = string.sub(s, 1, dash - 1) end
+        s = s:gsub("^#", "")
+        if s:lower():sub(1, 2) == "0x" then
+            return tonumber(s)
+        end
         return tonumber("0x" .. s)
     end
     local mainColor = hexColor(parts[1])
@@ -63,7 +67,21 @@ function findArea(str)
     end
     -- 用偏移点数组形式调用 findColors(主色, 偏移数组, x, y, w, h, sim)，兼容旧引擎
     local x, y = findColors(mainColor, offsets, x1, y1, x2 - x1, y2 - y1, sim)
-    return x ~= nil
+    if x ~= nil then return true end
+
+    -- 失败诊断: 区分"区域/坐标不对(主色未命中)"与"颜色偏差(主色命中但偏移点不匹配)"
+    if logStr then
+        local c = getColor(math.floor((x1 + x2) / 2), math.floor((y1 + y2) / 2))
+        local mx, my = findColor(mainColor, x1, y1, x2 - x1, y2 - y1, sim)
+        if mx then
+            logStr(string.format("findArea[%s] 失败: 主色命中(%d,%d)但偏移点不匹配 sim=%.2f 主色=0x%06X 区域中心色=0x%06X",
+                                 str, mx, my, sim, mainColor, c))
+        else
+            logStr(string.format("findArea[%s] 失败: 区域(%d,%d,%d,%d)内未找到主色 0x%06X sim=%.2f 中心采样色=0x%06X",
+                                 str, x1, y1, x2, y2, mainColor, sim, c))
+        end
+    end
+    return false
 end
 
 -- 单点RGB找色（范围）：bj(x, y, color, err)，x/y 为脚本坐标，color 为 0xRRGGBB
@@ -129,7 +147,7 @@ function main()
             sleep(500)
             toast("进入游戏")
         elseif findArea("每日签到") then
-            click(1132, 49, 1153, 70) -- 关闭每日签到
+            click(1131,50,1156,71) -- 关闭每日签到
             sleep(500)
             toast("关闭每日签到")
         end
