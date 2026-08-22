@@ -81,8 +81,19 @@ function findArea(str)
             local c = getColor(math.floor((x1 + x2) / 2), math.floor((y1 + y2) / 2))
             local mx, my = findColor(mainColor, x1, y1, x2 - x1, y2 - y1, sim)
             if mx then
-                logStr(string.format("findArea[%s] 失败: 主色命中(%d,%d)但偏移点不匹配 sim=%.2f 主色=0x%06X 中心色=0x%06X 屏幕=%.0fx%.0f",
-                                     str, mx, my, sim, mainColor, c, sw, sh))
+                -- 主色命中但偏移点不匹配: 采样偏移点实际颜色, 定位第一个不匹配项
+                local bad = "无(偏移点全部匹配?)"
+                keepScreen(true)
+                for _, o in ipairs(offsets) do
+                    local oc = getColor(mx + o.x, my + o.y)
+                    if not bj(mx + o.x, my + o.y, o.color, 25) then
+                        bad = string.format("偏移(%+d,%+d) 期望0x%06X 实际0x%06X", o.x, o.y, o.color, oc)
+                        break
+                    end
+                end
+                keepScreen(false)
+                logStr(string.format("findArea[%s] 失败: 主色命中(%d,%d)但偏移点不匹配 sim=%.2f 主色=0x%06X 中心色=0x%06X 屏幕=%.0fx%.0f [%s]",
+                                     str, mx, my, sim, mainColor, c, sw, sh, bad))
             else
                 logStr(string.format("findArea[%s] 失败: 区域(%d,%d,%d,%d)未找到主色 0x%06X sim=%.2f 中心色=0x%06X 屏幕=%.0fx%.0f",
                                      str, x1, y1, x2, y2, mainColor, sim, c, sw, sh))
