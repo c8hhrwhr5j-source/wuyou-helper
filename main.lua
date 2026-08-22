@@ -91,6 +91,24 @@ function findArea(str)
                         break
                     end
                 end
+                -- 横屏(init 1/2)诊断: 模拟原生修复后的旋转偏移位置颜色,
+                -- 用于区分"原生未旋转(旧IPA/修复未生效)"与"该位置颜色本身不匹配(模板/画面)"
+                if sw > sh then
+                    local bad2
+                    for _, o in ipairs(offsets) do
+                        local rx, ry
+                        if _SCRIPT_ORI == 1 then rx, ry = -o.y, o.x
+                        elseif _SCRIPT_ORI == 2 then rx, ry = o.y, -o.x
+                        else rx, ry = o.x, o.y end
+                        local oc2 = getColor(mx + rx, my + ry)
+                        if not bj(mx + rx, my + ry, o.color, 25) then
+                            bad2 = string.format("旋转校验(%+d,%+d) 期望0x%06X 实际0x%06X", rx, ry, o.color, oc2)
+                            break
+                        end
+                    end
+                    if bad2 then bad = bad .. " | " .. bad2
+                    else bad = bad .. " | 旋转校验全部匹配(原生已旋转则必成功)" end
+                end
                 keepScreen(false)
                 logStr(string.format("findArea[%s] 失败: 主色命中(%d,%d)但偏移点不匹配 sim=%.2f 主色=0x%06X 中心色=0x%06X 屏幕=%.0fx%.0f [%s]",
                                      str, mx, my, sim, mainColor, c, sw, sh, bad))
@@ -215,6 +233,7 @@ function appsl()
     end
 end
 
-init(1)
+_SCRIPT_ORI = 1   -- 与下方 init() 参数保持一致, 用于诊断模拟偏移旋转
+init(_SCRIPT_ORI)
 
 main()
