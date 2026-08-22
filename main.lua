@@ -9,6 +9,8 @@ AREA={
 }       
 
 -- 多点RGB找色（范围找）：按 AREA[str] 数组逐点取色，全部点在误差 25 内返回 true
+local _diagTS = {}  -- findArea 失败诊断节流: 同一区域每 3 秒最多输出一次
+
 function rgbbj(str)
     local pts = AREA[str]
     if pts == nil then
@@ -70,15 +72,21 @@ function findArea(str)
     if x ~= nil then return true end
 
     -- 失败诊断: 区分"区域/坐标不对(主色未命中)"与"颜色偏差(主色命中但偏移点不匹配)"
+    -- 节流: 同一区域每 3 秒最多输出一次, 避免主循环每 100ms 截屏+刷屏
     if logStr then
-        local c = getColor(math.floor((x1 + x2) / 2), math.floor((y1 + y2) / 2))
-        local mx, my = findColor(mainColor, x1, y1, x2 - x1, y2 - y1, sim)
-        if mx then
-            logStr(string.format("findArea[%s] 失败: 主色命中(%d,%d)但偏移点不匹配 sim=%.2f 主色=0x%06X 区域中心色=0x%06X",
-                                 str, mx, my, sim, mainColor, c))
-        else
-            logStr(string.format("findArea[%s] 失败: 区域(%d,%d,%d,%d)内未找到主色 0x%06X sim=%.2f 中心采样色=0x%06X",
-                                 str, x1, y1, x2, y2, mainColor, sim, c))
+        local now = os.time()
+        if now - (_diagTS[str] or 0) >= 3 then
+            _diagTS[str] = now
+            local sw, sh = getScreenSize()
+            local c = getColor(math.floor((x1 + x2) / 2), math.floor((y1 + y2) / 2))
+            local mx, my = findColor(mainColor, x1, y1, x2 - x1, y2 - y1, sim)
+            if mx then
+                logStr(string.format("findArea[%s] 失败: 主色命中(%d,%d)但偏移点不匹配 sim=%.2f 主色=0x%06X 中心色=0x%06X 屏幕=%.0fx%.0f",
+                                     str, mx, my, sim, mainColor, c, sw, sh))
+            else
+                logStr(string.format("findArea[%s] 失败: 区域(%d,%d,%d,%d)未找到主色 0x%06X sim=%.2f 中心色=0x%06X 屏幕=%.0fx%.0f",
+                                     str, x1, y1, x2, y2, mainColor, sim, c, sw, sh))
+            end
         end
     end
     return false
