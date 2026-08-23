@@ -355,6 +355,8 @@ static NSData *WSTextFrame(NSString *text) {
         [self handleRun:clientFd body:body];
     } else if ([path isEqualToString:@"/api/stop"] && [method isEqualToString:@"POST"]) {
         [self handleStop:clientFd];
+    } else if ([path isEqualToString:@"/api/upload"] && [method isEqualToString:@"POST"]) {
+        [self handleUpload:clientFd body:body];
     } else if ([path isEqualToString:@"/api/key"] && [method isEqualToString:@"POST"]) {
         [self handleKey:clientFd body:body];
     } else if ([path isEqualToString:@"/api/text"] && [method isEqualToString:@"POST"]) {
@@ -729,6 +731,30 @@ static NSData *WSTextFrame(NSString *text) {
         [[TSScriptEngine shared] stop];
     });
     [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
+}
+
+- (void)handleUpload:(int)clientFd body:(NSData *)body {
+    NSDictionary *json = [self parseJSON:body];
+    if (!json) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+        return;
+    }
+    NSString *filename = json[@"filename"];
+    NSString *content = json[@"content"];
+    // 安全: 只允许保存到 lua 根目录, 禁止子路径/路径穿越
+    if (filename.length == 0 || [filename containsString:@"/"] || [filename containsString:@".."]) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"filename 无效"]];
+        return;
+    }
+    if (![content isKindOfClass:[NSString class]]) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 content"]];
+        return;
+    }
+    [TSPaths ensureDirectoriesExist];
+    NSString *targetPath = [TSPaths pathForLua:filename];
+    BOOL ok = [content writeToFile:targetPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSLog(@"[HTTP] 上传脚本: %@ → %@ (%@)", filename, targetPath, ok ? @"成功" : @"失败");
+    [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @(ok), @"path": targetPath}]];
 }
 
 - (void)handleKey:(int)clientFd body:(NSData *)body {
