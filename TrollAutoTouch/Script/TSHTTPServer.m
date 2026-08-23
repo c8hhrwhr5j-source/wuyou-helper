@@ -986,9 +986,18 @@ static NSData *WSTextFrame(NSString *text) {
 }
 
 - (NSData *)errorResponse:(int)code msg:(NSString *)msg {
-    NSDictionary *err = @{@"error": msg};
+    // HTTP 状态行不能包含 CR/LF 或其他控制字符，否则客户端解析会报 unexpected EOF。
+    // 具体错误信息放到 JSON body，状态短语只保留安全字符。
+    NSString *safeStatus = msg.length > 0 ? msg : @"Internal Server Error";
+    safeStatus = [safeStatus stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    safeStatus = [safeStatus stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    safeStatus = [safeStatus stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    if (safeStatus.length == 0) { safeStatus = @"Internal Server Error"; }
+    // 状态短语截短，避免超长状态行被某些 HTTP 客户端拒绝
+    if (safeStatus.length > 60) { safeStatus = [[safeStatus substringToIndex:60] stringByAppendingString:@"..."]; }
+    NSDictionary *err = @{@"error": msg ?: @"Internal Server Error"};
     NSData *json = [NSJSONSerialization dataWithJSONObject:err options:0 error:nil];
-    return HTTPResponse(code, msg, @"application/json; charset=utf-8", json ?: [NSData data], nil);
+    return HTTPResponse(code, safeStatus, @"application/json; charset=utf-8", json ?: [NSData data], nil);
 }
 
 - (NSData *)corsResponse {
@@ -1002,7 +1011,15 @@ static NSData *WSTextFrame(NSString *text) {
 }
 
 - (void)sendAndClose:(int)fd data:(NSData *)data {
-    send(fd, data.bytes, data.length, 0);
+    // 循环发送直到全部写出，避免 TCP 部分发送导致客户端读到截断响应(unexpected EOF)。
+    const uint8_t *buf = (const uint8_t *)data.bytes;
+    ssize_t total = (ssize_t)data.length;
+    ssize_t sent = 0;
+    while (sent < total) {
+        ssize_t n = send(fd, buf + sent, (size_t)(total - sent), 0);
+        if (n <= 0) { break; }
+        sent += n;
+    }
     close(fd);
 }
 
