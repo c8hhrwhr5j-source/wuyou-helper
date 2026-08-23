@@ -154,6 +154,9 @@ static NSData *WSTextFrame(NSString *text) {
 
     int opt = 1;
     setsockopt(_listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    // 防止客户端断开时 send() 触发 SIGPIPE 导致 App 崩溃
+    int nosigpipe = 1;
+    setsockopt(_listenFd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
     fcntl(_listenFd, F_SETFL, O_NONBLOCK);
 
     struct sockaddr_in addr;
@@ -180,6 +183,8 @@ static NSData *WSTextFrame(NSString *text) {
         socklen_t len = sizeof(clientAddr);
         int clientFd = accept(self->_listenFd, (struct sockaddr *)&clientAddr, &len);
         if (clientFd < 0) return;
+        int nosigpipe = 1;
+        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
         [self handleClient:clientFd];
     });
     dispatch_resume(_acceptSource);
@@ -624,8 +629,9 @@ static NSData *WSTextFrame(NSString *text) {
             // 用 PNG 无损编码，保证颜色与原图完全一致（找色工具需要精确颜色）
             NSData *png = UIImagePNGRepresentation(img);
             NSData *resp = HTTPResponse(200, @"OK", @"image/png", png ?: [NSData data], nil);
-            send(clientFd, resp.bytes, resp.length, 0);
-            close(clientFd);
+            // PNG 大图(750*1334*4 ≈ 4MB)必须循环发送，单次 send 在非阻塞 socket 上
+            // 可能只写一部分就 EAGAIN，导致客户端截断/EOF。
+            [self sendAndClose:clientFd data:resp];
         });
     });
 }
@@ -1022,7 +1028,12 @@ static NSData *WSTextFrame(NSString *text) {
 }
 
 - (void)sendAndClose:(int)fd data:(NSData *)data {
-    // 循环发送直到全部写出，避免 TCP 部分发送导致客户端读到截断响应(unexpected EOF)。
+    // 截图 PNG 大图(数 MB)在非阻塞 socket 上单次 send 极易只写一部分，
+    // 然后 close，导致客户端读到截断响应(unexpected EOF)。
+    // 这里临时切为阻塞模式，循环发送直到全部写出或出错。
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) { fcntl(fd, F_SETFL, flags & ~O_NONBLOCK); }
+
     const uint8_t *buf = (const uint8_t *)data.bytes;
     ssize_t total = (ssize_t)data.length;
     ssize_t sent = 0;
