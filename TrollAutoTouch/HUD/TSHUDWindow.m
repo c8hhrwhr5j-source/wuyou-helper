@@ -135,14 +135,15 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _closeBtn.frame  = CGRectMake(kBallX - (kBtnSize + kGap) * 3, 0, kBtnSize, kBtnSize);
 
     // 初始隐藏扩展按钮 (位于悬浮球左侧, 未展开):
-    // 收起状态由 alpha=0 + userInteractionEnabled=NO 控制 (alpha<0.01 不参与命中测试),
-    // 不再用 hidden, 避免展开/收起动画 completion 的 hidden 竞态导致收起后无法再展开。
+    // 用 hidden 隐藏初始状态 (与已验证版本一致)。收起状态由 collapse 动画置
+    // alpha=0 (不再设置 hidden) —— 收起/展开的可见性由 alpha+交互开关控制,
+    // 避免动画 completion 的 hidden 竞态导致收起后无法再展开。
+    _pauseBtn.hidden  = YES;
+    _toggleBtn.hidden = YES;
+    _closeBtn.hidden  = YES;
     _pauseBtn.alpha  = 0;
     _toggleBtn.alpha = 0;
     _closeBtn.alpha  = 0;
-    _pauseBtn.userInteractionEnabled  = NO;
-    _toggleBtn.userInteractionEnabled = NO;
-    _closeBtn.userInteractionEnabled  = NO;
 
     [_rootVC.view addSubview:_closeBtn];
     [_rootVC.view addSubview:_toggleBtn];
