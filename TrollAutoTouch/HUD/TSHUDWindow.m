@@ -11,6 +11,19 @@
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 
+// 主线程强制提交 Core Animation 事务: 非主线程直接返回。
+// CA 提交不是线程安全的 —— TSLuaBridge 的脚本状态通知可能来自 Lua 后台线程,
+// 悬浮球通过 _onLuaStateChanged: 收到通知后必须先派回主线程再刷新按钮,
+// 否则 _refreshButtons 里的 UIKit 操作 + flush 会崩溃 (此前只有 UIKit 非主线程
+// 操作属未定义行为未暴露; 新增 flush 后暴露为"运行/停止脚本时程序闪退")。
+static void TSFlushCATransaction(void) {
+    if (![NSThread isMainThread]) return;
+    Class txClass = NSClassFromString(@"CATransaction");
+    if (txClass && [txClass respondsToSelector:@selector(flush)]) {
+        [txClass flush];
+    }
+}
+
 // 悬浮球尺寸
 static const CGFloat kBallSize    = 44.0;
 // 展开按钮尺寸
@@ -195,10 +208,22 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         [self _applyIcon:[self _hudIcon:@"play.fill"] to:_toggleBtn];
     }
     // 后台且已系统级托管时, CA 提交被节流; 强制 flush 让图标变化立即同步到远程上下文
-    [CATransaction flush];
+    TSFlushCATransaction();
 }
 
+// 脚本状态更新可能来自 Lua 后台线程 (TSLuaBridge setIsRunning: 直接 post 通知),
+// _refreshButtons 含 UIKit + CATransaction 操作必须主线程, 统一派回主线程。
 - (void)setScriptRunning:(BOOL)running {
+    if ([NSThread isMainThread]) {
+        [self _applyScriptRunning:running];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _applyScriptRunning:running];
+        });
+    }
+}
+
+- (void)_applyScriptRunning:(BOOL)running {
     _scriptRunning = running;
     if (!running) _paused = NO;
     [self _refreshButtons];
@@ -207,6 +232,16 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_onLuaStateChanged:(NSNotification *)note {
     NSDictionary *ui = note.userInfo;
     BOOL running = [ui[@"running"] boolValue];
+    if ([NSThread isMainThread]) {
+        [self _applyLuaStateChange:running];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _applyLuaStateChange:running];
+        });
+    }
+}
+
+- (void)_applyLuaStateChange:(BOOL)running {
     if (!running) {
         _scriptRunning = NO;
         _paused = NO;
@@ -357,6 +392,13 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // + SBS registerWindowWithContextID:atLevel:), 与 TSHUDHost 的弹窗托管一致,
 // 在 iOS 15.8 + TrollStore 环境已验证可用。
 - (void)_registerSBSHosting {
+    // CAContext/SBS 私有 API 操作必须主线程 (防御性保护, 正常只从主线程路径调用)
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _registerSBSHosting];
+        });
+        return;
+    }
     if (_registeredCtxId != 0 || _sbsFailed || self.hidden) return;
     @try {
         unsigned ctxId = [self _acquireSBSContextId];
@@ -383,13 +425,19 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         if (regFn) regFn(_sbsHostingCtrl, regSel, ctxId, 10000.0);
         _registeredCtxId = ctxId;
         // 后台时 CA 提交被节流, 显式 flush 确保悬浮球内容立即同步到远程上下文
-        [CATransaction flush];
+        TSFlushCATransaction();
     } @catch (NSException *e) {
         _sbsFailed = YES;
     }
 }
 
 - (void)_unregisterSBSHosting {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _unregisterSBSHosting];
+        });
+        return;
+    }
     if (_registeredCtxId == 0) return;
     unsigned ctxId = _registeredCtxId;
     _registeredCtxId = 0;
@@ -468,7 +516,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         }
         if (ctxId != 0) {
             _sbsCAContext = ctx;
-            [CATransaction flush];
+            TSFlushCATransaction();
             return ctxId;
         }
     } @catch (NSException *e) {
