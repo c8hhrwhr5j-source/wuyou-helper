@@ -200,8 +200,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _dockRight = YES;
     CGRect f = self.frame;
     f.size = CGSizeMake(kExpandedW, kBallSize);
-    f.origin.x = [UIScreen mainScreen].bounds.size.width - kExpandedW - 12;
-    f.origin.y = [UIScreen mainScreen].bounds.size.height * 0.5;
+    CGSize screen = [self _effectiveScreenSize];
+    f.origin.x = screen.width - kExpandedW - 12;
+    f.origin.y = screen.height * 0.5;
     self.frame = f;
     [self _relayoutForDock];
 }
@@ -433,7 +434,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 吸附到最近的屏幕边缘 (左右), 并同步悬浮球位置与展开方向
 - (void)_snapToEdgeAnimated:(BOOL)animated {
     CGRect frame = self.frame;
-    CGSize screen = [UIScreen mainScreen].bounds.size;
+    CGSize screen = [self _effectiveScreenSize];
     CGFloat midX = frame.origin.x + frame.size.width * 0.5;
     BOOL right = (midX >= screen.width * 0.5);
     if (right != _dockRight) {
@@ -513,12 +514,31 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     return v;
 }
 
-// 轮询方向: 变化时重新吸附贴边 (横屏 ↔ 竖屏切换)
+// 有效屏幕尺寸: 处理"app 只支持竖屏但设备已横屏"的情况。
+// 此时 app 的 UIScreen.bounds 仍返回竖屏尺寸 (宽<高, app 未随设备旋转),
+// 而悬浮球经 SBS 托管显示在横屏屏幕上 —— 若按竖屏尺寸贴边, 会把悬浮球
+// 贴到"竖屏坐标的左右" = 横屏屏幕的上下边缘, 展开方向随之错乱。
+// 按 FBSOrientationObserver 的界面方向判断, 横屏时交换宽高,
+// 使贴边沿横屏的长边 (左右), 展开列表朝屏幕内侧排开。
+// app 自身支持横屏时 bounds 已是横屏尺寸 (宽>高), 不交换, 行为不变。
+- (CGSize)_effectiveScreenSize {
+    CGSize s = [UIScreen mainScreen].bounds.size;
+    long long o = [self _currentGlobalOrientation];
+    BOOL landscape = (o == 3 || o == 4); // LandscapeLeft / LandscapeRight
+    if (landscape && s.height > s.width) {
+        s = CGSizeMake(s.height, s.width);
+    }
+    return s;
+}
+
+// 轮询方向: 变化时重新吸附贴边 (横屏 ↔ 竖屏切换)。
+// 用非动画即时贴边: 后台 SBS 托管时 UIView 动画不渲染, 直接设 frame
+// 才能立即在屏幕上生效。
 - (void)_pollGlobalOrientation:(NSTimer *)timer {
     long long o = [self _currentGlobalOrientation];
     if (o == _lastOrientation) return;
     _lastOrientation = o;
-    if (!self.hidden) [self _snapToEdgeAnimated:YES];
+    if (!self.hidden) [self _snapToEdgeAnimated:NO];
 }
 
 #pragma mark - 命中测试
