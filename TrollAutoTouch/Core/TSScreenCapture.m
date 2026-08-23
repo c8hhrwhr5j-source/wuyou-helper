@@ -435,8 +435,6 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](兜底)
     [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](兜底)
 
-    // 主屏物理像素尺寸(用于全屏 surface 校验, 拒绝 app 窗口/局部 surface)
-    CGSize full = [self _screenPixelSize];
     IOSurfaceGetWidthFunc getW = (IOSurfaceGetWidthFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
     IOSurfaceGetHeightFunc getH = (IOSurfaceGetHeightFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
 
@@ -455,13 +453,9 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
             if (ios && CFGetTypeID(ios) == typeIdFn()) {
                 size_t sw = getW ? getW(ios) : 0;
                 size_t sh = getH ? getH(ios) : 0;
-                BOOL fullscreen = (sw > 0 && sh > 0 && full.width > 0 && full.height > 0 &&
-                                   sw >= (size_t)(full.width * 0.9) &&
-                                   sh >= (size_t)(full.height * 0.9));
-                NSLog(@"[TSScreenCapture] createScreenIOSurface target=%@ surface=%zux%zu 全屏=%d",
-                      NSStringFromClass([target class]), sw, sh, fullscreen);
-                if (fullscreen) { return ios; }
-                CFRelease(ios);
+                NSLog(@"[TSScreenCapture] createScreenIOSurface target=%@ surface=%zux%zu",
+                      NSStringFromClass([target class]), sw, sh);
+                return ios;
             }
         } @catch (NSException *e) { }
     }
