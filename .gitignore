@@ -14,6 +14,7 @@ build/
 # 临时逆向产物
 _tmp.zip
 _tmp_extracted/
+.ipa_analysis/
 
 # 逆向分析归档（脚本与结果，供以后排查问题参考）
 _analysis/

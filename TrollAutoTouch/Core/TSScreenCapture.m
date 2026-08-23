@@ -1139,9 +1139,53 @@ static const char *_gsSurfaceKeys[] = {
 
 #pragma mark - 公共 API
 
+/// 后台截屏专用路径: 优先 CARenderServerRenderDisplay(后台验证过的方案),
+/// 再回退全局显示 / UIScreen surface 缓存。
+/// 后台时不走 createScreenIOSurface 的主线程 800ms 同步等待(该路径后台基本失效,
+/// 白白拖慢 HTTP 响应), 直接读缓存 surface。
+- (BOOL)_captureBackgroundToRGBA:(uint8_t **)pixelsOut
+                           width:(int *)widthOut
+                          height:(int *)heightOut {
+    // 1. CARenderServerRenderDisplay: TrollShot/TrollVNC 在后台/锁屏验证过的跨 App 截屏方案,
+    //    走 WindowServer 渲染管线, 与 App 自身前后台无关。
+    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
+    NSString *errRS = [self.lastError copy];
+    // 2. IORegistry DisplaySurface + IOSurfaceLookup(全局显示缓冲, 不依赖前台)
+    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
+    NSString *errGD = [self.lastError copy];
+    // 3. 兜底: 读 UIScreen surface 缓存(可能含前台最后一帧, 不重新创建、不阻塞主线程)
+    IOSurfaceRef cached = [self _getCachedScreenSurface];
+    if (cached) {
+        uint8_t *px = NULL; int w = 0, h = 0;
+        BOOL ok = [self _dumpIOSurface:cached pixelsOut:&px width:&w height:&h] && px
+                  && ![self _isAllZeroPixels:px width:w height:h];
+        CFRelease(cached);
+        if (ok) {
+            self.lastError = nil;
+            *pixelsOut = px; *widthOut = w; *heightOut = h;
+            return YES;
+        }
+        if (px) { free(px); }
+        [self _setCachedScreenSurface:NULL];
+    }
+    self.lastError = [NSString stringWithFormat:@"后台截屏: CARenderServer: %@; 全局显示: %@; UIScreen 缓存: 空/全0",
+                      errRS ?: @"未尝试", errGD ?: @"未尝试"];
+    return NO;
+}
+
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
+    // 后台状态: 切换到后台专用路径(优先 CARenderServer 等验证过的后台方案)。
+    // 前台路径完全不变, 保持现有截图功能与接口一致。
+    UIApplicationState appState = [UIApplication sharedApplication].applicationState;
+    if (appState == UIApplicationStateBackground) {
+        return [self _captureBackgroundToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 后台/跨 App 可用)
     if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
