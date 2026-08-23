@@ -24,8 +24,10 @@ static void TSFlushCATransaction(void) {
     }
 }
 
-// 悬浮球尺寸
+// 悬浮球尺寸 (窗口高度 / 布局基准)
 static const CGFloat kBallSize    = 44.0;
+// 悬浮球本体视觉尺寸 (缩小一点: 在 44 高的窗口内居中显示 38 的球)
+static const CGFloat kBallVisSize = 38.0;
 // 展开按钮尺寸
 static const CGFloat kBtnSize     = 44.0;
 // 按钮间距
@@ -149,8 +151,11 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 
 - (void)_buildButtons {
     _mainBtn = [self _makeRoundButton:nil action:@selector(_tapMain:)];
-    _mainBtn.frame = CGRectMake([self _ballX], 0, kBallSize, kBallSize);
-    [self _applyIcon:[self _hudIcon:@"bolt.fill"] to:_mainBtn];
+    _mainBtn.frame = CGRectMake([self _ballX] + (kBallSize - kBallVisSize) / 2,
+                                (kBallSize - kBallVisSize) / 2,
+                                kBallVisSize, kBallVisSize);
+    // 悬浮球图标: 白色粗体 "T" (按需求替换原闪电 bolt.fill)
+    [self _applyTLabelTo:_mainBtn];
     // 悬浮球带拖拽
     _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(_panMain:)];
     [_mainBtn addGestureRecognizer:_pan];
@@ -224,7 +229,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 按当前贴边方向重排悬浮球与扩展按钮的目标位置 (贴边方向变化后调用,
 // 仅重设 frame, 可见性/alpha 仍由展开收起动画管理)
 - (void)_relayoutForDock {
-    _mainBtn.frame = CGRectMake([self _ballX], 0, kBallSize, kBallSize);
+    _mainBtn.frame = CGRectMake([self _ballX] + (kBallSize - kBallVisSize) / 2,
+                                (kBallSize - kBallVisSize) / 2,
+                                kBallVisSize, kBallVisSize);
     _pauseBtn.frame  = CGRectMake([self _extXForIndex:2], 0, kBtnSize, kBtnSize);
     _toggleBtn.frame = CGRectMake([self _extXForIndex:1], 0, kBtnSize, kBtnSize);
     _closeBtn.frame  = CGRectMake([self _extXForIndex:0], 0, kBtnSize, kBtnSize);
@@ -243,6 +250,19 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_applyIcon:(UIImage *)img to:(UIButton *)b {
     [b setImage:img forState:UIControlStateNormal];
     b.tintColor = [UIColor whiteColor];
+}
+
+// 悬浮球图标: 白色粗体 "T" (替换闪电 bolt.fill)。
+// 按钮 frame 由 _relayoutForDock 调整, label 用 autoresizing 跟随按钮尺寸。
+- (void)_applyTLabelTo:(UIButton *)b {
+    UILabel *t = [[UILabel alloc] initWithFrame:b.bounds];
+    t.text = @"T";
+    t.textColor = [UIColor whiteColor];
+    t.font = [UIFont boldSystemFontOfSize:22];
+    t.textAlignment = NSTextAlignmentCenter;
+    t.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    t.userInteractionEnabled = NO;
+    [b addSubview:t];
 }
 
 #pragma mark - 状态刷新
