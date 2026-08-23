@@ -39,6 +39,23 @@ static const CGFloat kBallX       = kBallSize + kGap + kBtnSize * 2 + kGap * 2; 
 // 展开后的窗口宽度
 static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 
+// 悬浮球窗口的 rootVC: 固定竖屏, 禁止自动旋转。
+// 否则 app 支持横屏时悬浮球 window 会随设备旋转 (bounds 交换), 与自绘的
+// _landscape 竖直条布局冲突; 固定竖屏后窗口坐标系始终是竖屏基准,
+// 横屏时统一走"窗口改 44×200 竖直条 + 内容旋转"的自绘方案。
+@interface TSHUDPortraitVC : UIViewController
+@end
+
+@implementation TSHUDPortraitVC
+- (BOOL)shouldAutorotate {
+    return NO;
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskPortrait;
+}
+@end
+
 @interface TSHUDWindow ()
 
 @property (nonatomic, strong) UIViewController *rootVC;
@@ -73,6 +90,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     id _fbOrientationObserver;
     NSTimer *_orientationTimer;
     long long _lastOrientation;
+    // 当前界面是否为横屏 (SpringBoard 会把悬浮球窗口旋转 90° 显示)。
+    // 横屏时窗口自身改为竖直条 (44×200, 按钮沿 y 轴排布、内容旋转 ±90°),
+    // 旋转显示后屏幕上正好是水平 200×44、内容正立、贴边方向正确。
+    BOOL _landscape;
+    // 当前界面方向 (3=LandscapeLeft, 4=LandscapeRight), 用于区分旋转方向。
+    long long _curOrientation;
 }
 
 + (instancetype)shared {
@@ -96,7 +119,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         _paused = NO;
         _dockRight = YES;
 
-        _rootVC = [[UIViewController alloc] init];
+        _rootVC = [[TSHUDPortraitVC alloc] init];
         _rootVC.view.backgroundColor = [UIColor clearColor];
         self.rootViewController = _rootVC;
 
@@ -217,6 +240,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     return _dockRight ? kBallX : 0;
 }
 
+// 横屏: 悬浮球在窗口内的 Y (窗口为竖直条 44×200, 按钮沿 y 轴排布)。
+// 贴右(屏幕右侧) → 悬浮球在窗口 y 大端, 旋转显示后位于屏幕右侧。
+- (CGFloat)_ballY {
+    return _dockRight ? kBallX : 0;
+}
+
 // 第 idx 个扩展按钮 (0=close 最远, 1=toggle, 2=pause 最近) 在窗口内的目标 X。
 // 贴右: 悬浮球在右, 按钮向左依次排开; 贴左: 悬浮球在左, 按钮向右依次排开。
 - (CGFloat)_extXForIndex:(NSInteger)idx {
@@ -226,9 +255,31 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     return kBallSize + kGap + (kBtnSize + kGap) * (kExtCount - 1 - idx);
 }
 
+// 悬浮球本体原点 (窗口坐标)。横屏时窗口为竖直条, 坐标轴互换 (y 轴)。
+- (CGPoint)_ballOrigin {
+    if (_landscape) return CGPointMake(0, [self _ballY]);
+    return CGPointMake([self _ballX], 0);
+}
+
+// 第 idx 个扩展按钮的目标原点 (窗口坐标)。横屏时沿 y 轴展开。
+- (CGPoint)_extOriginForIndex:(NSInteger)idx {
+    if (_landscape) return CGPointMake(0, [self _extXForIndex:idx]);
+    return CGPointMake([self _extXForIndex:idx], 0);
+}
+
 // 按当前贴边方向重排悬浮球与扩展按钮的目标位置 (贴边方向变化后调用,
-// 仅重设 frame, 可见性/alpha 仍由展开收起动画管理)
+// 仅重设 frame, 可见性/alpha 仍由展开收起动画管理)。
+// 横屏时窗口为竖直条 44×200, 按钮沿 y 轴排布 (x 轴同竖屏公式, 轴互换)。
 - (void)_relayoutForDock {
+    if (_landscape) {
+        CGFloat inset = (kBallSize - kBallVisSize) / 2;
+        _mainBtn.frame = CGRectMake(inset, [self _ballY] + inset,
+                                    kBallVisSize, kBallVisSize);
+        _pauseBtn.frame  = CGRectMake(0, [self _extXForIndex:2], kBtnSize, kBtnSize);
+        _toggleBtn.frame = CGRectMake(0, [self _extXForIndex:1], kBtnSize, kBtnSize);
+        _closeBtn.frame  = CGRectMake(0, [self _extXForIndex:0], kBtnSize, kBtnSize);
+        return;
+    }
     _mainBtn.frame = CGRectMake([self _ballX] + (kBallSize - kBallVisSize) / 2,
                                 (kBallSize - kBallVisSize) / 2,
                                 kBallVisSize, kBallVisSize);
@@ -362,9 +413,10 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         // 目标位置用固定坐标 (按贴边方向计算), 不能取 b.frame.origin:
         // 收起后按钮 frame 停在悬浮球位置, 取当前 frame 会导致再次展开时
         // "从原位动画到原位" → 侧边列表再也出不来 (只能点开一次的 bug)。
-        CGPoint target = CGPointMake([self _extXForIndex:i], 0);
+        CGPoint target = [self _extOriginForIndex:i];
         if (animated) {
-            b.frame = CGRectMake([self _ballX], 0, kBtnSize, kBtnSize); // 从悬浮球位置出发
+            CGPoint org = [self _ballOrigin];
+            b.frame = CGRectMake(org.x, org.y, kBtnSize, kBtnSize); // 从悬浮球位置出发
             b.alpha = 0;
         }
         [UIView animateWithDuration:animated ? 0.22 : 0.0
@@ -390,7 +442,8 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
                             options:UIViewAnimationOptionCurveEaseIn
                                  | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
-                             b.frame = CGRectMake([self _ballX], 0, kBtnSize, kBtnSize);
+                             CGPoint org = [self _ballOrigin];
+                             b.frame = CGRectMake(org.x, org.y, kBtnSize, kBtnSize);
                              b.alpha = 0;
                          }
                          completion:^(BOOL finished) {
@@ -436,13 +489,21 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         CGRect frame = self.frame;
         frame.origin.x += t.x;
         frame.origin.y += t.y;
-        // 限制在屏幕内 (用 _effectiveScreenSize: 横屏且 app 未旋转时按横屏
-        // 尺寸限制, 否则 x 被竖屏宽度 clamp 到 ~175 到不了右边缘, y 会超出屏幕)
+        // 限制在屏幕内。横屏时窗口被 SpringBoard 旋转 90° 显示:
+        // 窗口 x 方向(宽 44)对应屏幕竖直, 窗口 y 方向(高 200)对应屏幕水平,
+        // 边界也要相应交换 (用 _effectiveScreenSize 的横屏尺寸 667×375)。
         CGSize screen = [self _effectiveScreenSize];
-        CGFloat maxX = screen.width  - frame.size.width;
-        CGFloat maxY = screen.height - frame.size.height;
-        frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
-        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        if (_landscape) {
+            CGFloat maxX = screen.height - frame.size.width;  // 375-44=331 (屏幕竖直)
+            CGFloat maxY = screen.width  - frame.size.height; // 667-200=467 (屏幕水平)
+            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        } else {
+            CGFloat maxX = screen.width  - frame.size.width;
+            CGFloat maxY = screen.height - frame.size.height;
+            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        }
         self.frame = frame;
         [g setTranslation:CGPointZero inView:self];
     } else if (g.state == UIGestureRecognizerStateEnded
@@ -457,18 +518,42 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_snapToEdgeAnimated:(BOOL)animated {
     CGRect frame = self.frame;
     CGSize screen = [self _effectiveScreenSize];
-    CGFloat midX = frame.origin.x + frame.size.width * 0.5;
-    BOOL right = (midX >= screen.width * 0.5);
-    if (right != _dockRight) {
-        // 贴边方向改变: 重排悬浮球与快捷按钮 (悬浮球移到窗口对侧, 展开方向反转)
-        _dockRight = right;
-        [self _relayoutForDock];
+    BOOL right;
+    if (_landscape) {
+        // 横屏: 屏幕水平由窗口 y(高 200)控制, 屏幕竖直由窗口 x(宽 44)控制。
+        // 窗口 x 保持在当前竖直位置; 窗口 y 按屏幕水平贴边。
+        // LandscapeLeft(3): 屏幕 px = wy,  贴右 wy=大, 贴左 wy=小;
+        // LandscapeRight(4): 屏幕 px = 467-wy, 贴右 wy=小, 贴左 wy=大。
+        CGFloat maxWY = screen.width - frame.size.height; // 667-200=467
+        BOOL ll = (_curOrientation == 3);
+        CGFloat centerPx;
+        if (ll) centerPx = frame.origin.y + frame.size.height * 0.5;       // px = wy
+        else    centerPx = (maxWY - frame.origin.y) + frame.size.height * 0.5; // px = 467-wy
+        right = (centerPx >= screen.width * 0.5);
+        if (right != _dockRight) {
+            _dockRight = right;
+            [self _relayoutForDock];
+        }
+        const CGFloat margin = 12.0;
+        CGFloat targetWy = (right == ll) ? (maxWY - margin) : margin;
+        frame.origin.y = targetWy;
+        // 屏幕竖直: 限制在屏内
+        CGFloat maxWX = MAX(0, screen.height - frame.size.width); // 375-44=331
+        frame.origin.x = MAX(margin, MIN(maxWX, frame.origin.x));
+    } else {
+        CGFloat midX = frame.origin.x + frame.size.width * 0.5;
+        right = (midX >= screen.width * 0.5);
+        if (right != _dockRight) {
+            // 贴边方向改变: 重排悬浮球与快捷按钮 (悬浮球移到窗口对侧, 展开方向反转)
+            _dockRight = right;
+            [self _relayoutForDock];
+        }
+        const CGFloat margin = 12.0;
+        frame.origin.x = right ? (screen.width - frame.size.width - margin) : margin;
+        // y 限制在屏内 (横屏切换后屏幕高度变小, 防止悬浮球出屏)
+        CGFloat maxY = MAX(0, screen.height - frame.size.height);
+        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
     }
-    const CGFloat margin = 12.0;
-    frame.origin.x = right ? (screen.width - frame.size.width - margin) : margin;
-    // y 限制在屏内 (横屏切换后屏幕高度变小, 防止悬浮球出屏)
-    CGFloat maxY = MAX(0, screen.height - frame.size.height);
-    frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
     if (animated) {
         [UIView animateWithDuration:0.25
                               delay:0
@@ -483,18 +568,92 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     }
 }
 
+// 方向切换处理: 更新横屏标记、窗口尺寸 (横屏 44×200 竖直条 ↔ 竖屏 200×44),
+// 换算窗口位置到新坐标系 (保持屏幕位置), 按钮内容旋转 (横屏时图标/T 字在
+// 屏幕上正立)。无方向变化则直接返回。
+- (void)_applyOrientationLayout {
+    long long o = [self _currentGlobalOrientation];
+    BOOL landscape = (o == 3 || o == 4);
+    if (landscape == _landscape && o == _curOrientation) return;
+
+    // 换算窗口位置: 竖屏 1:1; 横屏时窗口 x(宽44)→屏幕竖直, y(高200)→屏幕水平。
+    // LandscapeLeft(3):  屏幕 px=wy,   py=331-wx
+    // LandscapeRight(4): 屏幕 px=467-wy, py=wx
+    CGRect f = self.frame;
+    [self _convertFrame:&f toLandscape:landscape orientation:o];
+    f.size = landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
+    CGSize base = [self _portraitScreenSize]; // 窗口坐标始终基于竖屏基准
+    CGFloat maxX = landscape ? (base.height - f.size.width) : (base.width - f.size.width);
+    CGFloat maxY = landscape ? (base.width  - f.size.height) : (base.height - f.size.height);
+    f.origin.x = MAX(0, MIN(f.origin.x, maxX));
+    f.origin.y = MAX(0, MIN(f.origin.y, maxY));
+    self.frame = f;
+
+    _landscape = landscape;
+    _curOrientation = o;
+    [self _relayoutForDock];
+    [self _applyButtonOrientation];
+}
+
+// 竖屏基准屏幕尺寸 (375×667): 悬浮球窗口坐标始终基于竖屏基准,
+// 不随 app 界面方向变化 (前台横屏时 UIScreen.bounds 已变 667×375)。
+- (CGSize)_portraitScreenSize {
+    CGSize s = [UIScreen mainScreen].bounds.size;
+    if (s.width > s.height) s = CGSizeMake(s.height, s.width);
+    return s;
+}
+
+// 把当前窗口位置换算到目标方向坐标系 (保持屏幕显示位置不变)。
+// 竖屏位置 (x,y) 即屏幕位置; 横屏换算规则:
+//   LandscapeLeft(3):  屏幕 px = wy,   py = 331-wx  → 横屏(wx,wy) = (331-y, x)
+//   LandscapeRight(4): 屏幕 px = 467-wy, py = wx    → 横屏(wx,wy) = (y, 467-x)
+// 反向同理。
+- (void)_convertFrame:(CGRect *)fp toLandscape:(BOOL)landscape orientation:(long long)o {
+    CGSize base = [self _portraitScreenSize];           // 竖屏基准 375×667
+    CGFloat maxWX = base.height - kBallSize;            // 331 (横屏窗口宽)
+    CGFloat maxWY = base.width  - kExpandedW;           // 467 (横屏窗口高)
+    CGRect f = *fp;
+    if (landscape) {
+        // 竖屏(x,y) → 横屏(wx,wy)
+        CGFloat x = f.origin.x, y = f.origin.y;
+        f.origin.x = (o == 3) ? (maxWX - y) : y;      // wx
+        f.origin.y = (o == 3) ? x : (maxWY - x);      // wy
+    } else {
+        // 横屏(wx,wy) → 竖屏(x,y)
+        CGFloat wx = f.origin.x, wy = f.origin.y;
+        f.origin.x = (o == 3) ? wy : (maxWY - wy);    // x
+        f.origin.y = (o == 3) ? (maxWX - wx) : wx;    // y
+    }
+    *fp = f;
+}
+
+// 横屏时按钮内容旋转 ±90°, 使图标/T 字在屏幕上正立 (旋转绕按钮中心)。
+- (void)_applyButtonOrientation {
+    CGAffineTransform t = CGAffineTransformIdentity;
+    if (_landscape) {
+        if (_curOrientation == 3) t = CGAffineTransformMakeRotation(M_PI / 2);   // LandscapeLeft
+        else                      t = CGAffineTransformMakeRotation(-M_PI / 2);  // LandscapeRight
+    }
+    _mainBtn.transform = t;
+    _pauseBtn.transform = t;
+    _toggleBtn.transform = t;
+    _closeBtn.transform = t;
+}
+
 // 屏幕方向变化 (横/竖屏切换): 屏幕尺寸改变, 按当前位置重新吸附到最近的
 // 左右边缘 (离哪边近贴哪边), 展开方向随之自适应。照抄 AutoGo floatball 的
 // updateFloatingBallForScene:interfaceOrientation: 思路。
 - (void)_orientationDidChange:(NSNotification *)note {
     if (self.hidden) return;
+    void (^update)(void) = ^{
+        [self _applyOrientationLayout];
+        [self _snapToEdgeAnimated:YES];
+    };
     if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self _snapToEdgeAnimated:YES];
-        });
+        dispatch_async(dispatch_get_main_queue(), update);
         return;
     }
-    [self _snapToEdgeAnimated:YES];
+    update();
 }
 
 // 启动 SpringBoard 侧全局方向监听 (FBSOrientationObserver, 私有框架)。
@@ -560,7 +719,10 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     long long o = [self _currentGlobalOrientation];
     if (o == _lastOrientation) return;
     _lastOrientation = o;
-    if (!self.hidden) [self _snapToEdgeAnimated:NO];
+    if (self.hidden) return;
+    // 先切换窗口尺寸/按钮旋转 (方向布局), 再按新坐标系贴边。
+    [self _applyOrientationLayout];
+    [self _snapToEdgeAnimated:NO];
 }
 
 #pragma mark - 命中测试
@@ -748,6 +910,11 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_appDidBecomeActive:(NSNotification *)note {
     // app 回到前台: 悬浮球由 app 内 window 正常渲染, 注销系统级托管
     [self _unregisterSBSHosting];
+    // 前后台切换可能伴随设备方向/悬浮球位置变化 (后台冻结竖屏坐标系),
+    // 回到前台后刷新方向布局与贴边。
+    if (self.hidden) return;
+    [self _applyOrientationLayout];
+    [self _snapToEdgeAnimated:NO];
 }
 
 @end
