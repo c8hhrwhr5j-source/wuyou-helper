@@ -107,21 +107,21 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
     NSData *encKey = [kTSLicenseEncryptSecret dataUsingEncoding:NSUTF8StringEncoding];
     NSString *mac = [TSLicense deviceId];
 
-    // 半加密: 只加密 value, key 保持明文
+    // V3 签名基于原始参数 (SDK 的 signV3 传入的是 data, 不是加密后的 encryptedJson)
     NSDictionary *raw = @{@"cardStr": card, @"mac": mac};
+    NSString *time = [NSString stringWithFormat:@"%lld",
+                      (long long)([[NSDate date] timeIntervalSince1970] * 1000.0)];
+    NSString *nonce = [TSLicense randomAlnum:32];
+    NSString *sign = [TSLicense signV3WithParams:raw time:time nonce:nonce
+                                          secret:kTSLicenseSignSecret];
+
+    // 半加密: 只加密 value, key 保持明文
     NSMutableDictionary *body = [NSMutableDictionary dictionaryWithCapacity:raw.count];
     for (NSString *k in raw) {
         NSData *plain = [raw[k] dataUsingEncoding:NSUTF8StringEncoding];
         NSData *cipher = [TSLicense aesEncryptECBNoPadding:plain key:encKey];
         body[k] = cipher ? [cipher base64EncodedStringWithOptions:0] : @"";
     }
-
-    // V3 签名参数 (基于加密后的值)
-    NSString *time = [NSString stringWithFormat:@"%lld",
-                      (long long)([[NSDate date] timeIntervalSince1970] * 1000.0)];
-    NSString *nonce = [TSLicense randomAlnum:32];
-    NSString *sign = [TSLicense signV3WithParams:body time:time nonce:nonce
-                                          secret:kTSLicenseSignSecret];
 
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/verifyCardV2",
                                        kTSLicenseHost]];
