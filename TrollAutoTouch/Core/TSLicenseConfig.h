@@ -20,13 +20,13 @@
 #define kTSLicenseHost          @"https://api.potatocloud.cn"
 
 /// askKey: 土豆后台 APP 控制台的令牌
-#define kTSLicenseAskKey        @"YOUR_ASK_KEY"
+#define kTSLicenseAskKey        @"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhcHBJZCI6MTI1MTQ5MzIyOTE5Mzk0MDk5MiwiZ2V0TWFuYWdlbWVudElkIjoxMTY4Nzc0NDM4NjgxMzk5Mjk2LCJUSU1FIjoxNzg3NDkxMzE0NzIzfQ.t6NYBOkdrthwPEcz-9HpaSG3MjXizDZSphvWC4ALUSM"
 
 /// 验签秘钥 (V3 签名用, 后台"验签秘钥"框)
-#define kTSLicenseSignSecret    @"YOUR_SIGN_SECRET"
+#define kTSLicenseSignSecret    @"aB3#kL9$mN2pQ7wX"
 
 /// 加解密秘钥 (AES-128, 必须 16 字节, 后台"加解密秘钥"框)
-#define kTSLicenseEncryptSecret @"YOUR_ENCRYPT_SECRET"
+#define kTSLicenseEncryptSecret @"aB3#kL9$mN2pQ7wX"
 
 /// 断网时允许离线使用的宽限天数 (用户选择了"每次启动联网校验+宽限")
 #define kTSLicenseGracePeriodDays 3
