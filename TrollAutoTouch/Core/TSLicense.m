@@ -133,6 +133,8 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
     [req setValue:time forHTTPHeaderField:@"time"];
     [req setValue:nonce forHTTPHeaderField:@"nonce"];
     [req setValue:sign forHTTPHeaderField:@"sign"];
+    // 土豆 API 要求除登录/注册外所有接口 header 都携带 apiUserToken; 卡密验证场景无用户 token, 传空字符串
+    [req setValue:@"" forHTTPHeaderField:@"apiUserToken"];
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
 
     NSURLSession *session = [NSURLSession sharedSession];
@@ -155,6 +157,10 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         NSData *plain = [TSLicense aesDecryptECBNoPadding:cipher key:encKey];
         NSString *jsonStr = plain ?
             [[NSString alloc] initWithData:plain encoding:NSUTF8StringEncoding] : nil;
+        // 兼容服务端实际未加密响应(后台配置未生效时): 解密失败则尝试按明文 JSON 解析
+        if (!jsonStr.length && bodyStr.length) {
+            jsonStr = bodyStr;
+        }
         jsonStr = [jsonStr stringByTrimmingCharactersInSet:
                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
