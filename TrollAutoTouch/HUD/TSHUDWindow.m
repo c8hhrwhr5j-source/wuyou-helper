@@ -33,16 +33,14 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 @property (nonatomic, assign) BOOL expanded;
 @property (nonatomic, assign) BOOL paused;
 
-// 脚本运行状态 (通过 setScriptRunning: 更新, 用 ivar 避免与自定义访问器冲突)
-{
-    BOOL _scriptRunning;
-}
-
 @property (nonatomic, strong) UIPanGestureRecognizer *pan;
 
 @end
 
-@implementation TSHUDWindow
+// 脚本运行状态 (通过 setScriptRunning: 更新, 用 ivar 避免与自定义访问器冲突)
+@implementation TSHUDWindow {
+    BOOL _scriptRunning;
+}
 
 + (instancetype)shared {
     static dispatch_once_t once;
