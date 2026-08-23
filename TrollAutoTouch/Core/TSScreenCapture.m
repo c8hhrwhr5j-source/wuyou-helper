@@ -171,6 +171,8 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 
     size_t srcW = widthFn(sourceSurface);
     size_t srcH = heightFn(sourceSurface);
+    uint32_t srcFmt = pixelFormatFn ? pixelFormatFn(sourceSurface) : 0;
+    NSLog(@"[TSScreenCapture] _dumpIOSurface source=%zux%zu fmt=0x%08X", srcW, srcH, (unsigned int)srcFmt);
     if (srcW == 0 || srcH == 0) { return NO; }
 
     // 直接 IOSurfaceLock 读硬件输出 surface 在 iOS 15+/后台/部分机型不可靠(空内容),
@@ -1201,19 +1203,34 @@ static const char *_gsSurfaceKeys[] = {
         }
         diag[@"createScreenIOSurfaceCandidates"] = cands;
 
-        // 实际尝试创建一次 surface
+        // 实际尝试创建一次 surface 并 dump
         IOSurfaceRef s = [self _createUIScreenSurface];
         if (s) {
             size_t (*getW)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
             size_t (*getH)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
-            diag[@"createScreenIOSurfaceResult"] = @{
+            int sw = (int)(getW ? getW(s) : 0);
+            int sh = (int)(getH ? getH(s) : 0);
+            uint8_t *px = NULL; int dw = 0, dh = 0;
+            BOOL dumpOk = (sw > 0 && sh > 0) && [self _dumpIOSurface:s pixelsOut:&px width:&dw height:&dh];
+            BOOL allZero = dumpOk && px && [self _isAllZeroPixels:px width:dw height:dh];
+            NSMutableDictionary *res = [@{
                 @"ok": @YES,
-                @"width": @(getW ? (int)getW(s) : -1),
-                @"height": @(getH ? (int)getH(s) : -1)
-            };
+                @"width": @(sw),
+                @"height": @(sh),
+                @"dumpOk": @(dumpOk),
+                @"dumpWidth": @(dw),
+                @"dumpHeight": @(dh),
+                @"allZero": @(allZero)
+            } mutableCopy];
+            uint32_t (*pfFn)(IOSurfaceRef) = (uint32_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetPixelFormat");
+            if (pfFn) {
+                res[@"pixelFormat"] = [NSString stringWithFormat:@"0x%08X", (unsigned int)pfFn(s)];
+            }
+            if (px) { free(px); }
             CFRelease(s);
+            diag[@"createScreenIOSurfaceResult"] = res;
         } else {
-            diag[@"createScreenIOSurfaceResult"] = @{@"ok": @NO};
+            diag[@"createScreenIOSurfaceResult"] = @{@"ok": @NO, @"error": self.lastError ?: @"(无)"};
         }
 
         diag[@"CARenderServerRenderDisplaySymbol"] = @(dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay") != NULL);
