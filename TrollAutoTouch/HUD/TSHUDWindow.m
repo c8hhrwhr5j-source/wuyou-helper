@@ -207,8 +207,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     } else {
         [self _applyIcon:[self _hudIcon:@"play.fill"] to:_toggleBtn];
     }
-    // 后台且已系统级托管时, CA 提交被节流; 强制 flush 让图标变化立即同步到远程上下文
-    TSFlushCATransaction();
+    // 注意: 这里不做 [CATransaction flush] —— init 阶段(窗口未挂 scene)执行
+    // CA 提交有崩溃风险(已见启动闪退), 后台图标同步靠 SBS 托管注册时的 flush
+    // 与下一次 UI 交互自然提交, 延迟可接受。
 }
 
 // 脚本状态更新可能来自 Lua 后台线程 (TSLuaBridge setIsRunning: 直接 post 通知),
