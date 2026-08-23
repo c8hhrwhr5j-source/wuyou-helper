@@ -1182,8 +1182,8 @@ static const char *_gsSurfaceKeys[] = {
                     height:(int *)heightOut {
     // 后台状态: 切换到后台专用路径(优先 CARenderServer 等验证过的后台方案)。
     // 前台路径完全不变, 保持现有截图功能与接口一致。
-    UIApplicationState appState = [UIApplication sharedApplication].applicationState;
-    if (appState == UIApplicationStateBackground) {
+    UIApplicationState bgState = [UIApplication sharedApplication].applicationState;
+    if (bgState == UIApplicationStateBackground) {
         return [self _captureBackgroundToRGBA:pixelsOut width:widthOut height:heightOut];
     }
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 后台/跨 App 可用)
