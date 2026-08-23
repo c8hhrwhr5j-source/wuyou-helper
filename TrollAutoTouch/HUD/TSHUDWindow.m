@@ -65,6 +65,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     id _sbsCAContext;        // 显式 CAContext (remoteContextWithOptions:)
     unsigned _registeredCtxId;
     BOOL _sbsFailed;
+    // 全局方向监听 (FBSOrientationObserver, 逆向自 AutoGo floatball):
+    // SpringBoard 侧的方向服务, 横屏/竖屏切换时即使 app 在后台
+    // (SBS 托管悬浮球) 也能收到, 触发重新贴边与展开方向自适应。
+    id _fbOrientationObserver;
+    NSTimer *_orientationTimer;
+    long long _lastOrientation;
 }
 
 + (instancetype)shared {
@@ -110,12 +116,33 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
                                                  selector:@selector(_appDidBecomeActive:)
                                                      name:UIApplicationDidBecomeActiveNotification
                                                    object:nil];
+        // 屏幕方向变化(横屏/竖屏切换): 重新吸附贴边并限制在屏内,
+        // 展开方向随贴边方向自适应 (照抄 AutoGo 的方向监听 + 重布局)。
+        // iOS 8+ 此通知仅前台 app 会收到; 后台场景由 FBSOrientationObserver 兜底。
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(_orientationDidChange:)
+                                                     name:UIApplicationDidChangeStatusBarOrientationNotification
+                                                   object:nil];
+        // 全局方向监听: 横屏/竖屏切换 (含后台 SBS 托管场景) 都触发重新贴边。
+        [self _startGlobalOrientationObserver];
     }
     return self;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_orientationTimer invalidate];
+    _orientationTimer = nil;
+    if (_fbOrientationObserver) {
+        SEL sel = NSSelectorFromString(@"invalidate");
+        if ([_fbOrientationObserver respondsToSelector:sel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [_fbOrientationObserver performSelector:sel];
+#pragma clang diagnostic pop
+        }
+        _fbOrientationObserver = nil;
+    }
 }
 
 #pragma mark - 构建 UI
@@ -159,9 +186,10 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (UIButton *)_makeRoundButton:(UIImage *)image action:(SEL)action {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = CGRectMake(0, 0, kBtnSize, kBtnSize);
-    b.layer.cornerRadius = kBtnSize / 2.0;
+    // 圆角矩形样式 (照抄 AutoGo 悬浮球: floaticon 为深灰圆角矩形 + 白色前景)
+    b.layer.cornerRadius = 10.0;
     b.layer.masksToBounds = YES;
-    b.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.88];
+    b.backgroundColor = [UIColor colorWithWhite:0.20 alpha:0.92]; // #333333
     if (image) [b setImage:image forState:UIControlStateNormal];
     [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return b;
@@ -222,6 +250,18 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     // 注意: 按钮 alpha 完全由展开/收起动画管理, 这里只更新图标与可用状态。
     // 之前无条件写 _pauseBtn.alpha=1.0, 收起状态收到 Lua 状态通知会把按钮
     // alpha 拉回 1.0, 导致"收起后按钮仍可见/状态错乱"。
+    // 悬浮球本体三态颜色 (照抄 AutoGo: floaticon 深灰 #333333 为停止色,
+    // 运行 systemGreenColor, 暂停 systemOrangeColor), 图标保持白色。
+    if (_scriptRunning && _paused) {
+        // 暂停: systemOrangeColor (255,149,0)
+        _mainBtn.backgroundColor = [UIColor colorWithRed:1.0 green:149.0/255.0 blue:0.0 alpha:1.0];
+    } else if (_scriptRunning) {
+        // 运行中: systemGreenColor (52,199,89)
+        _mainBtn.backgroundColor = [UIColor colorWithRed:52.0/255.0 green:199.0/255.0 blue:89.0/255.0 alpha:1.0];
+    } else {
+        // 未运行: 深灰 #333333 (floaticon 同款)
+        _mainBtn.backgroundColor = [UIColor colorWithWhite:0.20 alpha:1.0];
+    }
     // 暂停/恢复: 脚本未运行时灰色禁用
     if (_scriptRunning) {
         _pauseBtn.enabled = YES;
@@ -393,16 +433,19 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 吸附到最近的屏幕边缘 (左右), 并同步悬浮球位置与展开方向
 - (void)_snapToEdgeAnimated:(BOOL)animated {
     CGRect frame = self.frame;
-    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGSize screen = [UIScreen mainScreen].bounds.size;
     CGFloat midX = frame.origin.x + frame.size.width * 0.5;
-    BOOL right = (midX >= screenW * 0.5);
+    BOOL right = (midX >= screen.width * 0.5);
     if (right != _dockRight) {
         // 贴边方向改变: 重排悬浮球与快捷按钮 (悬浮球移到窗口对侧, 展开方向反转)
         _dockRight = right;
         [self _relayoutForDock];
     }
     const CGFloat margin = 12.0;
-    frame.origin.x = right ? (screenW - frame.size.width - margin) : margin;
+    frame.origin.x = right ? (screen.width - frame.size.width - margin) : margin;
+    // y 限制在屏内 (横屏切换后屏幕高度变小, 防止悬浮球出屏)
+    CGFloat maxY = MAX(0, screen.height - frame.size.height);
+    frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
     if (animated) {
         [UIView animateWithDuration:0.25
                               delay:0
@@ -415,6 +458,67 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     } else {
         self.frame = frame;
     }
+}
+
+// 屏幕方向变化 (横/竖屏切换): 屏幕尺寸改变, 按当前位置重新吸附到最近的
+// 左右边缘 (离哪边近贴哪边), 展开方向随之自适应。照抄 AutoGo floatball 的
+// updateFloatingBallForScene:interfaceOrientation: 思路。
+- (void)_orientationDidChange:(NSNotification *)note {
+    if (self.hidden) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _snapToEdgeAnimated:YES];
+        });
+        return;
+    }
+    [self _snapToEdgeAnimated:YES];
+}
+
+// 启动 SpringBoard 侧全局方向监听 (FBSOrientationObserver, 私有框架)。
+// app 后台 SBS 托管悬浮球时收不到 UIApplication 方向通知, 必须用这个。
+// 框架不保证一直存在, 动态 dlopen + 轮询 activeInterfaceOrientation。
+- (void)_startGlobalOrientationObserver {
+    if (_fbOrientationObserver) return;
+    Class cls = NSClassFromString(@"FBSOrientationObserver");
+    if (!cls) {
+        void *h = dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+        if (h) cls = NSClassFromString(@"FBSOrientationObserver");
+    }
+    if (!cls) return;
+    _fbOrientationObserver = [[cls alloc] init];
+    if (!_fbOrientationObserver) return;
+    _lastOrientation = [self _currentGlobalOrientation];
+    _orientationTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                         target:self
+                                                       selector:@selector(_pollGlobalOrientation:)
+                                                       userInfo:nil
+                                                        repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:_orientationTimer forMode:NSRunLoopCommonModes];
+}
+
+// 读取 FBSOrientationObserver 当前界面方向 (NSInvocation 精确取 long long 返回值,
+// 避免 performSelector 的 id 截断)
+- (long long)_currentGlobalOrientation {
+    if (!_fbOrientationObserver) return _lastOrientation;
+    SEL sel = NSSelectorFromString(@"activeInterfaceOrientation");
+    if (![_fbOrientationObserver respondsToSelector:sel]) return _lastOrientation;
+    NSMethodSignature *sig = [_fbOrientationObserver methodSignatureForSelector:sel];
+    if (!sig) return _lastOrientation;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.target = _fbOrientationObserver;
+    inv.selector = sel;
+    [inv invoke];
+    long long v = 0;
+    [inv getReturnValue:&v];
+    return v;
+}
+
+// 轮询方向: 变化时重新吸附贴边 (横屏 ↔ 竖屏切换)
+- (void)_pollGlobalOrientation:(NSTimer *)timer {
+    long long o = [self _currentGlobalOrientation];
+    if (o == _lastOrientation) return;
+    _lastOrientation = o;
+    if (!self.hidden) [self _snapToEdgeAnimated:YES];
 }
 
 #pragma mark - 命中测试
