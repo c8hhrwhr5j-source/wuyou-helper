@@ -2,50 +2,57 @@
 //  TSHUDWindow.m
 //  TrollAutoTouch
 //
-//  悬浮控制窗(HUD): 可拖动圆形主按钮 + 点击展开控制面板。
-//  使用旧式 UIWindow (不依赖 UIScene)，避免 TrollStore 下 Scene 生命周期冲突。
-//
-//  控制面板包含: 启停脚本 / 录制触控 / 回放 / 缓存截屏 / 拍照 / 设备信息 / UI树 / 全部停止
+//  悬浮窗实现: 悬浮球 + 向左展开的快捷按钮组 (暂停/恢复、启动/停止、关闭)
+//  所有按钮仅图标, 不显示文字。点击悬浮球本体: 未展开则展开, 已展开则收回(取消)。
 //
 
 #import "TSHUDWindow.h"
+#import "../Script/TSLuaBridge.h"
 
-static const CGFloat kBtnSize   = 52.0;
-static const CGFloat kPanelW    = 180.0;
-static const CGFloat kPanelH    = 360.0;
-static const CGFloat kRowH      = 42.0;
-static const CGFloat kAnimDur   = 0.25;
-
-static NSString * const kPanelTitles[] = {
-    @"启停脚本", @"录制触控", @"回放",
-    @"缓存截屏", @"保存截屏", @"设备信息",
-    @"UI 树", @"全部停止"
-};
-
-@interface TSHUDPanelView : UIView
-@property (nonatomic, strong) NSMutableArray<UIButton *> *actionButtons;
-@end
-@implementation TSHUDPanelView
-@end
+// 悬浮球尺寸
+static const CGFloat kBallSize    = 44.0;
+// 展开按钮尺寸
+static const CGFloat kBtnSize     = 44.0;
+// 按钮间距
+static const CGFloat kGap         = 8.0;
+// 展开按钮数量 (关闭/启停/暂停)
+static const NSInteger kExtCount  = 3;
+// 悬浮球在窗口内的 X 坐标 (窗口右侧, 按钮组向左展开)
+static const CGFloat kBallX       = kBallSize + kGap + kBtnSize * 2 + kGap * 2; // 44+8+44*2+8*2=156
+// 展开后的窗口宽度
+static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 
 @interface TSHUDWindow ()
-@property (nonatomic, strong) UIButton            *mainBtn;
-@property (nonatomic, strong) TSHUDPanelView      *panelView;
-@property (nonatomic, assign) BOOL                 panelVisible;
-@property (nonatomic, assign) BOOL                 recording;
-@property (nonatomic, assign) BOOL                 scriptRunning;
-@property (nonatomic, strong) UIPanGestureRecognizer *panGr;
-@property (nonatomic, copy)   TSHUDActionBlock     actionHandler;
+
+@property (nonatomic, strong) UIViewController *rootVC;
+@property (nonatomic, strong) UIButton *mainBtn;      // 悬浮球本体
+@property (nonatomic, strong) UIButton *pauseBtn;     // 暂停/恢复
+@property (nonatomic, strong) UIButton *toggleBtn;    // 启动/停止
+@property (nonatomic, strong) UIButton *closeBtn;     // 关闭
+
+@property (nonatomic, assign) BOOL expanded;
+@property (nonatomic, assign) BOOL paused;
+
+// 脚本运行状态 (通过 setScriptRunning: 更新, 用 ivar 避免与自定义访问器冲突)
+{
+    BOOL _scriptRunning;
+}
+
+@property (nonatomic, strong) UIPanGestureRecognizer *pan;
+
 @end
 
 @implementation TSHUDWindow
 
 + (instancetype)shared {
-    static TSHUDWindow *instance;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        // 旧式 UIWindow — 不依赖 UIScene
+    static dispatch_once_t once;
+    static TSHUDWindow *instance = nil;
+    dispatch_once(&once, ^{
+        // 全屏透明悬浮窗 (高 level)
         instance = [[TSHUDWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        instance.windowLevel = UIWindowLevelStatusBar + 1;
+        instance.backgroundColor = [UIColor clearColor];
+        instance.hidden = YES;
     });
     return instance;
 }
@@ -53,247 +60,258 @@ static NSString * const kPanelTitles[] = {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.windowLevel = UIWindowLevelAlert + 100;
-        self.backgroundColor = [UIColor clearColor];
-        self.rootViewController = [[UIViewController alloc] init];
-        self.rootViewController.view.backgroundColor = [UIColor clearColor];
+        _expanded = NO;
+        _scriptRunning = NO;
+        _paused = NO;
 
-        // ── 主按钮（应用图标）──
-        _mainBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-        _mainBtn.frame = CGRectMake(0, 0, kBtnSize, kBtnSize);
-        _mainBtn.layer.cornerRadius = kBtnSize / 2.0;
-        _mainBtn.layer.masksToBounds = YES;
-        _mainBtn.backgroundColor = [UIColor clearColor];
-        _mainBtn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
-        _mainBtn.layer.borderWidth = 2.0;
-        _mainBtn.layer.shadowColor = [UIColor blackColor].CGColor;
-        _mainBtn.layer.shadowOffset = CGSizeMake(0, 3);
-        _mainBtn.layer.shadowRadius = 6;
-        _mainBtn.layer.shadowOpacity = 0.5;
+        _rootVC = [[UIViewController alloc] init];
+        _rootVC.view.backgroundColor = [UIColor clearColor];
+        self.rootViewController = _rootVC;
 
-        // 优先使用 AppIcon，找不到则回退到纯色 + "T"
-        UIImage *icon = [UIImage imageNamed:@"AppIcon"];
-        if (icon) {
-            [_mainBtn setImage:icon forState:UIControlStateNormal];
-            _mainBtn.imageView.contentMode = UIViewContentModeScaleAspectFill;
-            _mainBtn.imageEdgeInsets = UIEdgeInsetsZero;
-        } else {
-            _mainBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:1.0 alpha:0.88];
-            [_mainBtn setTitle:@"T" forState:UIControlStateNormal];
-            _mainBtn.titleLabel.font = [UIFont boldSystemFontOfSize:26];
-            [_mainBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        }
+        [self _buildButtons];
+        [self _layoutBall];
+        [self _refreshButtons];
 
-        [_mainBtn addTarget:self action:@selector(_onMainTap) forControlEvents:UIControlEventTouchUpInside];
-        [self.rootViewController.view addSubview:_mainBtn];
-
-        // 拖拽手势
-        _panGr = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(_onPan:)];
-        [_mainBtn addGestureRecognizer:_panGr];
-
-        // ── 面板 ──
-        _panelView = [[TSHUDPanelView alloc] initWithFrame:CGRectMake(0, 0, kPanelW, kPanelH)];
-        _panelView.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
-        _panelView.layer.cornerRadius = 14;
-        _panelView.layer.masksToBounds = YES;
-        _panelView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.15].CGColor;
-        _panelView.layer.borderWidth = 0.5;
-        _panelView.hidden = YES;
-        _panelView.alpha = 0;
-        _panelView.actionButtons = [NSMutableArray array];
-        [self.rootViewController.view addSubview:_panelView];
-
-        [self _buildPanelButtons];
+        // 监听脚本运行状态, 自动刷新按钮图标/禁用状态
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(_onLuaStateChanged:)
+                                                     name:TSLuaRunningStateChangedNotification
+                                                   object:nil];
     }
     return self;
 }
 
-#pragma mark - Public API
-
-- (void)show {
-    CGFloat sx = [UIScreen mainScreen].bounds.size.width - kBtnSize - 16;
-    CGFloat sy = [UIScreen mainScreen].bounds.size.height * 0.35;
-    self.frame = [UIScreen mainScreen].bounds;
-    _mainBtn.frame = CGRectMake(sx, sy, kBtnSize, kBtnSize);
-    [self _layoutPanel];
-    self.hidden = NO;
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (void)hide {
-    self.hidden = YES;
+#pragma mark - 构建 UI
+
+- (void)_buildButtons {
+    _mainBtn = [self _makeRoundButton:nil action:@selector(_tapMain:)];
+    _mainBtn.frame = CGRectMake(kBallX, 0, kBallSize, kBallSize);
+    [self _applyIcon:[self _hudIcon:@"bolt.fill"] to:_mainBtn];
+    // 悬浮球带拖拽
+    _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(_panMain:)];
+    [_mainBtn addGestureRecognizer:_pan];
+
+    _pauseBtn  = [self _makeRoundButton:nil action:@selector(_tapPause:)];
+    _toggleBtn = [self _makeRoundButton:nil action:@selector(_tapToggle:)];
+    _closeBtn  = [self _makeRoundButton:nil action:@selector(_tapClose:)];
+
+    _pauseBtn.frame  = CGRectMake(kBallX - (kBtnSize + kGap) * 1, 0, kBtnSize, kBtnSize);
+    _toggleBtn.frame = CGRectMake(kBallX - (kBtnSize + kGap) * 2, 0, kBtnSize, kBtnSize);
+    _closeBtn.frame  = CGRectMake(kBallX - (kBtnSize + kGap) * 3, 0, kBtnSize, kBtnSize);
+
+    // 初始隐藏扩展按钮 (位于悬浮球左侧, 未展开)
+    _pauseBtn.alpha  = 0;
+    _toggleBtn.alpha = 0;
+    _closeBtn.alpha  = 0;
+    _pauseBtn.hidden  = YES;
+    _toggleBtn.hidden = YES;
+    _closeBtn.hidden  = YES;
+
+    [_rootVC.view addSubview:_closeBtn];
+    [_rootVC.view addSubview:_toggleBtn];
+    [_rootVC.view addSubview:_pauseBtn];
+    [_rootVC.view addSubview:_mainBtn];
 }
 
-- (void)setActionHandler:(TSHUDActionBlock)handler {
-    _actionHandler = handler;
+- (UIButton *)_makeRoundButton:(UIImage *)image action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = CGRectMake(0, 0, kBtnSize, kBtnSize);
+    b.layer.cornerRadius = kBtnSize / 2.0;
+    b.layer.masksToBounds = YES;
+    b.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.88];
+    if (image) [b setImage:image forState:UIControlStateNormal];
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
 }
 
-- (void)setRecording:(BOOL)recording {
-    _recording = recording;
-    // 更新录制按钮状态
-    if (recording) {
-        UIButton *btn = _panelView.actionButtons[TSHUDActionRecord];
-        [btn setTitle:@"停止录制" forState:UIControlStateNormal];
-        btn.tintColor = [UIColor redColor];
+// 初始悬浮球位置: 屏幕右侧中部
+- (void)_layoutBall {
+    CGRect f = self.frame;
+    f.size = CGSizeMake(kExpandedW, kBallSize);
+    f.origin.x = [UIScreen mainScreen].bounds.size.width - kExpandedW - 12;
+    f.origin.y = [UIScreen mainScreen].bounds.size.height * 0.5;
+    self.frame = f;
+}
+
+- (UIImage *)_hudIcon:(NSString *)name {
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:17
+                                                                                         weight:UIImageSymbolWeightSemibold];
+        UIImage *img = [[UIImage systemImageNamed:name] imageByApplyingSymbolConfiguration:cfg];
+        return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    return nil;
+}
+
+- (void)_applyIcon:(UIImage *)img to:(UIButton *)b {
+    [b setImage:img forState:UIControlStateNormal];
+    b.tintColor = [UIColor whiteColor];
+}
+
+#pragma mark - 状态刷新
+
+- (void)_refreshButtons {
+    // 暂停/恢复: 脚本未运行时灰色禁用
+    if (_scriptRunning) {
+        _pauseBtn.enabled = YES;
+        _pauseBtn.alpha = 1.0;
+        _pauseBtn.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.88];
+        [self _applyIcon:[self _hudIcon:(_paused ? @"play.fill" : @"pause.fill")] to:_pauseBtn];
     } else {
-        UIButton *btn = _panelView.actionButtons[TSHUDActionRecord];
-        [btn setTitle:@"录制触控" forState:UIControlStateNormal];
-        btn.tintColor = nil;
+        _pauseBtn.enabled = NO;
+        _pauseBtn.alpha = 1.0; // 收起后整体淡出, 展开时靠背景透明度区分
+        _pauseBtn.backgroundColor = [UIColor colorWithWhite:0.25 alpha:0.5];
+        [self _applyIcon:[self _hudIcon:@"pause.fill"] to:_pauseBtn];
+    }
+    // 启动/停止: 未运行显示 play, 运行中显示 stop
+    if (_scriptRunning) {
+        [self _applyIcon:[self _hudIcon:@"stop.fill"] to:_toggleBtn];
+    } else {
+        [self _applyIcon:[self _hudIcon:@"play.fill"] to:_toggleBtn];
     }
 }
 
 - (void)setScriptRunning:(BOOL)running {
     _scriptRunning = running;
-    if (running) {
-        UIButton *btn = _panelView.actionButtons[TSHUDActionToggleScript];
-        [btn setTitle:@"停止脚本" forState:UIControlStateNormal];
+    if (!running) _paused = NO;
+    [self _refreshButtons];
+}
+
+- (void)_onLuaStateChanged:(NSNotification *)note {
+    NSDictionary *ui = note.userInfo;
+    BOOL running = [ui[@"running"] boolValue];
+    if (!running) {
+        _scriptRunning = NO;
+        _paused = NO;
+    }
+    [self _refreshButtons];
+}
+
+#pragma mark - 展开 / 收回
+
+- (void)_tapMain:(id)sender {
+    if (_expanded) {
+        [self _collapseAnimated:YES]; // 展开状态点击本体 = 取消
     } else {
-        UIButton *btn = _panelView.actionButtons[TSHUDActionToggleScript];
-        [btn setTitle:@"启停脚本" forState:UIControlStateNormal];
+        [self _expandAnimated:YES];
     }
 }
 
-#pragma mark - Actions
+- (void)_expandAnimated:(BOOL)animated {
+    _expanded = YES;
+    _pauseBtn.hidden  = NO;
+    _toggleBtn.hidden = NO;
+    _closeBtn.hidden  = NO;
 
-- (void)_onMainTap {
-    if (_panelVisible) {
-        [self _hidePanel:YES];
-    } else {
-        [self _showPanel];
-    }
-}
-
-- (void)_showPanel {
-    [self _layoutPanel];
-    _panelView.transform = CGAffineTransformMakeScale(0.85, 0.85);
-    _panelView.alpha = 0;
-    _panelView.hidden = NO;
-    [UIView animateWithDuration:kAnimDur
-                          delay:0
-         usingSpringWithDamping:0.75
-          initialSpringVelocity:0.5
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-        self.panelView.alpha = 1;
-        self.panelView.transform = CGAffineTransformIdentity;
-    } completion:nil];
-    _panelVisible = YES;
-}
-
-- (void)_hidePanel:(BOOL)animated {
-    if (!animated) {
-        _panelView.hidden = YES;
-        _panelView.alpha = 0;
-        _panelVisible = NO;
-        return;
-    }
-    [UIView animateWithDuration:kAnimDur * 0.7 animations:^{
-        self.panelView.alpha = 0;
-        self.panelView.transform = CGAffineTransformMakeScale(0.85, 0.85);
-    } completion:^(BOOL finished) {
-        self.panelView.hidden = YES;
-    }];
-    _panelVisible = NO;
-}
-
-- (void)_layoutPanel {
-    CGFloat sx = _mainBtn.frame.origin.x;
-    CGFloat sy = _mainBtn.frame.origin.y;
-    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
-    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-
-    CGFloat px = sx - kPanelW + kBtnSize;
-    if (px < 8) px = sx + 8;
-    CGFloat py = sy + kBtnSize + 6;
-    if (py + kPanelH > screenH - 20) {
-        py = sy - kPanelH - 6;
-    }
-    _panelView.frame = CGRectMake(px, py, kPanelW, kPanelH);
-}
-
-- (void)_buildPanelButtons {
-    NSUInteger count = sizeof(kPanelTitles) / sizeof(kPanelTitles[0]);
-    for (NSUInteger i = 0; i < count; i++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(0, i * kRowH, kPanelW, kRowH);
-        [btn setTitle:kPanelTitles[i] forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        btn.tag = i;
-        [btn addTarget:self action:@selector(_onPanelButton:) forControlEvents:UIControlEventTouchUpInside];
-        [_panelView.actionButtons addObject:btn];
-        [_panelView addSubview:btn];
-
-        if (i < count - 1) {
-            UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(14, (i+1)*kRowH - 0.5, kPanelW - 28, 0.5)];
-            sep.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.1];
-            [_panelView addSubview:sep];
+    UIButton *buttons[] = {_closeBtn, _toggleBtn, _pauseBtn};
+    for (int i = 0; i < kExtCount; i++) {
+        UIButton *b = buttons[i];
+        CGPoint target = b.frame.origin;
+        if (animated) {
+            b.frame = CGRectMake(kBallX, 0, kBtnSize, kBtnSize); // 从悬浮球位置出发
+            b.alpha = 0;
         }
+        [UIView animateWithDuration:animated ? 0.22 : 0.0
+                              delay:animated ? (i * 0.04) : 0.0
+             usingSpringWithDamping:0.85 initialSpringVelocity:0.6
+                            options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+                             b.frame = CGRectMake(target.x, target.y, kBtnSize, kBtnSize);
+                             b.alpha = 1.0;
+                         }
+                         completion:nil];
     }
 }
 
-- (void)_onPanelButton:(UIButton *)sender {
-    TSHUDAction action = (TSHUDAction)sender.tag;
-    [self _hidePanel:YES];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (self.actionHandler) {
-            self.actionHandler(action);
-        }
-    });
-}
-
-#pragma mark - Pan Gesture
-
-- (void)_onPan:(UIPanGestureRecognizer *)gr {
-    if (_panelVisible) return;
-    CGPoint t = [gr translationInView:self];
-    CGRect f = _mainBtn.frame;
-    _mainBtn.frame = CGRectMake(f.origin.x + t.x, f.origin.y + t.y, f.size.width, f.size.height);
-    [gr setTranslation:CGPointZero inView:self];
-
-    if (gr.state == UIGestureRecognizerStateEnded) {
-        CGFloat mx = [UIScreen mainScreen].bounds.size.width;
-        CGFloat my = [UIScreen mainScreen].bounds.size.height;
-        CGFloat targetX;
-        if (_mainBtn.frame.origin.x + kBtnSize/2.0 < mx/2.0) {
-            targetX = 12;
-        } else {
-            targetX = mx - kBtnSize - 12;
-        }
-        CGFloat targetY = _mainBtn.frame.origin.y;
-        if (targetY < 40) targetY = 40;
-        if (targetY + kBtnSize > my - 40) targetY = my - kBtnSize - 40;
-
-        [UIView animateWithDuration:0.2 animations:^{
-            self.mainBtn.frame = CGRectMake(targetX, targetY, kBtnSize, kBtnSize);
-        }];
-        [self _layoutPanel];
+- (void)_collapseAnimated:(BOOL)animated {
+    _expanded = NO;
+    UIButton *buttons[] = {_closeBtn, _toggleBtn, _pauseBtn};
+    for (int i = 0; i < kExtCount; i++) {
+        UIButton *b = buttons[i];
+        [UIView animateWithDuration:animated ? 0.18 : 0.0
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseIn
+                         animations:^{
+                             b.frame = CGRectMake(kBallX, 0, kBtnSize, kBtnSize);
+                             b.alpha = 0;
+                         }
+                         completion:^(BOOL finished) {
+                             b.hidden = YES;
+                         }];
     }
 }
 
-#pragma mark - Hit testing: 按钮区域响应，透明区域透传
+#pragma mark - 按钮动作
+
+- (void)_tapPause:(id)sender {
+    [self _collapseAnimated:YES];
+    // 乐观翻转图标: 暂停 ↔ 恢复 (脚本未运行时按钮已禁用, 不会走到这里)
+    if (_scriptRunning) {
+        _paused = !_paused;
+        [self _refreshButtons];
+    }
+    if (_actionHandler) _actionHandler(TSHUDActionPause);
+}
+
+- (void)_tapToggle:(id)sender {
+    [self _collapseAnimated:YES];
+    if (_actionHandler) _actionHandler(TSHUDActionToggleScript);
+}
+
+- (void)_tapClose:(id)sender {
+    [self _collapseAnimated:YES];
+    if (_actionHandler) _actionHandler(TSHUDActionClose);
+}
+
+#pragma mark - 拖拽
+
+- (void)_panMain:(UIPanGestureRecognizer *)g {
+    if (_expanded) return; // 展开时禁止拖拽
+    CGPoint t = [g translationInView:self];
+    CGRect frame = self.frame;
+    frame.origin.x += t.x;
+    frame.origin.y += t.y;
+    // 限制在屏幕内
+    CGFloat maxX = [UIScreen mainScreen].bounds.size.width  - frame.size.width;
+    CGFloat maxY = [UIScreen mainScreen].bounds.size.height - frame.size.height;
+    frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+    frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+    self.frame = frame;
+    [g setTranslation:CGPointZero inView:self];
+}
+
+#pragma mark - 命中测试
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (!_expanded) {
+        // 未展开: 只响应悬浮球本体, 其余区域穿透
+        if (CGRectContainsPoint(_mainBtn.frame, point)) return _mainBtn;
+        return nil;
+    }
     UIView *hit = [super hitTest:point withEvent:event];
-
-    // 面板显示时
-    if (_panelVisible) {
-        CGPoint pp = [self convertPoint:point toView:_panelView];
-        if ([_panelView pointInside:pp withEvent:event]) {
-            return [_panelView hitTest:pp withEvent:event];
-        }
-        // 点击面板外关闭
-        [self _hidePanel:YES];
-        return hit; // 如果下面有其他视图也让他们接收
+    BOOL onButtons = (hit == _mainBtn || hit == _pauseBtn || hit == _toggleBtn || hit == _closeBtn);
+    if (!onButtons) {
+        // 展开状态下点击空白区域 = 收回
+        if (_expanded) [self _collapseAnimated:YES];
+        return nil;
     }
+    return hit;
+}
 
-    // 检查是否点击在主按钮上
-    CGPoint bp = [self convertPoint:point toView:_mainBtn];
-    if ([_mainBtn pointInside:bp withEvent:event]) {
-        return _mainBtn;
-    }
+#pragma mark - 显隐
 
-    // 透明区域 → 穿透给下层
-    return nil;
+- (void)show {
+    self.hidden = NO;
+    [self _refreshButtons];
+}
+
+- (void)hide {
+    if (_expanded) [self _collapseAnimated:NO];
+    self.hidden = YES;
 }
 
 @end

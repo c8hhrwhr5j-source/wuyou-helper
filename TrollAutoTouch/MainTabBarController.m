@@ -78,16 +78,38 @@
                                                  name:TSLuaRunningStateChangedNotification
                                                object:nil];
 
-    // 悬浮窗"启停脚本"按钮：Lua 运行中则停止，否则运行内置 main.lua
+    // 悬浮窗动作: 暂停/恢复、启动/停止(当前选中的 Lua 脚本)、关闭
     [[TSHUDWindow shared] setActionHandler:^(TSHUDAction action) {
-        if (action != TSHUDActionToggleScript) return;
         TSLuaBridge *lua = [TSLuaBridge shared];
-        if (lua.isRunning) {
-            [lua stop];
-        } else {
-            NSString *path = [TSPaths pathForLua:@"main.lua"];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-                [lua runFile:path];
+        switch (action) {
+            case TSHUDActionPause: {
+                // 暂停/恢复当前 Lua 脚本 (脚本未运行时按钮已禁用)
+                if (!lua.isRunning) break;
+                if (lua.isPaused) {
+                    [lua resume];
+                } else {
+                    [lua pause];
+                }
+                break;
+            }
+            case TSHUDActionToggleScript: {
+                // 启动/停止当前选中的 Lua 脚本
+                if (lua.isRunning) {
+                    [lua stop];
+                } else {
+                    NSString *name = [TSScriptListViewController selectedScriptName];
+                    NSString *path = [TSPaths pathForLua:name];
+                    if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                        path = [TSPaths pathForLua:@"main.lua"];
+                    }
+                    if (path) [lua runFile:path];
+                }
+                break;
+            }
+            case TSHUDActionClose: {
+                // 关闭悬浮球
+                [[TSHUDWindow shared] hide];
+                break;
             }
         }
     }];

@@ -59,11 +59,7 @@ static BOOL _luaPausedByButton = NO;
 
     [self _log:@"TrollAutoTouch v2.0 已启动。"];
 
-    // 设置 HUD 操作回调
-    __weak typeof(self) ws = self;
-    [[TSHUDWindow shared] setActionHandler:^(TSHUDAction action) {
-        [ws _handleHUDAction:action];
-    }];
+    // 悬浮窗动作由 MainTabBarController 统一处理 (启停/暂停/关闭)
 
     // 设置 Web 服务器回调
     [TSHTTPServer shared].delegate = self;
@@ -155,82 +151,6 @@ static BOOL _luaPausedByButton = NO;
         case 17: [self _testShell]; break;
         case 18: [self _pauseLuaScript]; break;
         case 19: [self _openScriptUI]; break;
-    }
-}
-
-#pragma mark - HUD 操作
-
-- (void)_handleHUDAction:(TSHUDAction)action {
-    switch (action) {
-        case TSHUDActionToggleScript: {
-            if ([TSScriptEngine shared].isRunning) {
-                [[TSScriptEngine shared] stop];
-                [[TSHUDWindow shared] setScriptRunning:NO];
-                [self _log:@"[HUD] 脚本已停止"];
-            } else {
-                NSString *path = [[NSBundle mainBundle] pathForResource:@"demo" ofType:@"script"];
-                if (path) {
-                    [[TSScriptEngine shared] runFile:path delegate:self];
-                    [[TSHUDWindow shared] setScriptRunning:YES];
-                    [self _log:@"[HUD] 脚本已启动"];
-                } else {
-                    [self _log:@"[HUD] 未找到 demo.script"];
-                }
-            }
-            break;
-        }
-        case TSHUDActionRecord: {
-            if ([TSTouchRecorder shared].isRecording) {
-                [[TSTouchRecorder shared] stopRecording];
-                [self _log:@"[HUD] 录制已停止"];
-            } else {
-                [[TSTouchRecorder shared] startRecordingWithInterval:0.016];
-                [self _log:@"[HUD] 开始录制触控..."];
-            }
-            [[TSHUDWindow shared] setRecording:[TSTouchRecorder shared].isRecording];
-            break;
-        }
-        case TSHUDActionPlayRecord: {
-            [[TSTouchRecorder shared] playRecordingWithSpeed:1.0];
-            [self _log:@"[HUD] 回放录制中..."];
-            break;
-        }
-        case TSHUDActionKeepScreen: {
-            [[TSScreenCapture shared] keepPixels];
-            [self _log:@"[HUD] 截屏已缓存"];
-            break;
-        }
-        case TSHUDActionScreenshot: {
-            UIImage *img = [[TSScreenCapture shared] captureImage];
-            if (img) {
-                NSDateFormatter *f = [[NSDateFormatter alloc] init];
-                f.dateFormat = @"yyyyMMdd_HHmmss";
-                NSString *path = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
-                    NSUserDomainMask, YES).firstObject
-                    stringByAppendingFormat:@"/screenshot_%@.png", [f stringFromDate:[NSDate date]]];
-                [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
-                [self _log:[NSString stringWithFormat:@"[HUD] 截屏已保存: %@", path.lastPathComponent]];
-            }
-            break;
-        }
-        case TSHUDActionDeviceInfo: {
-            [self _log:[NSString stringWithFormat:@"[设备] %@", [[TSDeviceInfo shared] fullInfo]]];
-            break;
-        }
-        case TSHUDActionAppTree: {
-            NSString *json = [[TSAppNodeInfo shared] fullTreeJSON];
-            [self _log:[NSString stringWithFormat:@"[UI树] %@", [json substringToIndex:MIN(500, json.length)]]];
-            break;
-        }
-        case TSHUDActionStopAll: {
-            [[TSScriptEngine shared] stop];
-            [[TSHUDWindow shared] setScriptRunning:NO];
-            [[TSTouchRecorder shared] stopRecording];
-            [[TSTouchRecorder shared] stopPlayback];
-            [[TSHUDWindow shared] setRecording:NO];
-            [self _log:@"[HUD] 全部已停止"];
-            break;
-        }
     }
 }
 

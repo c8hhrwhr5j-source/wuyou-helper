@@ -1964,6 +1964,7 @@ static void lua_register_all(lua_State *L) {
     // 直接写 volatile 标志, 不抢 self 锁: 脚本正在 _luaQueue 上跑, 主线程这里必须能立即返回,
     // 否则若脚本是死循环(不检查 _stopRequested), 主线程会永远卡在锁上, 整个 App 无响应。
     _stopRequested = YES;
+    self.isPaused = NO;
     // 立即补发所有未抬起的触摸，避免脚本被中断后留下"幽灵手指"导致屏幕点击无响应
     [[TSHIDEventTouch shared] releaseAllTouches];
     dispatch_async(_luaQueue, ^{
@@ -1979,6 +1980,7 @@ static void lua_register_all(lua_State *L) {
 - (void)pause {
     if (!self.isRunning) return;
     _pauseRequested = YES;
+    self.isPaused = YES;
     // 补发未抬起的触摸, 避免脚本停在拖动/按下中途留下"幽灵手指"
     [[TSHIDEventTouch shared] releaseAllTouches];
     lua_log(@"[Lua] 脚本已暂停 (再次按音量键可继续/停止)");
@@ -1987,6 +1989,7 @@ static void lua_register_all(lua_State *L) {
 // 恢复被暂停的脚本
 - (void)resume {
     _pauseRequested = NO;
+    self.isPaused = NO;
     lua_log(@"[Lua] 脚本已继续");
 }
 
@@ -2063,6 +2066,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 - (void)_execute:(NSString *)code filePath:(NSString *)path {
     _stopRequested = NO;
     _pauseRequested = NO;
+    self.isPaused = NO;
     self.runningPath = path;
     self.isRunning = YES;
 
@@ -2141,6 +2145,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 
     _stopRequested = NO;
     _pauseRequested = NO;
+    self.isPaused = NO;
     self.runningPath = nil;
     self.isRunning = NO;
     // 脚本结束, 停止后台静音保活 (App 回到正常后台生命周期)

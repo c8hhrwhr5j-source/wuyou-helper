@@ -12,6 +12,7 @@
 #import "HUD/TSHUDHost.h"
 #import "Core/TSDaemonManager.h"
 #import "Script/TSLuaBridge.h"
+#import "Script/TSHTTPServer.h"
 #import "Common/TSPaths.h"
 
 // TAS 服务开关 key (与 TSSettingsViewController 一致, 默认开)
@@ -41,13 +42,15 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
     // ── 启动核心服务（悬浮窗默认关闭，用户手动开启）──
     // TAS 服务开关(默认开)决定服务是否启动:
-    //   开 → startAll + 常驻音量键监听 (空闲按音量键 → 弹"运行脚本/取消");
+    //   开 → startAll + 常驻音量键监听 + 远程访问 HTTP 服务(默认常开);
     //   关 → 不启动, 用户可在设置页手动开启。
+    // 远程访问端口跟随 TAS 服务联动: TAS 开启即监听 8080, 关闭即停止。
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     BOOL tasOn = [ud objectForKey:kTASServiceEnabledKey] ? [ud boolForKey:kTASServiceEnabledKey] : YES;
     if (tasOn) {
         [[TSDaemonManager shared] startAll];
         [[TSLuaBridge shared] startGlobalVolumeMonitoring];
+        [[TSHTTPServer shared] start];
     }
 
     // ── 预热进程内 HUD 宿主（单 App 架构）──

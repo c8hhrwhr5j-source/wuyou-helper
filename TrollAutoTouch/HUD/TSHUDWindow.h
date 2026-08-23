@@ -2,45 +2,30 @@
 //  TSHUDWindow.h
 //  TrollAutoTouch
 //
-//  悬浮控制窗(HUD): 可拖动圆形主按钮 + 长按展开控制面板。
-//  控制面板包含: 启停脚本 / 录制触控 / 回放 / 缓存截屏 / 拍照 / 设备信息
+//  悬浮窗: 悬浮球 + 向左展开的快捷按钮组 (暂停/恢复、启动/停止、关闭)
+//  所有按钮仅图标, 不显示文字。点击悬浮球本体可展开/收回按钮组。
 //
 
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 面板操作类型
 typedef NS_ENUM(NSInteger, TSHUDAction) {
-    TSHUDActionToggleScript,  // 启动/停止脚本
-    TSHUDActionRecord,        // 开始/停止录制
-    TSHUDActionPlayRecord,    // 回放录制
-    TSHUDActionKeepScreen,    // 缓存截屏
-    TSHUDActionScreenshot,    // 保存截屏
-    TSHUDActionDeviceInfo,    // 设备信息
-    TSHUDActionAppTree,       // UI 树
-    TSHUDActionStopAll,       // 全部停止
+    TSHUDActionPause        = 0, // 暂停/恢复当前 Lua 脚本
+    TSHUDActionToggleScript = 1, // 启动/停止当前选中的 Lua 脚本
+    TSHUDActionClose        = 2, // 关闭悬浮球
 };
-
-/// 操作回调
-typedef void(^TSHUDActionBlock)(TSHUDAction action);
 
 @interface TSHUDWindow : UIWindow
 
+@property (nonatomic, copy, nullable) void (^actionHandler)(TSHUDAction action);
+
+/// 是否正在录制 (无录制按钮, 保留属性以防旧调用)
+@property (nonatomic, assign) BOOL recording;
+
 + (instancetype)shared;
-
-/// 显示悬浮窗
 - (void)show;
-/// 隐藏
 - (void)hide;
-
-/// 设置操作回调
-- (void)setActionHandler:(TSHUDActionBlock _Nullable)handler;
-
-/// 更新录制按钮状态
-- (void)setRecording:(BOOL)recording;
-
-/// 更新脚本运行状态
 - (void)setScriptRunning:(BOOL)running;
 
 @end

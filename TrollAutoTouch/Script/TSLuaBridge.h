@@ -36,6 +36,9 @@ FOUNDATION_EXPORT NSNotificationName const TSLuaRunningStateChangedNotification;
 /// 是否正在运行脚本
 @property (nonatomic, assign) BOOL isRunning;
 
+/// 是否处于暂停状态(仅脚本运行中有效)
+@property (nonatomic, assign) BOOL isPaused;
+
 /// 当前正在运行的脚本完整路径(nil 表示未在运行)
 @property (nonatomic, copy, nullable) NSString *runningPath;
 

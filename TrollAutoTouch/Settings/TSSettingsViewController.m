@@ -2,14 +2,19 @@
 //  TSSettingsViewController.m
 //  TrollAutoTouch
 //
-//  设置页：服务开关 (TAS/远程访问/触摸显示/悬浮窗) + 服务地址 + 性能面板
+//  设置页：服务开关 (TAS/悬浮窗) + 服务地址 + 设备信息 + 性能面板
 //  对齐 TAS 原版设置页布局；浅色主题
 //
+//  说明:
+//    - 远程访问默认常开: 端口随 TAS 服务联动, 不再有独立开关。
+//    - 触摸显示已移除: 不再提供该开关及关联代码。
+//    - 新增设备信息区: 显示设备信息 / 版本号 / 包名。
 
 #import "TSSettingsViewController.h"
 #import "../Views/TSPerformanceMonitorView.h"
 #import "../Core/TSToolExecutor.h"
 #import "../Core/TSDaemonManager.h"
+#import "../Core/TSDeviceInfo.h"
 #import "../Script/TSHTTPServer.h"
 #import "../Script/TSLuaBridge.h"
 #import "../HUD/TSHUDWindow.h"
@@ -69,13 +74,16 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 @end
 
-#pragma mark - URL Cell
+#pragma mark - Info Cell
 
-@interface TSURLInfoCell : UITableViewCell
-@property (nonatomic, strong) UILabel *urlLabel;
+// 通用"图标 + 标题 + 详情"行: 服务地址 / 设备信息 / 版本号 / 包名
+@interface TSInfoCell : UITableViewCell
+@property (nonatomic, strong) UIImageView *iconView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *detailLabel;
 @end
 
-@implementation TSURLInfoCell
+@implementation TSInfoCell
 
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseId {
     self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseId];
@@ -83,12 +91,44 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         self.backgroundColor = [TSColors card];
         self.selectionStyle  = UITableViewCellSelectionStyleNone;
 
-        _urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, 300, 44)];
-        _urlLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-        _urlLabel.textColor = [TSColors tint];
-        _urlLabel.textAlignment = NSTextAlignmentLeft;
-        _urlLabel.numberOfLines = 0;
-        [self.contentView addSubview:_urlLabel];
+        _iconView = [[UIImageView alloc] initWithFrame:CGRectZero];
+        _iconView.contentMode = UIViewContentModeScaleAspectFit;
+        _iconView.tintColor = [TSColors tint];
+        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_iconView];
+
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _titleLabel.font = [UIFont systemFontOfSize:15];
+        _titleLabel.textColor = [TSColors label];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_titleLabel];
+
+        _detailLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _detailLabel.font = [UIFont systemFontOfSize:13];
+        _detailLabel.textColor = [TSColors secondaryLabel];
+        _detailLabel.textAlignment = NSTextAlignmentRight;
+        _detailLabel.numberOfLines = 0;
+        _detailLabel.lineBreakMode = NSLineBreakByCharWrapping;
+        _detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:_detailLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_iconView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14],
+            [_iconView.centerYAnchor constraintEqualToAnchor:self.contentView.centerYAnchor],
+            [_iconView.widthAnchor constraintEqualToConstant:22],
+            [_iconView.heightAnchor constraintEqualToConstant:22],
+
+            [_titleLabel.leadingAnchor constraintEqualToAnchor:_iconView.trailingAnchor constant:10],
+            [_titleLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:13],
+            [_titleLabel.widthAnchor constraintEqualToConstant:88],
+
+            [_detailLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor constant:8],
+            [_detailLabel.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14],
+            [_detailLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:9],
+            [_detailLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.contentView.bottomAnchor constant:-9],
+        ]];
+        [_titleLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     }
     return self;
 }
@@ -103,8 +143,6 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 @property (nonatomic, strong) TSPerformanceMonitorView *perfView;
 
 @property (nonatomic, assign) BOOL tasServiceOn;
-@property (nonatomic, assign) BOOL remoteAccessOn;
-@property (nonatomic, assign) BOOL touchDisplayOn;
 @property (nonatomic, assign) BOOL floatWindowOn;
 
 @end
@@ -117,10 +155,8 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         // TAS 服务默认开启: 安装即处于运行保活状态。状态持久化, 重启后保持上次选择。
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
         _tasServiceOn = [ud objectForKey:kTASServiceEnabledKey] ? [ud boolForKey:kTASServiceEnabledKey] : YES;
-        _remoteAccessOn  = NO;
-        _touchDisplayOn  = NO;
         // 悬浮窗口默认关闭: 用户需要时手动开启
-        _floatWindowOn   = NO;
+        _floatWindowOn = NO;
     }
     return self;
 }
@@ -146,8 +182,9 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     _tableView.delegate   = self;
     _tableView.dataSource = self;
     _tableView.rowHeight  = 44;
+    _tableView.estimatedRowHeight = 44;
     [_tableView registerClass:[TSSwitchCell class] forCellReuseIdentifier:@"switch"];
-    [_tableView registerClass:[TSURLInfoCell class] forCellReuseIdentifier:@"url"];
+    [_tableView registerClass:[TSInfoCell class] forCellReuseIdentifier:@"info"];
     [_tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"action"];
     [_tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"perf"];
     [self.view addSubview:_tableView];
@@ -178,31 +215,19 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     [[NSUserDefaults standardUserDefaults] synchronize];
 
     if (on) {
-        // 开启: 启动服务 + 常驻音量键监听 (空闲按音量键 → 弹"运行脚本/取消")
+        // 开启: 启动服务 + 常驻音量键监听 + 远程访问端口(默认常开, 随 TAS 联动)
         [[TSDaemonManager shared] startAll];
         [[TSLuaBridge shared] startGlobalVolumeMonitoring];
+        [[TSHTTPServer shared] start];
         [[TSHUDHost shared] showToast:@"TAS 服务已开启" duration:1.2 hidden:NO];
     } else {
-        // 关闭: 停止音量键监听 + 停止服务 (含后台保活/心跳)
+        // 关闭: 停止音量键监听 + 停止服务 (含后台保活/心跳) + 关闭远程访问端口
         [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
         [[TSDaemonManager shared] stopAll];
+        [[TSHTTPServer shared] stop];
         [[TSHUDHost shared] showToast:@"TAS 服务已关闭" duration:1.2 hidden:NO];
     }
     [_tableView reloadData];
-}
-
-- (void)_toggleRemote:(BOOL)on {
-    _remoteAccessOn = on;
-    if (on) {
-        [[TSHTTPServer shared] start];
-    } else {
-        [[TSHTTPServer shared] stop];
-    }
-    [_tableView reloadData];
-}
-
-- (void)_toggleTouch:(BOOL)on {
-    _touchDisplayOn = on;
 }
 
 - (void)_toggleFloat:(BOOL)on {
@@ -214,23 +239,68 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     }
 }
 
+#pragma mark - 设备信息 / 版本 / 包名
+
+- (NSString *)_deviceInfoDetail {
+    TSDeviceInfo *info = [TSDeviceInfo shared];
+    NSString *name  = [info deviceName] ?: @"";
+    NSString *model = [info modelIdentifier] ?: @"";
+    NSString *os    = [NSString stringWithFormat:@"iOS %@", [info osVersion] ?: @""];
+    return [NSString stringWithFormat:@"%@\n%@ · %@", name, model, os];
+}
+
+- (NSString *)_appVersionDetail {
+    NSDictionary *bundle = [NSBundle mainBundle].infoDictionary;
+    NSString *v = bundle[@"CFBundleShortVersionString"] ?: @"";
+    NSString *b = bundle[@"CFBundleVersion"] ?: @"";
+    return b.length ? [NSString stringWithFormat:@"%@ (%@)", v, b] : v;
+}
+
+- (NSString *)_bundleIDDetail {
+    return [NSBundle mainBundle].bundleIdentifier ?: @"";
+}
+
+- (void)_showCopiedToast:(NSString *)text {
+    UIPasteboard.generalPasteboard.string = text;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:nil
+                                                               message:@"已复制" preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:ac animated:YES completion:^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [ac dismissViewControllerAnimated:YES completion:nil];
+        });
+    }];
+}
+
 #pragma mark - TableView
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
-    return 2;
+    return 3;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    // TAS 服务关闭时列表不收缩: 远程访问/触摸显示/悬浮窗等开关始终可见
-    if (section == 0) return 5;
-    return 3; // 通用: 查看脚本日志 + 查看系统日志 + 性能面板
+    if (section == 0) return 3; // TAS 服务 + 悬浮窗口 + 服务地址
+    if (section == 1) return 3; // 通用: 查看脚本日志 + 查看系统日志 + 性能面板
+    return 3;                    // 设备信息: 设备 + 版本号 + 包名
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? @"服务" : @"通用";
+    if (section == 0) return @"服务";
+    if (section == 1) return @"通用";
+    return @"设备信息";
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 1 && ip.row == 2) return 160;
+    if (ip.section == 2) return UITableViewAutomaticDimension;
+    return 44;
+}
+
+- (CGFloat)tableView:(UITableView *)tv estimatedHeightForRowAtIndexPath:(NSIndexPath *)ip {
+    return 44;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    // ── 通用区: 查看日志 + 性能面板 ──
     if (ip.section == 1) {
         if (ip.row == 2) {
             // 性能面板: 作为表格行随主界面上下滑动
@@ -267,6 +337,30 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         return c;
     }
 
+    // ── 设备信息区 ──
+    if (ip.section == 2) {
+        TSInfoCell *c = [tv dequeueReusableCellWithIdentifier:@"info"];
+        c.detailLabel.font = [UIFont systemFontOfSize:13];
+        c.detailLabel.textColor = [TSColors secondaryLabel];
+        if (ip.row == 0) {
+            c.iconView.image = [self _icon:@"iphone"];
+            c.titleLabel.text = @"设备";
+            c.detailLabel.text = [self _deviceInfoDetail];
+        } else if (ip.row == 1) {
+            c.iconView.image = [self _icon:@"number"];
+            c.titleLabel.text = @"版本";
+            c.detailLabel.text = [self _appVersionDetail];
+            c.detailLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightMedium];
+        } else {
+            c.iconView.image = [self _icon:@"shippingbox"];
+            c.titleLabel.text = @"包名";
+            c.detailLabel.text = [self _bundleIDDetail];
+            c.detailLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+        }
+        return c;
+    }
+
+    // ── 服务区: TAS 服务 / 悬浮窗口 / 服务地址 ──
     if (ip.row == 0) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
         c.iconView.image = [self _icon:@"bolt.fill"];
@@ -277,22 +371,6 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         return c;
     } else if (ip.row == 1) {
         TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
-        c.iconView.image = [self _icon:@"globe"];
-        c.titleLabel.text = @"远程访问";
-        [c.sw setOn:_remoteAccessOn animated:NO];
-        __weak typeof(self) ws = self;
-        c.onToggle = ^(BOOL on) { [ws _toggleRemote:on]; };
-        return c;
-    } else if (ip.row == 2) {
-        TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
-        c.iconView.image = [self _icon:@"hand.point.up.fill"];
-        c.titleLabel.text = @"触摸显示";
-        [c.sw setOn:_touchDisplayOn animated:NO];
-        __weak typeof(self) ws = self;
-        c.onToggle = ^(BOOL on) { [ws _toggleTouch:on]; };
-        return c;
-    } else if (ip.row == 3) {
-        TSSwitchCell *c = [tv dequeueReusableCellWithIdentifier:@"switch"];
         c.iconView.image = [self _icon:@"rectangle.on.rectangle"];
         c.titleLabel.text = @"悬浮窗口";
         [c.sw setOn:_floatWindowOn animated:NO];
@@ -300,21 +378,21 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         c.onToggle = ^(BOOL on) { [ws _toggleFloat:on]; };
         return c;
     } else {
-        TSURLInfoCell *c = [tv dequeueReusableCellWithIdentifier:@"url"];
-        c.urlLabel.text = [self _serviceURL];
+        TSInfoCell *c = [tv dequeueReusableCellWithIdentifier:@"info"];
+        c.iconView.image = [self _icon:@"globe"];
+        c.titleLabel.text = @"服务地址";
+        c.detailLabel.text = [self _serviceURL];
+        c.detailLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+        c.detailLabel.textColor = [TSColors tint];
         return c;
     }
-}
-
-- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
-    if (ip.section == 1 && ip.row == 2) return 160;
-    return 44;
 }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
     if (ip.section == 1) {
+        if (ip.row == 2) return; // 性能面板行
         // row0 = 查看脚本日志(debug.log), row1 = 查看系统日志(touch.log)
         TSLogViewController *vc = [[TSLogViewController alloc]
                                    initWithMode:(ip.row == 0 ? @"script" : @"system")];
@@ -322,15 +400,17 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         return;
     }
 
-    if (ip.row == 4) {
-        UIPasteboard.generalPasteboard.string = [self _serviceURL];
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:nil
-                                                                   message:@"已复制" preferredStyle:UIAlertControllerStyleAlert];
-        [self presentViewController:ac animated:YES completion:^{
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [ac dismissViewControllerAnimated:YES completion:nil];
-            });
-        }];
+    if (ip.section == 0 && ip.row == 2) {
+        [self _showCopiedToast:[self _serviceURL]];
+        return;
+    }
+
+    if (ip.section == 2) {
+        NSString *copy = nil;
+        if (ip.row == 0)      copy = [self _deviceInfoDetail];
+        else if (ip.row == 1) copy = [self _appVersionDetail];
+        else                  copy = [self _bundleIDDetail];
+        [self _showCopiedToast:copy];
     }
 }
 
