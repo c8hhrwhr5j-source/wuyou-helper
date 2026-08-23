@@ -22,6 +22,9 @@ _analysis/
 # 日志与本地脚本
 *.log
 *.local
+_reverse_*.py
+_autotouch_extract/
+_ci_error.log
 
 # 构建目录（build-ipa.sh 输出）
 build/
