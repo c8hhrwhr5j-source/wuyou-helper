@@ -1235,6 +1235,23 @@ static const char *_gsSurfaceKeys[] = {
 
         diag[@"CARenderServerRenderDisplaySymbol"] = @(dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay") != NULL);
         diag[@"IOMobileFramebufferSymbol"] = @(dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetMainDisplay") != NULL);
+        // 测试完整 captureImage 链路，并返回缩略图 base64，便于判断截到的是否为实时全屏
+        UIImage *testImg = [self captureImage];
+        diag[@"captureImageOk"] = @(testImg != nil);
+        CGSize imgSize = testImg ? testImg.size : CGSizeZero;
+        diag[@"captureImageSize"] = testImg ? NSStringFromCGSize(imgSize) : @"(失败)";
+        if (testImg && imgSize.width > 0 && imgSize.height > 0) {
+            CGFloat scale = MIN(200.0 / imgSize.width, 200.0 / imgSize.height);
+            CGSize thumbSize = CGSizeMake(imgSize.width * scale, imgSize.height * scale);
+            UIGraphicsBeginImageContextWithOptions(thumbSize, NO, 1.0);
+            [testImg drawInRect:CGRectMake(0, 0, thumbSize.width, thumbSize.height)];
+            UIImage *thumb = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+            NSData *thumbPNG = UIImagePNGRepresentation(thumb);
+            if (thumbPNG.length > 0) {
+                diag[@"captureImageThumbBase64"] = [thumbPNG base64EncodedStringWithOptions:0];
+            }
+        }
         diag[@"lastError"] = self.lastError ?: @"(无)";
     } @catch (NSException *e) {
         diag[@"exception"] = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
