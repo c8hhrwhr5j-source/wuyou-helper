@@ -97,8 +97,6 @@ typedef kern_return_t (*IOSurfaceAccelTransferFunc)(void *accelerator, IOSurface
                                                     IOSurfaceRef destSurface, void *p1, void *p2,
                                                     void *p3, void *p4);
 typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
-typedef size_t (*IOSurfaceGetWidthFunc)(IOSurfaceRef);
-typedef size_t (*IOSurfaceGetHeightFunc)(IOSurfaceRef);
 // CARenderServerRenderDisplay: 把主屏渲染到 IOSurface(TrollShot/TrollVNC 验证的 TrollStore 截屏方案)
 typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef display, IOSurfaceRef surface,
                                                 int options, int a2);
@@ -415,28 +413,25 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     SEL sel = NSSelectorFromString(@"createScreenIOSurface");
     if (!sel) { return NULL; }
 
-    // 原版逆向结论(0x100056464): receiver = [UIScreen mainScreen], 即**实例方法**
-    // -[UIScreen createScreenIOSurface], 返回绑定主屏渲染管线的全屏 surface。
-    // 类方法候选仅作兜底: 某些 iOS 版本类方法可能返回 app 自身 surface(截到自己画面)。
-    // 实例方法优先, 并对返回 surface 做**全屏尺寸校验**, 非全屏(如 app 窗口/局部 surface)一律拒绝。
+    // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
+    // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
+    // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
+    // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
     NSMutableArray *candidates = [NSMutableArray array];
-    [candidates addObject:[UIScreen mainScreen]];                 // 原版形态: -[UIScreen createScreenIOSurface]
+    [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](逆向+社区首选)
+    [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](个别版本)
+    [candidates addObject:[UIScreen mainScreen]];                 // -[UIScreen createScreenIOSurface](旧版代码路径)
     @try {
         UIApplication *app = [UIApplication sharedApplication];
         if (app) {
             UIWindow *kw = [app valueForKey:@"keyWindow"];
-            if (kw) { [candidates addObject:kw]; }                // -[keyWindow createScreenIOSurface](兜底)
+            if (kw) { [candidates addObject:kw]; }                // -[keyWindow createScreenIOSurface]
             NSArray *wins = [app valueForKey:@"windows"];
             for (UIWindow *w in wins) {
                 if (w && w != kw) { [candidates addObject:w]; }
             }
         }
     } @catch (NSException *e) { }
-    [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](兜底)
-    [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](兜底)
-
-    IOSurfaceGetWidthFunc getW = (IOSurfaceGetWidthFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
-    IOSurfaceGetHeightFunc getH = (IOSurfaceGetHeightFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
 
     for (id target in candidates) {
         if (!target) { continue; }
@@ -451,10 +446,6 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
             __unsafe_unretained IOSurfaceRef ios = NULL;
             [inv getReturnValue:&ios];
             if (ios && CFGetTypeID(ios) == typeIdFn()) {
-                size_t sw = getW ? getW(ios) : 0;
-                size_t sh = getH ? getH(ios) : 0;
-                NSLog(@"[TSScreenCapture] createScreenIOSurface target=%@ surface=%zux%zu",
-                      NSStringFromClass([target class]), sw, sh);
                 return ios;
             }
         } @catch (NSException *e) { }
@@ -1148,31 +1139,41 @@ static const char *_gsSurfaceKeys[] = {
 
 #pragma mark - 公共 API
 
-/// 后台截屏专用路径: 与原版 AutoTouch/HUDServices 一致, 优先 UIScreen createScreenIOSurface
-/// (系统级全屏 surface, 后台/跨 App 可用), 再回退 CARenderServerRenderDisplay / 全局显示。
-/// 无缓存 surface 时会主线程创建一次(原版 HUD 进程同样主线程创建), 之后复用缓存。
+/// 后台截屏专用路径: 优先 CARenderServerRenderDisplay(后台验证过的方案),
+/// 再回退全局显示 / UIScreen surface 缓存。
+/// 后台时不走 createScreenIOSurface 的主线程 800ms 同步等待(该路径后台基本失效,
+/// 白白拖慢 HTTP 响应), 直接读缓存 surface。
 - (BOOL)_captureBackgroundToRGBA:(uint8_t **)pixelsOut
                            width:(int *)widthOut
                           height:(int *)heightOut {
-    // 1. UIScreen createScreenIOSurface(原版核心链路): 绑定主屏渲染管线的全屏 surface,
-    //    内容由 WindowServer 持续更新, 与 App 自身前后台无关。
-    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
-        return YES;
-    }
-    NSString *err0 = [self.lastError copy];
-    // 2. CARenderServerRenderDisplay: TrollShot/TrollVNC 在后台/锁屏验证过的跨 App 截屏方案,
-    //    走 WindowServer 渲染管线。
+    // 1. CARenderServerRenderDisplay: TrollShot/TrollVNC 在后台/锁屏验证过的跨 App 截屏方案,
+    //    走 WindowServer 渲染管线, 与 App 自身前后台无关。
     if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *errRS = [self.lastError copy];
-    // 3. IORegistry DisplaySurface + IOSurfaceLookup(全局显示缓冲, 不依赖前台)
+    // 2. IORegistry DisplaySurface + IOSurfaceLookup(全局显示缓冲, 不依赖前台)
     if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *errGD = [self.lastError copy];
-    self.lastError = [NSString stringWithFormat:@"后台截屏: UIScreenSurface: %@; CARenderServer: %@; 全局显示: %@",
-                      err0 ?: @"未尝试", errRS ?: @"未尝试", errGD ?: @"未尝试"];
+    // 3. 兜底: 读 UIScreen surface 缓存(可能含前台最后一帧, 不重新创建、不阻塞主线程)
+    IOSurfaceRef cached = [self _getCachedScreenSurface];
+    if (cached) {
+        uint8_t *px = NULL; int w = 0, h = 0;
+        BOOL ok = [self _dumpIOSurface:cached pixelsOut:&px width:&w height:&h] && px
+                  && ![self _isAllZeroPixels:px width:w height:h];
+        CFRelease(cached);
+        if (ok) {
+            self.lastError = nil;
+            *pixelsOut = px; *widthOut = w; *heightOut = h;
+            return YES;
+        }
+        if (px) { free(px); }
+        [self _setCachedScreenSurface:NULL];
+    }
+    self.lastError = [NSString stringWithFormat:@"后台截屏: CARenderServer: %@; 全局显示: %@; UIScreen 缓存: 空/全0",
+                      errRS ?: @"未尝试", errGD ?: @"未尝试"];
     return NO;
 }
 
