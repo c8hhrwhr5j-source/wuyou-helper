@@ -145,7 +145,8 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
             if (completion) completion(NO, YES, msg);
             return;
         }
-        // 响应内容为全加密 Base64
+        NSInteger statusCode = [(NSHTTPURLResponse *)resp statusCode];
+        // 响应内容为全加密 Base64 (服务端出错时可能返回明文, 这里都打印出来便于诊断)
         NSString *bodyStr = [[NSString alloc] initWithData:data
                                                   encoding:NSUTF8StringEncoding];
         bodyStr = [bodyStr stringByTrimmingCharactersInSet:
@@ -170,13 +171,23 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
             if (completion) completion(YES, NO, @"验证通过");
             return;
         }
+
+        // 失败时把原始响应带出来便于排查
+        NSString *rawPreview = bodyStr.length > 500 ?
+            [bodyStr substringToIndex:500] : bodyStr;
+        if (statusCode != 200) {
+            NSString *msg = [NSString stringWithFormat:@"HTTP %ld: %@", (long)statusCode, rawPreview];
+            if (completion) completion(NO, NO, msg);
+            return;
+        }
         NSString *msg = nil;
         if ([obj[@"message"] isKindOfClass:NSString.class] && [obj[@"message"] length]) {
             msg = obj[@"message"];
         } else if (code.length) {
             msg = [NSString stringWithFormat:@"验证失败(code=%@)", code];
         } else {
-            msg = @"响应解析失败, 请检查加密/验签配置";
+            msg = [NSString stringWithFormat:@"响应解析失败, raw=%@, dec=%@",
+                   rawPreview, jsonStr ?: @"(nil)"];
         }
         if (completion) completion(NO, NO, msg);
     }];
