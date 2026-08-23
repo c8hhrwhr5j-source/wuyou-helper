@@ -31,6 +31,7 @@
 #import <mach/mach.h>
 #import <unistd.h>
 #import <IOKit/IOKitLib.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 // MARK: - Display P3 广色域 → sRGB 转换
 // iPhone 7 及之后的屏幕为 Display P3 广色域，IOSurface 像素是 P3 值。
@@ -100,6 +101,10 @@ typedef CFTypeID (*IOSurfaceGetTypeIDFunc)(void);
 // CARenderServerRenderDisplay: 把主屏渲染到 IOSurface(TrollShot/TrollVNC 验证的 TrollStore 截屏方案)
 typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef display, IOSurfaceRef surface,
                                                 int options, int a2);
+// _UICreateCGImageFromIOSurface: UIKit 私有函数, 直接把 IOSurface 转成 CGImage。
+// AutoTouch(HUDServices) 主截屏链路 = createScreenIOSurface -> IOSurfaceAcceleratorTransferSurface
+//   -> _UICreateCGImageFromIOSurface(dst) 生成图像(0x100057378 反汇编确认)。
+typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
 
 @interface TSScreenCapture () {
     void *_iomfbHandle;
@@ -117,6 +122,8 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     BOOL _hideWindowsWhenCapturing;      // 后台截屏实验: 创建 surface 前临时隐藏本 App 所有窗口
                                          // (模拟原版 HUDServices 独立无窗口进程, 让 createScreenIOSurface
                                          //   不再绑定本 App 画面)
+    // _UICreateCGImageFromIOSurface 函数指针(AutoTouch 原版主截屏读取路径)
+    UICreateCGImageFromIOSurfaceFunc _uiCreateCGImageFn;
 }
 @end
 
@@ -142,6 +149,14 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         // 预加载私有框架
         _iomfbHandle = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
         _iosurfaceHandle = dlopen("/System/Library/PrivateFrameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
+        // _UICreateCGImageFromIOSurface 是 UIKit 私有函数(AutoTouch 原版主截屏路径的读取端)
+        _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(RTLD_DEFAULT, "_UICreateCGImageFromIOSurface");
+        if (!_uiCreateCGImageFn) {
+            void *uiKit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
+            if (uiKit) {
+                _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(uiKit, "_UICreateCGImageFromIOSurface");
+            }
+        }
     }
     return self;
 }
@@ -241,8 +256,43 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         }
     }
 
-    // ---- 加锁读取 ----
-    kern_return_t lk = lockFn(readSurface, 1 /*kIOSurfaceLockReadOnly*/, NULL);
+    // ---- 读取 ----
+    // 首选(AutoTouch 原版主路径): 加速器转储到自建 BGRA surface 后, 用 UIKit 私有函数
+    // _UICreateCGImageFromIOSurface(dstSurface) 直接生成 CGImage(反汇编 0x100057378 确认)。
+    // 该函数内部走系统 IO 路径, 比手动 IOSurfaceLock 更可靠(后台/跨 App 场景)。
+    if (readSurface == dstSurface && dstSurface && _uiCreateCGImageFn) {
+        CGImageRef cg = _uiCreateCGImageFn(dstSurface);
+        if (cg) {
+            size_t cw = CGImageGetWidth(cg);
+            size_t ch = CGImageGetHeight(cg);
+            if (cw > 0 && ch > 0 && cw == srcW && ch == srcH) {
+                uint8_t *out = malloc(cw * ch * 4);
+                if (out) {
+                    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                    CGContextRef ctx = CGBitmapContextCreate(out, cw, ch, 8, cw * 4, cs,
+                                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                    CGColorSpaceRelease(cs);
+                    if (ctx) {
+                        CGContextDrawImage(ctx, CGRectMake(0, 0, cw, ch), cg);
+                        CGContextRelease(ctx);
+                        CGImageRelease(cg);
+                        if (dstSurface) { CFRelease(dstSurface); }
+                        if (accel) { CFRelease(accel); }
+                        *pixelsOut = out;
+                        *widthOut = (int)cw;
+                        *heightOut = (int)ch;
+                        return YES;
+                    }
+                    free(out);
+                }
+            }
+            CGImageRelease(cg);
+        }
+        NSLog(@"[TSScreenCapture] _UICreateCGImageFromIOSurface 不可用/失败, 回退手动读取");
+    }
+
+    // ---- 回退: 加锁读取(对齐 AutoTouch: IOSurfaceLock 第三参数 options 用 0 而非只读 1) ----
+    kern_return_t lk = lockFn(readSurface, 0 /*对齐原版 mov w1,#0*/, NULL);
     if (lk != KERN_SUCCESS) {
         NSLog(@"[TSScreenCapture] IOSurfaceLock 失败 kr=%d", (int)lk);
         if (dstSurface) { CFRelease(dstSurface); }
@@ -418,47 +468,28 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     SEL sel = NSSelectorFromString(@"createScreenIOSurface");
     if (!sel) { return NULL; }
 
-    // 隐藏窗口实验: 创建前临时隐藏本 App 所有窗口(模拟 HUDServices 无窗口进程,
-    // 避免 createScreenIOSurface 绑定本 App 画面), 创建后统一恢复。
-    NSArray<UIWindow *> *allWins = nil;
-    NSMutableArray<NSNumber *> *wasHidden = nil;
-    if (_hideWindowsWhenCapturing) {
-        @try {
-            allWins = [[UIApplication sharedApplication] windows];
-            wasHidden = [NSMutableArray arrayWithCapacity:allWins.count];
-            for (UIWindow *w in allWins) {
-                [wasHidden addObject:@(w.hidden)];
-                w.hidden = YES;
-            }
-        } @catch (NSException *e) {
-            allWins = nil;
-            wasHidden = nil;
-        }
-    }
-
     IOSurfaceRef result = NULL;
     @try {
-        // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
-        // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
-        // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
+        // 逆向结论(AutoTouch 原版 HUDServices 反汇编):
+        // receiver 是 [UIScreen mainScreen] 或类对象, 调用形态为 objc_msgSend(recv, @selector(createScreenIOSurface))。
+        // 注意: 原版**不隐藏本 App 窗口**, createScreenIOSurface 返回的 surface 由 WindowServer 维护,
+        // 内容始终是系统当前帧(与 App 前后台无关), 隐藏窗口反而会破坏创建。
         // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
         NSMutableArray *candidates = [NSMutableArray array];
         [candidates addObject:[UIWindow class]];                  // +[UIWindow createScreenIOSurface](逆向+社区首选)
+        [candidates addObject:[UIScreen mainScreen]];             // -[UIScreen createScreenIOSurface](原版 receiver)
         [candidates addObject:[UIScreen class]];                  // +[UIScreen createScreenIOSurface](个别版本)
-        [candidates addObject:[UIScreen mainScreen]];             // -[UIScreen createScreenIOSurface](旧版代码路径)
-        if (!_hideWindowsWhenCapturing) {
-            @try {
-                UIApplication *app = [UIApplication sharedApplication];
-                if (app) {
-                    UIWindow *kw = [app valueForKey:@"keyWindow"];
-                    if (kw) { [candidates addObject:kw]; }        // -[keyWindow createScreenIOSurface]
-                    NSArray *wins = [app valueForKey:@"windows"];
-                    for (UIWindow *w in wins) {
-                        if (w && w != kw) { [candidates addObject:w]; }
-                    }
+        @try {
+            UIApplication *app = [UIApplication sharedApplication];
+            if (app) {
+                UIWindow *kw = [app valueForKey:@"keyWindow"];
+                if (kw) { [candidates addObject:kw]; }            // -[keyWindow createScreenIOSurface]
+                NSArray *wins = [app valueForKey:@"windows"];
+                for (UIWindow *w in wins) {
+                    if (w && w != kw) { [candidates addObject:w]; }
                 }
-            } @catch (NSException *e) { }
-        }
+            }
+        } @catch (NSException *e) { }
 
         for (id target in candidates) {
             if (!target) { continue; }
@@ -479,15 +510,6 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
             } @catch (NSException *e) { }
         }
     } @catch (NSException *e) { }
-
-    // 恢复窗口(无论是否成功, 必须恢复)
-    if (allWins && wasHidden) {
-        @try {
-            for (NSUInteger i = 0; i < allWins.count; i++) {
-                allWins[i].hidden = [wasHidden[i] boolValue];
-            }
-        } @catch (NSException *e) { }
-    }
     return result;
 }
 
@@ -544,59 +566,38 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
         return NO;
     }
 
-    // 1) 优先用缓存 surface: 后台线程直接读像素(纯 C API, 不碰主线程)。
-    //    surface 绑定主屏渲染管线, 内容持续更新, 反复读同一 surface 即可拿到新帧。
-    IOSurfaceRef cached = [self _getCachedScreenSurface];
-    if (cached) {
-        // 异步刷新缓存(节流), 保持 surface 换新帧; 不阻塞、不占主线程。
-        [self _requestScreenSurfaceRefresh];
-        uint8_t *px = NULL; int w = 0, h = 0;
-        BOOL ok = [self _dumpIOSurface:cached pixelsOut:&px width:&w height:&h] && px
-                  && ![self _isAllZeroPixels:px width:w height:h];
-        CFRelease(cached);
-        if (ok) {
-            self.lastError = nil;
-            *pixelsOut = px; *widthOut = w; *heightOut = h;
-            return YES;
-        }
-        if (px) { free(px); }
-        // 缓存读失败(全 0 等) → 丢弃缓存, 走重新创建
-        [self _setCachedScreenSurface:NULL];
-    }
-
-    // 2) 无缓存/缓存失效: 创建新 surface(createScreenIOSurface 必须主线程), 成功后缓存复用。
+    // 对齐 AutoTouch 原版: 每次截屏都新建 surface(createScreenIOSurface 必须主线程),
+    // 创建后立即读取并释放, 不缓存复用 —— 缓存 surface 的内容可能停留在创建时刻,
+    // 切到其他 App 后读到的仍是旧帧(非实时), 且新帧只在每次新建时更新。
+    IOSurfaceRef surf = NULL;
     if ([NSThread isMainThread]) {
-        IOSurfaceRef s = [self _createUIScreenSurface];
-        [self _setCachedScreenSurface:s];
+        surf = [self _createUIScreenSurface];
     } else {
-        // 首次创建才同步等待主线程(主线程空闲时毫秒级完成), 之后全部走缓存路径。
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        __block IOSurfaceRef created = NULL;
         dispatch_async(dispatch_get_main_queue(), ^{
-            IOSurfaceRef s = [self _createUIScreenSurface];
-            [self _setCachedScreenSurface:s];
+            created = [self _createUIScreenSurface];
             dispatch_semaphore_signal(sema);
         });
         dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC));
+        surf = created;
     }
-    IOSurfaceRef surf = [self _getCachedScreenSurface];
     if (!surf) {
         TSSetLastError(@"路径0 UIScreenSurface: 全部候选均未返回 IOSurface(需 iOS12+ 且 TrollStore 全权限环境)");
         return NO;
     }
 
-    // 3) 读像素(后台线程)
+    // 读取像素(后台线程, 走 _UICreateCGImageFromIOSurface / 加速器转储 / 手动 lock 三级读取)
     uint8_t *px = NULL; int w = 0, h = 0;
     BOOL ok = [self _dumpIOSurface:surf pixelsOut:&px width:&w height:&h] && px;
     CFRelease(surf);
     if (!ok) {
         TSSetLastError(@"路径0 UIScreenSurface: surface 读取失败");
-        [self _setCachedScreenSurface:NULL];
         return NO;
     }
     if ([self _isAllZeroPixels:px width:w height:h]) {
         TSSetLastError(@"路径0 UIScreenSurface: 截到空内容(全 0)");
         free(px);
-        [self _setCachedScreenSurface:NULL];
         return NO;
     }
     self.lastError = nil;
@@ -1183,12 +1184,9 @@ static const char *_gsSurfaceKeys[] = {
                            width:(int *)widthOut
                           height:(int *)heightOut {
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 与 App 前后台无关)
-    //    后台场景: 启用"隐藏本 App 窗口"模式 + 丢弃旧缓存(旧缓存是前台时绑定的本 App 画面),
-    //    让 createScreenIOSurface 在无本 App 窗口的状态下返回系统主屏 surface(对齐 HUDServices 独立进程)。
-    @synchronized (self) { _hideWindowsWhenCapturing = YES; }
-    [self _setCachedScreenSurface:NULL];
+    //    对齐 AutoTouch: 不隐藏本 App 窗口(原版无此步骤), 每次截屏都重新创建 surface,
+    //    读取走 _UICreateCGImageFromIOSurface 路径, 拿到的是系统当前帧(实时画面)。
     BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
-    @synchronized (self) { _hideWindowsWhenCapturing = NO; }
     if (ok0) {
         return YES;
     }
