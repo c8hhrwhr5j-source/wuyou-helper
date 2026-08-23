@@ -1,0 +1,367 @@
+//
+//  TSLicense.m
+//  TrollAutoTouch
+//
+//  土豆 API 卡密验证实现 (verifyCardV2)。
+//
+
+#import "TSLicense.h"
+#import "TSLicenseConfig.h"
+#import <UIKit/UIKit.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <CommonCrypto/CommonCryptor.h>
+#import <Security/Security.h>
+
+static NSString *const kKeychainService = @"com.trollautotouch.license";
+static NSString *const kKeychainAccountActivation = @"activation";   // 激活凭证 JSON
+static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备机器码
+
+@interface TSLicense ()
+@property (nonatomic, assign) BOOL activated;
+@end
+
+@implementation TSLicense
+
++ (instancetype)shared {
+    static TSLicense *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[TSLicense alloc] init];
+    });
+    return instance;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _activated = ([self _loadActivationRecord] != nil);
+    }
+    return self;
+}
+
+// MARK: - 对外接口
+
+- (BOOL)isActivated {
+    return _activated;
+}
+
+- (void)activateWithCard:(NSString *)card
+              completion:(void (^)(BOOL ok, NSString *_Nullable msg))completion {
+    [self _requestVerifyCard:card
+                  completion:^(BOOL ok, BOOL networkError, NSString *msg) {
+        if (ok) {
+            NSDictionary *rec = @{
+                @"card": card ?: @"",
+                @"deviceId": [TSLicense deviceId],
+                @"activatedAt": @([[NSDate date] timeIntervalSince1970]),
+            };
+            [self _saveActivationRecord:rec];
+            self->_activated = YES;
+        }
+        if (completion) completion(ok, msg);
+    }];
+}
+
+- (void)startupCheckWithCompletion:(void (^)(BOOL ok, NSString *_Nullable msg))completion {
+    NSDictionary *rec = [self _loadActivationRecord];
+    if (!rec || ![rec[@"card"] length]) {
+        _activated = NO;
+        if (completion) completion(NO, @"未激活");
+        return;
+    }
+    [self _requestVerifyCard:rec[@"card"]
+                  completion:^(BOOL ok, BOOL networkError, NSString *msg) {
+        if (ok) {
+            if (completion) completion(YES, @"验证通过");
+            return;
+        }
+        // 网络失败 → 离线宽限期放行
+        if (networkError) {
+            double at = [rec[@"activatedAt"] doubleValue];
+            double now = [[NSDate date] timeIntervalSince1970];
+            if (at > 0 && (now - at) <= kTSLicenseGracePeriodDays * 86400.0) {
+                if (completion) completion(YES, @"离线宽限期内");
+                return;
+            }
+        }
+        // 卡密失效 / 被封 / 机器码不匹配 / 超宽限期 → 锁定
+        [self deactivate];
+        if (completion) completion(NO, msg ?: @"激活校验失败");
+    }];
+}
+
+- (void)deactivate {
+    [self _deleteActivationRecord];
+    _activated = NO;
+}
+
+// MARK: - 土豆 API 请求
+
+- (void)_requestVerifyCard:(NSString *)card
+                completion:(void (^)(BOOL ok, BOOL networkError, NSString *_Nullable msg))completion {
+    if (card.length == 0) {
+        if (completion) completion(NO, NO, @"卡密为空");
+        return;
+    }
+
+    NSData *encKey = [kTSLicenseEncryptSecret dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *mac = [TSLicense deviceId];
+
+    // 半加密: 只加密 value, key 保持明文
+    NSDictionary *raw = @{@"cardStr": card, @"mac": mac};
+    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithCapacity:raw.count];
+    for (NSString *k in raw) {
+        NSData *plain = [raw[k] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *cipher = [TSLicense aesEncryptECBNoPadding:plain key:encKey];
+        body[k] = cipher ? [cipher base64EncodedStringWithOptions:0] : @"";
+    }
+
+    // V3 签名参数 (基于加密后的值)
+    NSString *time = [NSString stringWithFormat:@"%lld",
+                      (long long)([[NSDate date] timeIntervalSince1970] * 1000.0)];
+    NSString *nonce = [TSLicense randomAlnum:32];
+    NSString *sign = [TSLicense signV3WithParams:body time:time nonce:nonce
+                                          secret:kTSLicenseSignSecret];
+
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"%@/api/verifyCardV2",
+                                       kTSLicenseHost]];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    req.timeoutInterval = 15;
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:kTSLicenseAskKey forHTTPHeaderField:@"askKey"];
+    [req setValue:time forHTTPHeaderField:@"time"];
+    [req setValue:nonce forHTTPHeaderField:@"nonce"];
+    [req setValue:sign forHTTPHeaderField:@"sign"];
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task =
+        [session dataTaskWithRequest:req
+                   completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
+        if (error) {
+            NSString *msg = [NSString stringWithFormat:@"网络错误(%ld): %@",
+                             (long)error.code, error.localizedDescription];
+            if (completion) completion(NO, YES, msg);
+            return;
+        }
+        // 响应内容为全加密 Base64
+        NSString *bodyStr = [[NSString alloc] initWithData:data
+                                                  encoding:NSUTF8StringEncoding];
+        bodyStr = [bodyStr stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSData *cipher = [[NSData alloc] initWithBase64EncodedString:bodyStr options:0];
+        NSData *plain = [TSLicense aesDecryptECBNoPadding:cipher key:encKey];
+        NSString *jsonStr = plain ?
+            [[NSString alloc] initWithData:plain encoding:NSUTF8StringEncoding] : nil;
+        jsonStr = [jsonStr stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+        NSDictionary *obj = nil;
+        if (jsonStr.length) {
+            NSData *jd = [jsonStr dataUsingEncoding:NSUTF8StringEncoding];
+            obj = [NSJSONSerialization JSONObjectWithData:jd options:0 error:NULL];
+        }
+        NSString *code = [obj[@"code"] description];
+        NSDictionary *dataObj = [obj isKindOfClass:NSDictionary.class] ? obj[@"data"] : nil;
+        BOOL verifyOk = [code isEqualToString:@"200"] && [dataObj[@"verify"] boolValue];
+
+        if (verifyOk) {
+            if (completion) completion(YES, NO, @"验证通过");
+            return;
+        }
+        NSString *msg = nil;
+        if ([obj[@"message"] isKindOfClass:NSString.class] && [obj[@"message"] length]) {
+            msg = obj[@"message"];
+        } else if (code.length) {
+            msg = [NSString stringWithFormat:@"验证失败(code=%@)", code];
+        } else {
+            msg = @"响应解析失败, 请检查加密/验签配置";
+        }
+        if (completion) completion(NO, NO, msg);
+    }];
+    [task resume];
+}
+
+// MARK: - V3 签名 & AES
+
+/// 土豆验签 V3: 过滤空值 → 键升序 → &k=v 拼接 → 追加 &验签秘钥&time&nonce → MD5(hex 小写)
++ (NSString *)signV3WithParams:(NSDictionary *)params
+                          time:(NSString *)time
+                         nonce:(NSString *)nonce
+                        secret:(NSString *)secret {
+    NSMutableArray *keys = [NSMutableArray array];
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    [params enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+        NSString *v = [self _stringifyParam:obj];
+        if (v.length == 0) return; // 空值过滤
+        [keys addObject:key];
+        values[key] = v;
+    }];
+    [keys sortUsingSelector:@selector(compare:)];
+
+    NSMutableString *str = [NSMutableString string];
+    for (NSString *k in keys) {
+        [str appendFormat:@"&%@=%@", k, values[k]];
+    }
+    [str appendFormat:@"&%@", secret];
+    [str appendFormat:@"&%@", time];
+    [str appendFormat:@"&%@", nonce];
+    return [self md5Hex:str];
+}
+
++ (NSString *)_stringifyParam:(id)obj {
+    if ([obj isKindOfClass:NSString.class]) return obj;
+    if ([obj isKindOfClass:NSNumber.class]) return [obj stringValue];
+    if ([obj isKindOfClass:NSArray.class] || [obj isKindOfClass:NSDictionary.class]) {
+        NSData *d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:NULL];
+        if (d) return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    }
+    return [obj description];
+}
+
+/// AES-128 ECB NoPadding 加密。明文补齐: padLen = 16 - len%16 (len 恰为 16 倍数时补一整块 16 个 \0)
++ (NSData *)aesEncryptECBNoPadding:(NSData *)plain key:(NSData *)key {
+    if (!plain.length || key.length != kCCKeySizeAES128) return nil;
+    NSUInteger len = plain.length;
+    NSUInteger padLen = 16 - (len % 16);
+    NSMutableData *padded = [plain mutableCopy];
+    uint8_t zeros[16] = {0};
+    [padded appendBytes:zeros length:padLen];
+
+    NSMutableData *out = [NSMutableData dataWithLength:padded.length + 16];
+    size_t outLen = 0;
+    CCCryptorStatus st = CCCrypt(kCCEncrypt,
+                                 kCCAlgorithmAES,
+                                 kCCOptionECBMode,
+                                 key.bytes, kCCKeySizeAES128,
+                                 NULL,
+                                 padded.bytes, padded.length,
+                                 out.mutableBytes, out.length,
+                                 &outLen);
+    if (st != kCCSuccess) return nil;
+    out.length = outLen;
+    return out;
+}
+
+/// AES-128 ECB NoPadding 解密后去除尾部 \0
++ (NSData *)aesDecryptECBNoPadding:(NSData *)cipher key:(NSData *)key {
+    if (!cipher.length || key.length != kCCKeySizeAES128) return nil;
+    NSMutableData *out = [NSMutableData dataWithLength:cipher.length + 16];
+    size_t outLen = 0;
+    CCCryptorStatus st = CCCrypt(kCCDecrypt,
+                                 kCCAlgorithmAES,
+                                 kCCOptionECBMode,
+                                 key.bytes, kCCKeySizeAES128,
+                                 NULL,
+                                 cipher.bytes, cipher.length,
+                                 out.mutableBytes, out.length,
+                                 &outLen);
+    if (st != kCCSuccess) return nil;
+    const uint8_t *b = out.bytes;
+    NSUInteger i = outLen;
+    while (i > 0 && b[i - 1] == 0) i--;
+    return [out subdataWithRange:NSMakeRange(0, i)];
+}
+
++ (NSString *)md5Hex:(NSString *)str {
+    const char *cStr = [str UTF8String];
+    unsigned char digest[CC_MD5_DIGEST_LENGTH];
+    CC_MD5(cStr, (CC_LONG)strlen(cStr), digest);
+    NSMutableString *s = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
+        [s appendFormat:@"%02x", digest[i]];
+    }
+    return s;
+}
+
++ (NSString *)randomAlnum:(NSUInteger)len {
+    static const char alnum[] =
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    NSMutableString *s = [NSMutableString stringWithCapacity:len];
+    for (NSUInteger i = 0; i < len; i++) {
+        [s appendFormat:@"%c", alnum[arc4random_uniform((uint32_t)(sizeof(alnum) - 1))]];
+    }
+    return s;
+}
+
+// MARK: - 设备机器码
+
++ (NSString *)deviceId {
+    NSData *d = KeychainData(kKeychainService, kKeychainAccountDevice);
+    if (d.length) {
+        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (s.length) return s;
+    }
+    NSString *vid = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
+    NSString *did = vid ? [NSString stringWithFormat:@"TAT-%@", vid]
+                        : [NSString stringWithFormat:@"TAT-%@", [NSUUID UUID].UUIDString];
+    KeychainSave(kKeychainService, kKeychainAccountDevice,
+                 [did dataUsingEncoding:NSUTF8StringEncoding]);
+    return did;
+}
+
+// MARK: - keychain
+
+static NSData *KeychainData(NSString *service, NSString *account) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: service,
+        (__bridge id)kSecAttrAccount: account,
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (st == errSecSuccess && result) {
+        return (__bridge_transfer NSData *)result;
+    }
+    return nil;
+}
+
+static BOOL KeychainSave(NSString *service, NSString *account, NSData *data) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: service,
+        (__bridge id)kSecAttrAccount: account,
+    };
+    SecItemDelete((__bridge CFDictionaryRef)query);
+    NSDictionary *attrs = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: service,
+        (__bridge id)kSecAttrAccount: account,
+        (__bridge id)kSecValueData: data,
+    };
+    OSStatus st = SecItemAdd((__bridge CFDictionaryRef)attrs, NULL);
+    return st == errSecSuccess;
+}
+
+static BOOL KeychainDelete(NSString *service, NSString *account) {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: service,
+        (__bridge id)kSecAttrAccount: account,
+    };
+    OSStatus st = SecItemDelete((__bridge CFDictionaryRef)query);
+    return st == errSecSuccess || st == errSecItemNotFound;
+}
+
+// MARK: - 激活凭证存取
+
+- (NSDictionary *)_loadActivationRecord {
+    NSData *data = KeychainData(kKeychainService, kKeychainAccountActivation);
+    if (!data.length) return nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    return [obj isKindOfClass:NSDictionary.class] ? obj : nil;
+}
+
+- (void)_saveActivationRecord:(NSDictionary *)rec {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:rec options:0 error:NULL];
+    if (data) KeychainSave(kKeychainService, kKeychainAccountActivation, data);
+}
+
+- (void)_deleteActivationRecord {
+    KeychainDelete(kKeychainService, kKeychainAccountActivation);
+}
+
+@end

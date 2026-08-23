@@ -11,6 +11,8 @@
 #import "HUD/TSHUDWindow.h"
 #import "HUD/TSHUDHost.h"
 #import "Core/TSDaemonManager.h"
+#import "Core/TSLicense.h"
+#import "Core/TSActivationViewController.h"
 #import "Script/TSLuaBridge.h"
 #import "Script/TSHTTPServer.h"
 #import "Common/TSPaths.h"
@@ -35,22 +37,32 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     [self _syncBuiltinScripts];
 
     // ── 创建主窗口（旧式 UIWindow，不依赖 UIScene）──
+    // 卡密门禁: 未激活 → 显示激活页面, 不启动任何核心服务;
+    //           已激活 → 正常进入主界面, 并在后台做启动联网校验。
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [TSColors bg];
-    self.window.rootViewController = [[MainTabBarController alloc] init];
-    [self.window makeKeyAndVisible];
 
-    // ── 启动核心服务（悬浮窗默认关闭，用户手动开启）──
-    // TAS 服务开关(默认开)决定服务是否启动:
-    //   开 → startAll + 常驻音量键监听 + 远程访问 HTTP 服务(默认常开);
-    //   关 → 不启动, 用户可在设置页手动开启。
-    // 远程访问端口跟随 TAS 服务联动: TAS 开启即监听 8080, 关闭即停止。
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    BOOL tasOn = [ud objectForKey:kTASServiceEnabledKey] ? [ud boolForKey:kTASServiceEnabledKey] : YES;
-    if (tasOn) {
-        [[TSDaemonManager shared] startAll];
-        [[TSLuaBridge shared] startGlobalVolumeMonitoring];
-        [[TSHTTPServer shared] start];
+    __weak typeof(self) weakSelf = self;
+    if ([[TSLicense shared] isActivated]) {
+        self.window.rootViewController = [[MainTabBarController alloc] init];
+        [self.window makeKeyAndVisible];
+        [self _startCoreServices];
+        // 每次启动联网校验: 失败(含离线超宽限期/卡密失效/被封锁) → 锁定回激活页
+        [[TSLicense shared] startupCheckWithCompletion:^(BOOL ok, NSString *msg) {
+            if (!ok) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf _lockToActivationWithMessage:msg];
+                });
+            }
+        }];
+    } else {
+        TSActivationViewController *vc = [[TSActivationViewController alloc] init];
+        vc.onActivated = ^{
+            [weakSelf _startCoreServices];
+            weakSelf.window.rootViewController = [[MainTabBarController alloc] init];
+        };
+        self.window.rootViewController = vc;
+        [self.window makeKeyAndVisible];
     }
 
     // ── 预热进程内 HUD 宿主（单 App 架构）──
@@ -100,6 +112,38 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     } else {
         NSLog(@"[TrollAutoTouch] 同步内置脚本失败: %@", err);
     }
+}
+
+// ── 启动核心服务（悬浮窗默认关闭，用户手动开启）──
+// TAS 服务开关(默认开)决定服务是否启动:
+//   开 → startAll + 常驻音量键监听 + 远程访问 HTTP 服务(默认常开);
+//   关 → 不启动, 用户可在设置页手动开启。
+// 远程访问端口跟随 TAS 服务联动: TAS 开启即监听 8080, 关闭即停止。
+- (void)_startCoreServices {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL tasOn = [ud objectForKey:kTASServiceEnabledKey] ? [ud boolForKey:kTASServiceEnabledKey] : YES;
+    if (tasOn) {
+        [[TSDaemonManager shared] startAll];
+        [[TSLuaBridge shared] startGlobalVolumeMonitoring];
+        [[TSHTTPServer shared] start];
+    }
+}
+
+// ── 校验失败锁定: 停止所有服务, 切回激活页面 ──
+- (void)_lockToActivationWithMessage:(NSString *)msg {
+    [[TSDaemonManager shared] stopAll];
+    [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
+    [[TSHTTPServer shared] stop];
+    [[TSLicense shared] deactivate];
+
+    __weak typeof(self) weakSelf = self;
+    TSActivationViewController *vc = [[TSActivationViewController alloc] init];
+    vc.initialMessage = msg;
+    vc.onActivated = ^{
+        [weakSelf _startCoreServices];
+        weakSelf.window.rootViewController = [[MainTabBarController alloc] init];
+    };
+    self.window.rootViewController = vc;
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
