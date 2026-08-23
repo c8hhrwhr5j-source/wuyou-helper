@@ -347,6 +347,8 @@ static NSData *WSTextFrame(NSString *text) {
         [self serveMJPEG:clientFd];
     } else if ([path isEqualToString:@"/api/device"]) {
         [self serveDeviceInfo:clientFd];
+    } else if ([path isEqualToString:@"/api/screencap-diag"]) {
+        [self serveScreenCapDiag:clientFd];
     } else if ([path isEqualToString:@"/api/tap"] && [method isEqualToString:@"POST"]) {
         [self handleTap:clientFd body:body];
     } else if ([path isEqualToString:@"/api/swipe"] && [method isEqualToString:@"POST"]) {
@@ -624,6 +626,15 @@ static NSData *WSTextFrame(NSString *text) {
             NSData *resp = HTTPResponse(200, @"OK", @"image/png", png ?: [NSData data], nil);
             send(clientFd, resp.bytes, resp.length, 0);
             close(clientFd);
+        });
+    });
+}
+
+- (void)serveScreenCapDiag:(int)clientFd {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSDictionary *diag = [[TSScreenCapture shared] diagnostics];
+        dispatch_async(self->_serverQueue, ^{
+            [self sendAndClose:clientFd data:[self jsonResponse:diag]];
         });
     });
 }

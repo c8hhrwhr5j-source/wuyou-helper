@@ -47,6 +47,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 截屏并返回 UIImage(便于调试/预览)。
 - (nullable UIImage *)captureImage;
 
+/// 截图链路诊断信息(供 HTTP /api/screencap-diag 使用, 便于排查各路径失败原因)
+- (NSDictionary *)diagnostics;
+
 /// keepScreen: 缓存上一次截屏像素(避免每次截屏，用于多色查找等场景)
 - (void)keepPixels;
 /// unkeepScreen: 释放缓存

@@ -1139,13 +1139,16 @@ static const char *_gsSurfaceKeys[] = {
 
 #pragma mark - 公共 API
 
-/// 后台截屏专用路径: 优先 CARenderServerRenderDisplay(后台验证过的方案),
-/// 再回退全局显示 / UIScreen surface 缓存。
-/// 后台时不走 createScreenIOSurface 的主线程 800ms 同步等待(该路径后台基本失效,
-/// 白白拖慢 HTTP 响应), 直接读缓存 surface。
+/// 后台截屏专用路径: 按原版 HUDServices 逆向链路优先 createScreenIOSurface,
+/// 再回退 CARenderServer / 全局显示 / UIScreen surface 缓存。
 - (BOOL)_captureBackgroundToRGBA:(uint8_t **)pixelsOut
                            width:(int *)widthOut
                           height:(int *)heightOut {
+    // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 与 App 前后台无关)
+    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
+    NSString *err0 = [self.lastError copy];
     // 1. CARenderServerRenderDisplay: TrollShot/TrollVNC 在后台/锁屏验证过的跨 App 截屏方案,
     //    走 WindowServer 渲染管线, 与 App 自身前后台无关。
     if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
@@ -1172,9 +1175,54 @@ static const char *_gsSurfaceKeys[] = {
         if (px) { free(px); }
         [self _setCachedScreenSurface:NULL];
     }
-    self.lastError = [NSString stringWithFormat:@"后台截屏: CARenderServer: %@; 全局显示: %@; UIScreen 缓存: 空/全0",
-                      errRS ?: @"未尝试", errGD ?: @"未尝试"];
+    self.lastError = [NSString stringWithFormat:@"后台截屏: createScreenIOSurface: %@; CARenderServer: %@; 全局显示: %@; UIScreen 缓存: 空/全0",
+                      err0 ?: @"未尝试", errRS ?: @"未尝试", errGD ?: @"未尝试"];
     return NO;
+}
+
+#pragma mark - 截图链路诊断
+
+- (NSDictionary *)diagnostics {
+    NSMutableDictionary *diag = [NSMutableDictionary dictionary];
+    @try {
+        UIApplicationState st = [UIApplication sharedApplication].applicationState;
+        diag[@"appState"] = (st == UIApplicationStateActive) ? @"Active(前台)"
+                           : (st == UIApplicationStateInactive) ? @"Inactive" : @"Background(后台)";
+        diag[@"iosurfaceLoaded"] = @(_iosurfaceHandle != NULL);
+        diag[@"screenPixelSize"] = NSStringFromCGSize([self _screenPixelSize]);
+
+        // createScreenIOSurface 候选 target 可用性
+        SEL sel = NSSelectorFromString(@"createScreenIOSurface");
+        NSMutableArray *cands = [NSMutableArray array];
+        NSArray *targets = @[ [UIScreen mainScreen], [UIWindow class], [UIScreen class] ];
+        for (id t in targets) {
+            NSString *name = [t isKindOfClass:[UIScreen class]] ? @"[UIScreen mainScreen]" : NSStringFromClass(t);
+            [cands addObject:@{@"target": name, @"respondsToSelector": @([t respondsToSelector:sel])}];
+        }
+        diag[@"createScreenIOSurfaceCandidates"] = cands;
+
+        // 实际尝试创建一次 surface
+        IOSurfaceRef s = [self _createUIScreenSurface];
+        if (s) {
+            IOSurfaceGetWidthFunc getW = (IOSurfaceGetWidthFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
+            IOSurfaceGetHeightFunc getH = (IOSurfaceGetHeightFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
+            diag[@"createScreenIOSurfaceResult"] = @{
+                @"ok": @YES,
+                @"width": @(getW ? (int)getW(s) : -1),
+                @"height": @(getH ? (int)getH(s) : -1)
+            };
+            CFRelease(s);
+        } else {
+            diag[@"createScreenIOSurfaceResult"] = @{@"ok": @NO};
+        }
+
+        diag[@"CARenderServerRenderDisplaySymbol"] = @(dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay") != NULL);
+        diag[@"IOMobileFramebufferSymbol"] = @(dlsym(RTLD_DEFAULT, "IOMobileFramebufferGetMainDisplay") != NULL);
+        diag[@"lastError"] = self.lastError ?: @"(无)";
+    } @catch (NSException *e) {
+        diag[@"exception"] = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
+    }
+    return diag;
 }
 
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
