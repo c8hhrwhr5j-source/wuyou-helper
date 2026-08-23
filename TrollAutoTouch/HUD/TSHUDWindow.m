@@ -55,6 +55,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 脚本运行状态 (通过 setScriptRunning: 更新, 用 ivar 避免与自定义访问器冲突)
 @implementation TSHUDWindow {
     BOOL _scriptRunning;
+    // 悬浮球贴边方向: YES=贴右(快捷按钮向左展开), NO=贴左(快捷按钮向右展开)。
+    // 拖动松手后按窗口中心到左右边缘的距离自动贴边, 展开方向随之自适应。
+    BOOL _dockRight;
     // 跨应用显示 (SBS accessibility window hosting, 逆向自 AutoGoRunner/agoverlayd):
     // app 退到后台时把悬浮球窗口的 CAContext 托管到 SpringBoard 的 accessibility
     // 窗口层, 使悬浮球在其它 app / 主屏幕之上保持可见。触摸穿透 (不拦截下层 app)。
@@ -83,6 +86,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         _expanded = NO;
         _scriptRunning = NO;
         _paused = NO;
+        _dockRight = YES;
 
         _rootVC = [[UIViewController alloc] init];
         _rootVC.view.backgroundColor = [UIColor clearColor];
@@ -118,7 +122,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 
 - (void)_buildButtons {
     _mainBtn = [self _makeRoundButton:nil action:@selector(_tapMain:)];
-    _mainBtn.frame = CGRectMake(kBallX, 0, kBallSize, kBallSize);
+    _mainBtn.frame = CGRectMake([self _ballX], 0, kBallSize, kBallSize);
     [self _applyIcon:[self _hudIcon:@"bolt.fill"] to:_mainBtn];
     // 悬浮球带拖拽
     _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(_panMain:)];
@@ -130,9 +134,10 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     // 明显的 X 关闭图标 (之前从未设置图标, 显示为一团深色圆)
     [self _applyIcon:[self _hudIcon:@"xmark"] to:_closeBtn];
 
-    _pauseBtn.frame  = CGRectMake(kBallX - (kBtnSize + kGap) * 1, 0, kBtnSize, kBtnSize);
-    _toggleBtn.frame = CGRectMake(kBallX - (kBtnSize + kGap) * 2, 0, kBtnSize, kBtnSize);
-    _closeBtn.frame  = CGRectMake(kBallX - (kBtnSize + kGap) * 3, 0, kBtnSize, kBtnSize);
+    // 扩展按钮初始目标位置: 贴右时向左排, 贴左时向右排
+    _pauseBtn.frame  = CGRectMake([self _extXForIndex:2], 0, kBtnSize, kBtnSize);
+    _toggleBtn.frame = CGRectMake([self _extXForIndex:1], 0, kBtnSize, kBtnSize);
+    _closeBtn.frame  = CGRectMake([self _extXForIndex:0], 0, kBtnSize, kBtnSize);
 
     // 初始隐藏扩展按钮 (位于悬浮球左侧, 未展开):
     // 用 hidden 隐藏初始状态 (与已验证版本一致)。收起状态由 collapse 动画置
@@ -162,13 +167,38 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     return b;
 }
 
-// 初始悬浮球位置: 屏幕右侧中部
+// 初始悬浮球位置: 屏幕右侧中部 (默认贴右, 快捷按钮向左展开)
 - (void)_layoutBall {
+    _dockRight = YES;
     CGRect f = self.frame;
     f.size = CGSizeMake(kExpandedW, kBallSize);
     f.origin.x = [UIScreen mainScreen].bounds.size.width - kExpandedW - 12;
     f.origin.y = [UIScreen mainScreen].bounds.size.height * 0.5;
     self.frame = f;
+    [self _relayoutForDock];
+}
+
+// 悬浮球在窗口内的 X: 贴右在窗口右侧, 贴左在窗口左侧
+- (CGFloat)_ballX {
+    return _dockRight ? kBallX : 0;
+}
+
+// 第 idx 个扩展按钮 (0=close 最远, 1=toggle, 2=pause 最近) 在窗口内的目标 X。
+// 贴右: 悬浮球在右, 按钮向左依次排开; 贴左: 悬浮球在左, 按钮向右依次排开。
+- (CGFloat)_extXForIndex:(NSInteger)idx {
+    if (_dockRight) {
+        return [self _ballX] - (kBtnSize + kGap) * (kExtCount - idx);
+    }
+    return kBallSize + kGap + (kBtnSize + kGap) * (kExtCount - 1 - idx);
+}
+
+// 按当前贴边方向重排悬浮球与扩展按钮的目标位置 (贴边方向变化后调用,
+// 仅重设 frame, 可见性/alpha 仍由展开收起动画管理)
+- (void)_relayoutForDock {
+    _mainBtn.frame = CGRectMake([self _ballX], 0, kBallSize, kBallSize);
+    _pauseBtn.frame  = CGRectMake([self _extXForIndex:2], 0, kBtnSize, kBtnSize);
+    _toggleBtn.frame = CGRectMake([self _extXForIndex:1], 0, kBtnSize, kBtnSize);
+    _closeBtn.frame  = CGRectMake([self _extXForIndex:0], 0, kBtnSize, kBtnSize);
 }
 
 - (UIImage *)_hudIcon:(NSString *)name {
@@ -268,9 +298,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         UIButton *b = buttons[i];
         b.hidden = NO;
         b.userInteractionEnabled = YES;
-        CGPoint target = b.frame.origin;
+        // 目标位置用固定坐标 (按贴边方向计算), 不能取 b.frame.origin:
+        // 收起后按钮 frame 停在悬浮球位置, 取当前 frame 会导致再次展开时
+        // "从原位动画到原位" → 侧边列表再也出不来 (只能点开一次的 bug)。
+        CGPoint target = CGPointMake([self _extXForIndex:i], 0);
         if (animated) {
-            b.frame = CGRectMake(kBallX, 0, kBtnSize, kBtnSize); // 从悬浮球位置出发
+            b.frame = CGRectMake([self _ballX], 0, kBtnSize, kBtnSize); // 从悬浮球位置出发
             b.alpha = 0;
         }
         [UIView animateWithDuration:animated ? 0.22 : 0.0
@@ -296,7 +329,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
                             options:UIViewAnimationOptionCurveEaseIn
                                  | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
-                             b.frame = CGRectMake(kBallX, 0, kBtnSize, kBtnSize);
+                             b.frame = CGRectMake([self _ballX], 0, kBtnSize, kBtnSize);
                              b.alpha = 0;
                          }
                          completion:^(BOOL finished) {
@@ -337,17 +370,51 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 
 - (void)_panMain:(UIPanGestureRecognizer *)g {
     if (_expanded) return; // 展开时禁止拖拽
-    CGPoint t = [g translationInView:self];
+    if (g.state == UIGestureRecognizerStateBegan || g.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [g translationInView:self];
+        CGRect frame = self.frame;
+        frame.origin.x += t.x;
+        frame.origin.y += t.y;
+        // 限制在屏幕内
+        CGFloat maxX = [UIScreen mainScreen].bounds.size.width  - frame.size.width;
+        CGFloat maxY = [UIScreen mainScreen].bounds.size.height - frame.size.height;
+        frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        self.frame = frame;
+        [g setTranslation:CGPointZero inView:self];
+    } else if (g.state == UIGestureRecognizerStateEnded
+               || g.state == UIGestureRecognizerStateCancelled
+               || g.state == UIGestureRecognizerStateFailed) {
+        // 松手自动贴边: 离哪边近贴哪边, 展开方向随贴边方向自适应
+        [self _snapToEdgeAnimated:YES];
+    }
+}
+
+// 吸附到最近的屏幕边缘 (左右), 并同步悬浮球位置与展开方向
+- (void)_snapToEdgeAnimated:(BOOL)animated {
     CGRect frame = self.frame;
-    frame.origin.x += t.x;
-    frame.origin.y += t.y;
-    // 限制在屏幕内
-    CGFloat maxX = [UIScreen mainScreen].bounds.size.width  - frame.size.width;
-    CGFloat maxY = [UIScreen mainScreen].bounds.size.height - frame.size.height;
-    frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
-    frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
-    self.frame = frame;
-    [g setTranslation:CGPointZero inView:self];
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat midX = frame.origin.x + frame.size.width * 0.5;
+    BOOL right = (midX >= screenW * 0.5);
+    if (right != _dockRight) {
+        // 贴边方向改变: 重排悬浮球与快捷按钮 (悬浮球移到窗口对侧, 展开方向反转)
+        _dockRight = right;
+        [self _relayoutForDock];
+    }
+    const CGFloat margin = 12.0;
+    frame.origin.x = right ? (screenW - frame.size.width - margin) : margin;
+    if (animated) {
+        [UIView animateWithDuration:0.25
+                              delay:0
+             usingSpringWithDamping:0.85 initialSpringVelocity:0.5
+                            options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+                             self.frame = frame;
+                         }
+                         completion:nil];
+    } else {
+        self.frame = frame;
+    }
 }
 
 #pragma mark - 命中测试
