@@ -534,7 +534,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
             _dockRight = right;
             [self _relayoutForDock];
         }
-        const CGFloat margin = 4.0;
+        const CGFloat margin = 0.0;
         CGFloat targetWy = (right == ll) ? (maxWY - margin) : margin;
         frame.origin.y = targetWy;
         // 屏幕竖直: 限制在屏内
@@ -548,7 +548,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
             _dockRight = right;
             [self _relayoutForDock];
         }
-        const CGFloat margin = 4.0;
+        const CGFloat margin = 0.0;
         frame.origin.x = right ? (screen.width - frame.size.width - margin) : margin;
         // y 限制在屏内 (横屏切换后屏幕高度变小, 防止悬浮球出屏)
         CGFloat maxY = MAX(0, screen.height - frame.size.height);
