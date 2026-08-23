@@ -1204,8 +1204,8 @@ static const char *_gsSurfaceKeys[] = {
         // 实际尝试创建一次 surface
         IOSurfaceRef s = [self _createUIScreenSurface];
         if (s) {
-            IOSurfaceGetWidthFunc getW = (IOSurfaceGetWidthFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
-            IOSurfaceGetHeightFunc getH = (IOSurfaceGetHeightFunc)dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
+            size_t (*getW)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
+            size_t (*getH)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
             diag[@"createScreenIOSurfaceResult"] = @{
                 @"ok": @YES,
                 @"width": @(getW ? (int)getW(s) : -1),
