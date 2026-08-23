@@ -26,8 +26,8 @@ static void TSFlushCATransaction(void) {
 
 // 悬浮球尺寸 (窗口高度 / 布局基准)
 static const CGFloat kBallSize    = 44.0;
-// 悬浮球本体视觉尺寸 (缩小一点: 在 44 高的窗口内居中显示 38 的球)
-static const CGFloat kBallVisSize = 38.0;
+// 悬浮球本体视觉尺寸 (28×28: 在 44 高的窗口内居中显示)
+static const CGFloat kBallVisSize = 28.0;
 // 展开按钮尺寸
 static const CGFloat kBtnSize     = 44.0;
 // 按钮间距
@@ -258,7 +258,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     UILabel *t = [[UILabel alloc] initWithFrame:b.bounds];
     t.text = @"T";
     t.textColor = [UIColor whiteColor];
-    t.font = [UIFont boldSystemFontOfSize:22];
+    t.font = [UIFont boldSystemFontOfSize:17];
     t.textAlignment = NSTextAlignmentCenter;
     t.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     t.userInteractionEnabled = NO;
@@ -436,9 +436,11 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         CGRect frame = self.frame;
         frame.origin.x += t.x;
         frame.origin.y += t.y;
-        // 限制在屏幕内
-        CGFloat maxX = [UIScreen mainScreen].bounds.size.width  - frame.size.width;
-        CGFloat maxY = [UIScreen mainScreen].bounds.size.height - frame.size.height;
+        // 限制在屏幕内 (用 _effectiveScreenSize: 横屏且 app 未旋转时按横屏
+        // 尺寸限制, 否则 x 被竖屏宽度 clamp 到 ~175 到不了右边缘, y 会超出屏幕)
+        CGSize screen = [self _effectiveScreenSize];
+        CGFloat maxX = screen.width  - frame.size.width;
+        CGFloat maxY = screen.height - frame.size.height;
         frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
         frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
         self.frame = frame;
