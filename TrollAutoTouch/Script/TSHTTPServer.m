@@ -612,9 +612,15 @@ static NSData *WSTextFrame(NSString *text) {
 - (void)serveScreenshot:(int)clientFd {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIImage *img = [[TSScreenCapture shared] captureImage];
-        // 用 PNG 无损编码，保证颜色与原图完全一致（找色工具需要精确颜色）
-        NSData *png = UIImagePNGRepresentation(img);
         dispatch_async(self->_serverQueue, ^{
+            if (!img) {
+                NSString *reason = [TSScreenCapture shared].lastError ?: @"未知原因";
+                NSString *msg = [NSString stringWithFormat:@"%@。App 处于后台/其他 App 前台时，iOS 15.5+ TrollStore 环境无法跨应用截屏。", reason];
+                [self sendAndClose:clientFd data:[self errorResponse:500 msg:msg]];
+                return;
+            }
+            // 用 PNG 无损编码，保证颜色与原图完全一致（找色工具需要精确颜色）
+            NSData *png = UIImagePNGRepresentation(img);
             NSData *resp = HTTPResponse(200, @"OK", @"image/png", png ?: [NSData data], nil);
             send(clientFd, resp.bytes, resp.length, 0);
             close(clientFd);
