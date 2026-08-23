@@ -114,6 +114,9 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     IOSurfaceRef _cachedScreenSurface;   // 主线程创建, 跨线程读取(锁保护)
     NSTimeInterval _cachedSurfaceTime;   // 创建时刻(用于异步刷新节流)
     BOOL _surfaceRefreshPending;         // 异步刷新进行中标志
+    BOOL _hideWindowsWhenCapturing;      // 后台截屏实验: 创建 surface 前临时隐藏本 App 所有窗口
+                                         // (模拟原版 HUDServices 独立无窗口进程, 让 createScreenIOSurface
+                                         //   不再绑定本 App 画面)
 }
 @end
 
@@ -415,44 +418,77 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
     SEL sel = NSSelectorFromString(@"createScreenIOSurface");
     if (!sel) { return NULL; }
 
-    // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
-    // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
-    // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
-    // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
-    NSMutableArray *candidates = [NSMutableArray array];
-    [candidates addObject:[UIWindow class]];                      // +[UIWindow createScreenIOSurface](逆向+社区首选)
-    [candidates addObject:[UIScreen class]];                      // +[UIScreen createScreenIOSurface](个别版本)
-    [candidates addObject:[UIScreen mainScreen]];                 // -[UIScreen createScreenIOSurface](旧版代码路径)
-    @try {
-        UIApplication *app = [UIApplication sharedApplication];
-        if (app) {
-            UIWindow *kw = [app valueForKey:@"keyWindow"];
-            if (kw) { [candidates addObject:kw]; }                // -[keyWindow createScreenIOSurface]
-            NSArray *wins = [app valueForKey:@"windows"];
-            for (UIWindow *w in wins) {
-                if (w && w != kw) { [candidates addObject:w]; }
+    // 隐藏窗口实验: 创建前临时隐藏本 App 所有窗口(模拟 HUDServices 无窗口进程,
+    // 避免 createScreenIOSurface 绑定本 App 画面), 创建后统一恢复。
+    NSArray<UIWindow *> *allWins = nil;
+    NSMutableArray<NSNumber *> *wasHidden = nil;
+    if (_hideWindowsWhenCapturing) {
+        @try {
+            allWins = [[UIApplication sharedApplication] windows];
+            wasHidden = [NSMutableArray arrayWithCapacity:allWins.count];
+            for (UIWindow *w in allWins) {
+                [wasHidden addObject:@(w.hidden)];
+                w.hidden = YES;
             }
+        } @catch (NSException *e) {
+            allWins = nil;
+            wasHidden = nil;
+        }
+    }
+
+    IOSurfaceRef result = NULL;
+    @try {
+        // 逆向关键修正: 原版在 __objc_classrefs 存类对象 receiver,
+        // 调用形态为 [receiver performSelector:@selector(createScreenIOSurface)],
+        // 即**类方法** +createScreenIOSurface (CSDN 佐证: [UIWindow performSelector:...] 返回 IOSurface)。
+        // 按兼容性列出全部候选: 类方法优先, 实例方法兜底。
+        NSMutableArray *candidates = [NSMutableArray array];
+        [candidates addObject:[UIWindow class]];                  // +[UIWindow createScreenIOSurface](逆向+社区首选)
+        [candidates addObject:[UIScreen class]];                  // +[UIScreen createScreenIOSurface](个别版本)
+        [candidates addObject:[UIScreen mainScreen]];             // -[UIScreen createScreenIOSurface](旧版代码路径)
+        if (!_hideWindowsWhenCapturing) {
+            @try {
+                UIApplication *app = [UIApplication sharedApplication];
+                if (app) {
+                    UIWindow *kw = [app valueForKey:@"keyWindow"];
+                    if (kw) { [candidates addObject:kw]; }        // -[keyWindow createScreenIOSurface]
+                    NSArray *wins = [app valueForKey:@"windows"];
+                    for (UIWindow *w in wins) {
+                        if (w && w != kw) { [candidates addObject:w]; }
+                    }
+                }
+            } @catch (NSException *e) { }
+        }
+
+        for (id target in candidates) {
+            if (!target) { continue; }
+            @try {
+                if (![target respondsToSelector:sel]) { continue; }
+                NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+                if (!sig || sig.methodReturnLength < sizeof(void *)) { continue; }
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                inv.target = target;
+                inv.selector = sel;
+                [inv invoke];
+                __unsafe_unretained IOSurfaceRef ios = NULL;
+                [inv getReturnValue:&ios];
+                if (ios && CFGetTypeID(ios) == typeIdFn()) {
+                    result = ios;
+                    break;
+                }
+            } @catch (NSException *e) { }
         }
     } @catch (NSException *e) { }
 
-    for (id target in candidates) {
-        if (!target) { continue; }
+    // 恢复窗口(无论是否成功, 必须恢复)
+    if (allWins && wasHidden) {
         @try {
-            if (![target respondsToSelector:sel]) { continue; }
-            NSMethodSignature *sig = [target methodSignatureForSelector:sel];
-            if (!sig || sig.methodReturnLength < sizeof(void *)) { continue; }
-            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-            inv.target = target;
-            inv.selector = sel;
-            [inv invoke];
-            __unsafe_unretained IOSurfaceRef ios = NULL;
-            [inv getReturnValue:&ios];
-            if (ios && CFGetTypeID(ios) == typeIdFn()) {
-                return ios;
+            for (NSUInteger i = 0; i < allWins.count; i++) {
+                allWins[i].hidden = [wasHidden[i] boolValue];
             }
         } @catch (NSException *e) { }
     }
-    return NULL;
+    return result;
 }
 
 // ---- 缓存: 复用同一个绑定主屏渲染管线的 surface, 后台线程直接读像素, 不再每次阻塞主线程 ----
@@ -1147,7 +1183,13 @@ static const char *_gsSurfaceKeys[] = {
                            width:(int *)widthOut
                           height:(int *)heightOut {
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 与 App 前后台无关)
-    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    //    后台场景: 启用"隐藏本 App 窗口"模式 + 丢弃旧缓存(旧缓存是前台时绑定的本 App 画面),
+    //    让 createScreenIOSurface 在无本 App 窗口的状态下返回系统主屏 surface(对齐 HUDServices 独立进程)。
+    @synchronized (self) { _hideWindowsWhenCapturing = YES; }
+    [self _setCachedScreenSurface:NULL];
+    BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
+    @synchronized (self) { _hideWindowsWhenCapturing = NO; }
+    if (ok0) {
         return YES;
     }
     NSString *err0 = [self.lastError copy];
@@ -1231,6 +1273,29 @@ static const char *_gsSurfaceKeys[] = {
             diag[@"createScreenIOSurfaceResult"] = res;
         } else {
             diag[@"createScreenIOSurfaceResult"] = @{@"ok": @NO, @"error": self.lastError ?: @"(无)"};
+        }
+
+        // 隐藏窗口模式测试: 模拟 HUDServices 无窗口进程, 看 surface 是否变为系统主屏
+        @synchronized (self) { _hideWindowsWhenCapturing = YES; }
+        IOSurfaceRef hs = [self _createUIScreenSurface];
+        @synchronized (self) { _hideWindowsWhenCapturing = NO; }
+        if (hs) {
+            size_t (*gW)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
+            size_t (*gH)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
+            uint8_t *hpx = NULL; int hw = 0, hh = 0;
+            BOOL hdump = (gW && gH && gW(hs) > 0) && [self _dumpIOSurface:hs pixelsOut:&hpx width:&hw height:&hh];
+            BOOL hzero = hdump && hpx && [self _isAllZeroPixels:hpx width:hw height:hh];
+            diag[@"hiddenWindowsSurfaceResult"] = @{
+                @"ok": @YES,
+                @"width": @(gW ? (int)gW(hs) : 0),
+                @"height": @(gH ? (int)gH(hs) : 0),
+                @"dumpOk": @(hdump),
+                @"allZero": @(hzero)
+            };
+            if (hpx) { free(hpx); }
+            CFRelease(hs);
+        } else {
+            diag[@"hiddenWindowsSurfaceResult"] = @{@"ok": @NO};
         }
 
         diag[@"CARenderServerRenderDisplaySymbol"] = @(dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay") != NULL);
