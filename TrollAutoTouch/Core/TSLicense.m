@@ -57,6 +57,14 @@ static NSString *const kFingerprintSalt = @"trollautotouch.hw.v1";
     [self _requestVerifyCard:card
                   completion:^(BOOL ok, BOOL networkError, NSString *msg, NSString *exTime) {
         if (ok) {
+            // 服务端确认卡有效但已到期(verify 只代表卡存在, 到期由 exTime 体现) → 拒绝激活
+            if (exTime.length) {
+                NSDate *d = [self _parseExTime:exTime];
+                if (d && [d timeIntervalSinceNow] <= 0) {
+                    if (completion) completion(NO, @"该卡密已到期，无法激活");
+                    return;
+                }
+            }
             NSDictionary *rec = @{
                 @"card": card ?: @"",
                 @"deviceId": [TSLicense deviceId],
@@ -120,6 +128,12 @@ static NSString *const kFingerprintSalt = @"trollautotouch.hw.v1";
                     [self _saveActivationRecord:m];
                     // 覆盖写入三份隐藏到期时间文件
                     [TSExpiryStore writeExpiryTime:d];
+                    // 服务端 verify 只代表卡存在, 到期由 exTime 体现: 已过期 → 判定到期锁定
+                    if ([d timeIntervalSinceNow] <= 0) {
+                        [self deactivate];
+                        if (completion) completion(NO, NO, @"卡密已到期，进入 15 分钟试用");
+                        return;
+                    }
                 }
             }
             if (completion) completion(YES, NO, nil);
