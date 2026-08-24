@@ -23,6 +23,7 @@
 #import "../HUD/TSHUDHost.h"
 #import "../Common/TSPaths.h"
 #import "TSLogViewController.h"
+#import "TSAppListViewController.h"
 
 // TAS 服务开关的持久化 key。开 → App 启动即运行服务 + 常驻音量键监听;
 // 关 → 停止服务/监听, 进后台也不保活。默认开。
@@ -298,7 +299,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 1; // 卡密: 注册状态
     if (section == 1) return 3; // TAS 服务 + 悬浮窗口 + 服务地址
-    if (section == 2) return 3; // 通用: 查看脚本日志 + 查看系统日志 + 性能面板
+    if (section == 2) return 4; // 通用: 查看脚本日志 + 查看系统日志 + 查看应用包名 + 性能面板
     return 3;                    // 设备信息: 设备 + 版本号 + 包名
 }
 
@@ -311,7 +312,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.section == 0) return UITableViewAutomaticDimension; // 卡密状态行(可能两行文字)
-    if (ip.section == 2 && ip.row == 2) return 160;
+    if (ip.section == 2 && ip.row == 3) return 160;
     if (ip.section == 3) return UITableViewAutomaticDimension;
     return 44;
 }
@@ -358,9 +359,9 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         return c;
     }
 
-    // ── 通用区: 查看日志 + 性能面板 ──
+    // ── 通用区: 查看日志 + 查看应用包名 + 性能面板 ──
     if (ip.section == 2) {
-        if (ip.row == 2) {
+        if (ip.row == 3) {
             // 性能面板: 作为表格行随主界面上下滑动
             UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"perf"];
             c.backgroundColor = [TSColors card];
@@ -384,10 +385,14 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
             // 查看脚本日志: main.lua 主动 log/logStr/print (debug.log)
             c.textLabel.text = @"查看脚本日志";
             c.imageView.image = [self _icon:@"text.bubble"];
-        } else {
+        } else if (ip.row == 1) {
             // 查看系统日志: 程序自身日志 (touch.log)
             c.textLabel.text = @"查看系统日志";
             c.imageView.image = [self _icon:@"list.bullet.rectangle"];
+        } else {
+            // 查看应用包名: 列出本机所有已安装应用及其 Bundle ID
+            c.textLabel.text = @"查看应用包名";
+            c.imageView.image = [self _icon:@"square.grid.2x2"];
         }
         c.imageView.tintColor = [TSColors tint];
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -458,7 +463,13 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     }
 
     if (ip.section == 2) {
-        if (ip.row == 2) return; // 性能面板行
+        if (ip.row == 3) return; // 性能面板行
+        if (ip.row == 2) {
+            // 查看应用包名: 跳转应用列表页
+            TSAppListViewController *vc = [[TSAppListViewController alloc] init];
+            [self.navigationController pushViewController:vc animated:YES];
+            return;
+        }
         // row0 = 查看脚本日志(debug.log), row1 = 查看系统日志(touch.log)
         TSLogViewController *vc = [[TSLogViewController alloc]
                                    initWithMode:(ip.row == 0 ? @"script" : @"system")];

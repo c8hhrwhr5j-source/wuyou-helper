@@ -76,8 +76,8 @@ targets:
       path: TrollAutoTouch/Info.plist
       properties:
         CFBundleDisplayName: TrollAutoTouch
-        CFBundleVersion: "12"
-        CFBundleShortVersionString: "9.9.9"
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0.0"
         # 后台保活: 静音音频播放(audio) + 后台模式豁免组合阻止 App 被挂起,
         # 保证切到游戏/其他 app 后 8080 HTTP 服务器与截图服务持续响应。
         # voip: iOS 最强的后台豁免模式(不要求实际 VoIP 功能, TrollStore 不审核);

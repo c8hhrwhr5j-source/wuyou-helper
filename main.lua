@@ -1038,12 +1038,11 @@ function main()
 	--]]
     sleep(1000)
     log("=== 测试脚本开始 ===")
-	
+	device.turnOffAssistiveTouch() -- 关闭辅助触控
     local w, h = getScreenSize()
     log(string.format("屏幕 %.0f x %.0f", w, h))
     while true do
         sleep(100)
-		device.turnOffAssistiveTouch() -- 关闭辅助触控
         appsl()
         if rgbbj("腾讯LOGO") or rgbbj("盛大LOGO") then
             click(355,270,960,487) -- 关闭视频动画
