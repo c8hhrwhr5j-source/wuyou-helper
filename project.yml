@@ -99,13 +99,22 @@ targets:
         CFBundleIcons:
           CFBundlePrimaryIcon:
             CFBundleIconFiles:
-              - AppIcon60x60
+              - AppIcon60x60@2x
+              - AppIcon60x60@3x
+              - AppIcon40x40@2x
+              - AppIcon40x40@3x
+              - AppIcon29x29@2x
+              - AppIcon29x29@3x
             UIPrerenderedIcon: false
         CFBundleIcons~ipad:
           CFBundlePrimaryIcon:
             CFBundleIconFiles:
-              - AppIcon60x60
-              - AppIcon76x76
+              - AppIcon76x76~ipad
+              - AppIcon76x76@2x~ipad
+              - AppIcon40x40@2x
+              - AppIcon40x40@3x
+              - AppIcon29x29@2x
+              - AppIcon29x29@3x
             UIPrerenderedIcon: false
     entitlements:
       path: TrollAutoTouch/TrollAutoTouch.entitlements

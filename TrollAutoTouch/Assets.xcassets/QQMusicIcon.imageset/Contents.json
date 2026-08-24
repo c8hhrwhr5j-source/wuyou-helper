@@ -1,4 +1,4 @@
-﻿{
+{
   "images" : [
     {
       "filename" : "QQMusicIcon_1x.png",
@@ -17,7 +17,7 @@
     }
   ],
   "info" : {
-    "author" : "TrollAutoTouch",
+    "author" : "xcode",
     "version" : 1
   }
 }
