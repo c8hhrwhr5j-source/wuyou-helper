@@ -2095,12 +2095,13 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     });
 
     // 后台保活: 用户切到游戏/其他 app 时 App 处于后台, iOS 会挂起后台进程,
-    // 导致音量键轮询与 IOHID 直发触摸停摆。用静音音频播放阻止挂起
+    // 导致音量键监听与 IOHID 直发触摸停摆。用静音音频播放阻止挂起
     // (需 Info.plist UIBackgroundModes=audio, 见 project.yml)。
     [[TSAudioKeepAlive shared] start];
-    // 音量键识别: App 进程内轮询 AVAudioSession.outputVolume (AutoGo/CGO 同款,
-    // 公开 API, 不依赖注入 SpringBoard)。轮询由 TAS 服务启动时的常驻监听
-    // (startGlobalVolumeMonitoring) 统一管理, 脚本运行/结束不启停轮询:
+    // 音量键识别: App 进程内监听私有音量通知 + 轮询 AVAudioSession.outputVolume
+    // (物理按键事件广播, 静音/音量到 0 时也响应, 对齐 TrollAutoScript)。
+    // 监听由 TAS 服务启动时的常驻监听
+    // (startGlobalVolumeMonitoring) 统一管理, 脚本运行/结束不启停监听:
     //   脚本运行中 → _handleVolumeKey → 控制菜单 (暂停/继续·停止·取消);
     //   空闲未运行 → _handleIdleVolumeKey → 询问"运行选中脚本?"。
 
@@ -2171,12 +2172,12 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     lua_log(@"[Lua] 脚本执行结束");
 }
 
-// 音量键被按下 (TSVolumeKeyMonitor 轮询回调, 任意线程 → 转主线程):
+// 音量键被按下 (TSVolumeKeyMonitor 监听回调, 任意线程 → 转主线程):
 //   空闲未运行 → 弹"运行脚本/取消"选择(运行当前选中脚本);
 //   脚本运行中 → App 前台弹选择菜单; App 后台(游戏等)走 HUD 系统级弹窗
 //              (SBSAccessibilityWindowHostingController 托管, 可覆盖游戏)。
-// 音量键防抖时间戳(仅主线程访问): 单次按键可能产生音量一次变化,
-// 快速连按/音量回跳在 0.8s 内忽略; 弹窗关闭时重置为 0, 避免吞掉
+// 音量键防抖时间戳(仅主线程访问): 单次按键可能产生多个事件(通知+轮询双通道),
+// 快速连按在 0.8s 内忽略; 弹窗关闭时重置为 0, 避免吞掉
 // 紧接着的下一次按键(如"取消后马上再按")。
 static NSTimeInterval g_lastVolumeKeyAt = 0;
 static const NSTimeInterval g_volumeKeyDebounce = 0.8;
@@ -2187,7 +2188,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
         if ((now - g_lastVolumeKeyAt) < g_volumeKeyDebounce) return;
         g_lastVolumeKeyAt = now;
 
-        // 诊断日志: 确认音量键轮询已触发 + 当前脚本运行状态, 便于排查"按音量没反应"
+        // 诊断日志: 确认音量键监听已触发 + 当前脚本运行状态, 便于排查"按音量没反应"
         lua_log([NSString stringWithFormat:@"[音量键] 按下 (isRunning=%d, appState=%ld)",
                  self.isRunning, (long)[UIApplication sharedApplication].applicationState]);
 
@@ -2209,7 +2210,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
 }
 
 // ── 常驻音量键监听 (TAS 服务开关) ──────────────────────────────
-// App 启动且 TAS 服务开启时调用。音量键轮询不随脚本启停:
+// App 启动且 TAS 服务开启时调用。音量键监听不随脚本启停:
 //   脚本运行中 → _handleVolumeKey → 控制菜单;
 //   空闲未运行 → _handleIdleVolumeKey → 询问运行选中脚本。
 - (void)startGlobalVolumeMonitoring {
