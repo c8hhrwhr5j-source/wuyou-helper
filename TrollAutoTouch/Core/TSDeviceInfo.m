@@ -9,6 +9,8 @@
 #import <MediaPlayer/MediaPlayer.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <sys/sysctl.h>
+#import <sys/proc.h>
+#import <signal.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <sys/socket.h>
@@ -145,15 +147,106 @@
 
 #pragma mark - AssistiveTouch 控制
 
-// AssistiveTouch 偏好设置文件路径 (系统级, 由 SpringBoard 读取)
+// AssistiveTouch 偏好设置文件路径 (系统级, 由 SpringBoard/assistivetouchd 读取)
 // TrollStore 安装的 app 有 rootfs 读写权限, 可直接修改此文件
 static NSString *const kAccessibilityPlistPath =
     @"/var/mobile/Library/Preferences/com.apple.Accessibility.plist";
 
-// 通知 SpringBoard 重读 Accessibility 设置的 Darwin 通知名
-// SpringBoard 监听此通知后会重新加载 plist 并刷新 AssistiveTouch 状态
-static CFStringRef const kAssistiveTouchChangedDarwinNotification =
-    CFSTR("com.apple.accessibility.assistiveTouch.changed");
+// 通知 SpringBoard/assistivetouchd 重读 Accessibility 设置的 Darwin 通知名
+// 这两个通知名是 TrollAutoScript 2.3.6 逆向确认的实际监听名
+static const char *const kATCacheChangedNotify1 = "com.apple.accessibility.cache.axsettings";
+static const char *const kATCacheChangedNotify2 = "com.apple.accessibility.cache";
+
+// notify_post 声明 (位于 libSystem.dylib, 无需额外链接)
+extern int notify_post(const char *name);
+
+// 通过 sysctl 枚举进程并 SIGKILL 指定名称的进程
+// iOS 上 system() 不可用, 故用纯 POSIX 方式
+static void _tsKillProcessByName(const char *name) {
+    int mib[3] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL};
+    size_t size = 0;
+    if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0) return;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
+    if (!procs) return;
+    if (sysctl(mib, 3, procs, &size, NULL, 0) != 0) {
+        free(procs);
+        return;
+    }
+    int count = (int)(size / sizeof(struct kinfo_proc));
+    for (int i = 0; i < count; i++) {
+        if (strcmp(procs[i].kp_proc.p_comm, name) == 0) {
+            kill(procs[i].kp_proc.p_pid, SIGKILL);
+            break;
+        }
+    }
+    free(procs);
+}
+
+// 判断指定名称的进程是否存活 (用于"按需杀", 避免每轮都杀导致闪烁)
+static int _tsIsProcessRunning(const char *name) {
+    int mib[3] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL};
+    size_t size = 0;
+    if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0) return 0;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
+    if (!procs) return 0;
+    if (sysctl(mib, 3, procs, &size, NULL, 0) != 0) {
+        free(procs);
+        return 0;
+    }
+    int count = (int)(size / sizeof(struct kinfo_proc));
+    int found = 0;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(procs[i].kp_proc.p_comm, name) == 0) { found = 1; break; }
+    }
+    free(procs);
+    return found;
+}
+
+// 预先 dlopen Accessibility 相关私有框架
+// AXAccessibilityPreferences 类与 AXSSetAssistiveTouchEnabled 符号均位于
+// Accessibility.framework (旧系统可能在 AccessibilityUtilities.framework)
+static void _tsEnsureATFrameworkLoaded(void) {
+    static int loaded = 0;
+    if (loaded) return;
+    loaded = 1;
+    const char *paths[] = {
+        "/System/Library/PrivateFrameworks/Accessibility.framework/Accessibility",
+        "/System/Library/Frameworks/Accessibility.framework/Accessibility",
+        "/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities",
+        "/System/Library/PrivateFrameworks/AccessibilitySettings.framework/AccessibilitySettings",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        dlopen(paths[i], RTLD_LAZY | RTLD_GLOBAL);
+    }
+}
+
+// 写偏好 (CFPreferences 为主, plist 文件为辅) 并发送通知
+// CFPreferences 官方 API 写入能立即更新 cfprefsd 的内存缓存, 无需杀进程
+static void _tsWriteATPlist(BOOL enabled) {
+    @autoreleasepool {
+        CFStringRef app = CFSTR("com.apple.Accessibility");
+        CFPropertyListRef val = enabled ? kCFBooleanTrue : kCFBooleanFalse;
+
+        // ① CFPreferences 官方 API 写入 (主手段, 立即生效)
+        CFPreferencesSetValue(CFSTR("AXAssistiveTouchEnabled"), val,
+                              app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        CFPreferencesSetValue(CFSTR("AssistiveTouchEnabled"), val,
+                              app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+
+        // ② 同时写磁盘 plist 作为后备 (部分旧系统直接读磁盘)
+        NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:kAccessibilityPlistPath];
+        if (!dict) dict = [NSMutableDictionary dictionary];
+        dict[@"AXAssistiveTouchEnabled"] = @(enabled);
+        dict[@"AssistiveTouchEnabled"] = @(enabled);
+        [dict writeToFile:kAccessibilityPlistPath atomically:YES];
+
+        // ③ 发送 Darwin 通知 (双重通知名, 提高触发重载概率)
+        notify_post(kATCacheChangedNotify1);
+        notify_post(kATCacheChangedNotify2);
+    }
+}
 
 - (BOOL)enableAssistiveTouch {
     return [self _setAssistiveTouchEnabled:YES];
@@ -164,48 +257,80 @@ static CFStringRef const kAssistiveTouchChangedDarwinNotification =
 }
 
 - (BOOL)isAssistiveTouchEnabled {
+    // 优先用 CFPreferences 读取 (跟实际系统状态一致)
+    CFBooleanRef val = (CFBooleanRef)CFPreferencesCopyAppValue(
+        CFSTR("AXAssistiveTouchEnabled"), CFSTR("com.apple.Accessibility"));
+    if (val) {
+        BOOL enabled = CFBooleanGetValue(val);
+        CFRelease(val);
+        return enabled;
+    }
+    // 备选: 读 plist
     NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:kAccessibilityPlistPath];
     if (!plist) return NO;
-    // 实际键名因 iOS 版本可能不同, 多个候选键任一为真即视为启用
-    for (NSString *key in @[@"AssistiveTouchAssistiveTouchEnabledByiTunes",
-                            @"AssistiveTouchEnabledByiTunes",
-                            @"AssistiveTouchEnabled"]) {
+    for (NSString *key in @[@"AXAssistiveTouchEnabled", @"AssistiveTouchEnabled"]) {
         NSNumber *v = plist[key];
         if ([v isKindOfClass:[NSNumber class]] && v.boolValue) return YES;
     }
     return NO;
 }
 
-// 核心: 修改 plist 中的所有候选键 + 广播 Darwin 通知
+// 切换辅助触控开关. 绝不杀 cfprefsd (会影响系统其他功能).
+// 顺序:
+// ① dlopen Accessibility 框架 (否则类/符号找不到);
+// ② 优先 ObjC runtime 调 AXAccessibilityPreferences.setAssistiveTouchEnabled: (平滑, 不杀进程);
+// ③ 否则 dlsym C 符号 AXSSetAssistiveTouchEnabled;
+// ④ 兜底: 写 plist/CFPreferences + 通知; 若 assistivetouchd 仍在运行则"按需杀一次"
+//    (仅当进程存活才杀, 硬件未重开时不会反复杀, 避免持续闪烁)
 - (BOOL)_setAssistiveTouchEnabled:(BOOL)enabled {
-    NSMutableDictionary *plist =
-        [[NSDictionary dictionaryWithContentsOfFile:kAccessibilityPlistPath] mutableCopy];
-    if (!plist) {
-        // 文件不存在时新建空字典 (第一次设置)
-        plist = [NSMutableDictionary dictionary];
+    @autoreleasepool {
+        _tsEnsureATFrameworkLoaded();
+        BOOL apiDone = NO;
+
+        // ② ObjC runtime (类/方法名是字符串, 不受 strip 影响)
+        Class prefsCls = NSClassFromString(@"AXAccessibilityPreferences");
+        if (prefsCls) {
+            SEL shared = NSSelectorFromString(@"preferences");
+            if (![prefsCls respondsToSelector:shared]) shared = NSSelectorFromString(@"sharedPreferences");
+            if (![prefsCls respondsToSelector:shared]) shared = NSSelectorFromString(@"sharedInstance");
+            if ([prefsCls respondsToSelector:shared]) {
+                id prefs = [prefsCls performSelector:shared];
+                SEL setSel = NSSelectorFromString(@"setAssistiveTouchEnabled:");
+                if (prefs && [prefs respondsToSelector:setSel]) {
+                    NSMethodSignature *sig = [prefs methodSignatureForSelector:setSel];
+                    if (sig) {
+                        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                        [inv setTarget:prefs];
+                        [inv setSelector:setSel];
+                        [inv setArgument:&enabled atIndex:2];
+                        [inv invoke];
+                        apiDone = YES;
+                    }
+                }
+            }
+        }
+
+        // ③ C 符号 (框架已 dlopen, RTLD_DEFAULT 可检索)
+        if (!apiDone) {
+            void (*setEnabled)(BOOL) = (void (*)(BOOL))dlsym(RTLD_DEFAULT, "AXSSetAssistiveTouchEnabled");
+            if (!setEnabled) setEnabled = (void (*)(BOOL))dlsym(RTLD_DEFAULT, "_AXSSetAssistiveTouchEnabled");
+            if (setEnabled) {
+                setEnabled(enabled);
+                apiDone = YES;
+            }
+        }
+
+        // ④ 兜底: 始终写偏好 + 通知 (无害且可能直接生效)
+        //    assistivetouchd 存活则按需杀一次, 强制其重新读取我们写入的值
+        _tsWriteATPlist(enabled);
+        notify_post(kATCacheChangedNotify1);
+        notify_post(kATCacheChangedNotify2);
+        if (_tsIsProcessRunning("assistivetouchd")) {
+            // 仅进程存活时杀, 硬件未重开时进程不存活, 不重复杀 → 不闪
+            _tsKillProcessByName("assistivetouchd");
+        }
+        return YES;
     }
-    // 多个候选键一并写入, 兼容不同 iOS 版本
-    NSArray<NSString *> *keys = @[
-        @"AssistiveTouchAssistiveTouchEnabledByiTunes",
-        @"AssistiveTouchEnabledByiTunes",
-        @"AssistiveTouchEnabled"
-    ];
-    for (NSString *key in keys) {
-        plist[key] = @(enabled);
-    }
-
-    // 写回 (atomic 保证写完整; 手机存储空间满时返回 NO)
-    BOOL writeOK = [plist writeToFile:kAccessibilityPlistPath atomically:YES];
-    if (!writeOK) return NO;
-
-    // 广播 Darwin 通知让 SpringBoard 重新加载
-    // Darwin 通知跨进程, 即使 SpringBoard 在独立进程也能收到
-    CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        kAssistiveTouchChangedDarwinNotification,
-        NULL, NULL, TRUE);
-
-    return YES;
 }
 
 #pragma mark - 屏幕锁定 / 解锁

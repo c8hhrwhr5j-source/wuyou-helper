@@ -984,14 +984,22 @@ device.turnOffAssistiveTouch()   -- 停用屏幕上的小白点
 
 #### 实现说明
 
-1. 修改 `/var/mobile/Library/Preferences/com.apple.Accessibility.plist` 中的 AssistiveTouch 相关键（兼容多个 iOS 版本的键名）
-2. 通过 `CFNotificationCenterPostNotification` 广播 Darwin 通知 `com.apple.accessibility.assistiveTouch.changed`
-3. SpringBoard 监听到通知后重新加载 plist，刷新 AssistiveTouch 状态
+本实现完全复刻 TrollAutoScript 2.3.6 的逆向方案，采用**多通道并行写入**策略确保生效：
 
-> **注意**：
-> - 调用后辅助触控状态会立即生效，不需要重启 SpringBoard。
-> - 如果返回 `false`，可能是 plist 写入失败（存储满）或权限不足（非 TrollStore 环境）。
-> - 用户手动到「设置 → 辅助功能 → 触控 → 辅助触控」中切换时也会写同一个 plist，所以脚本设置的状态会被用户后续手动操作覆盖。
+1. **dlopen Accessibility 框架**（位于 `/System/Library/PrivateFrameworks/Accessibility.framework`），加载 `AXAccessibilityPreferences` 类与 `AXSSetAssistiveTouchEnabled` C 符号
+2. **优先 ObjC runtime** 调用 `[AXAccessibilityPreferences setAssistiveTouchEnabled:]`（平滑生效，不杀进程）
+3. **C 符号兜底**：`dlsym(RTLD_DEFAULT, "AXSSetAssistiveTouchEnabled")` 直接调用
+4. **CFPreferences 写入**（主手段）：用 `CFPreferencesSetValue` 写 `AXAssistiveTouchEnabled` 与 `AssistiveTouchEnabled` 两个 key 到 `com.apple.Accessibility`，立即更新 cfprefsd 内存缓存
+5. **磁盘 plist 后备**：同时写 `/var/mobile/Library/Preferences/com.apple.Accessibility.plist`
+6. **Darwin 通知**：`notify_post("com.apple.accessibility.cache.axsettings")` 和 `notify_post("com.apple.accessibility.cache")`（双重通知名）
+7. **按需杀 assistivetouchd**：仅当 `assistivetouchd` 进程存活时才 `SIGKILL`，强制其重启后从 cfprefsd 重新读取已写入的值（**绝不杀 cfprefsd**，会影响系统其他功能）
+
+> **重要**：
+> - entitlements 已声明 `com.apple.security.exception.shared-preference.read-write` 包含 `com.apple.Accessibility`，是 CFPreferencesSetValue 生效的前提
+> - 此前老版本实现未生效的原因：用的 key 名是 `AssistiveTouchAssistiveTouchEnabledByiTunes`（错误），正确 key 是 `AXAssistiveTouchEnabled`
+> - 老版本用的通知名 `com.apple.accessibility.assistiveTouch.changed` 也是错的，正确通知名是 `com.apple.accessibility.cache.axsettings` 和 `com.apple.accessibility.cache`
+> - 关闭小圆点不会"闪烁"：仅当 assistivetouchd 进程存活时才杀，硬件未重开时进程不存活，不会重复杀
+> - 此函数会**异步执行**（Lua 调用后立即返回，CFPreferencesSetValue 是同步但 dlopen 框架约 50ms）
 
 ---
 
