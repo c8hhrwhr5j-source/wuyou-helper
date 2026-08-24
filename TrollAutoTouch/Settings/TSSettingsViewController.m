@@ -15,6 +15,8 @@
 #import "../Core/TSToolExecutor.h"
 #import "../Core/TSDaemonManager.h"
 #import "../Core/TSDeviceInfo.h"
+#import "../Core/TSLicense.h"
+#import "../Core/TSTrialManager.h"
 #import "../Script/TSHTTPServer.h"
 #import "../Script/TSLuaBridge.h"
 #import "../HUD/TSHUDWindow.h"
@@ -188,10 +190,26 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     [_tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"action"];
     [_tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"perf"];
     [self.view addSubview:_tableView];
+
+    // 卡密/试用状态变化(如 15 分钟试用到期) → 刷新卡密区域
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_trialStateChanged:)
+                                                 name:TSTrialStateChangedNotification
+                                               object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)_trialStateChanged:(NSNotification *)note {
+    [_tableView reloadData];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    // 每次进入设置页刷新(卡密状态可能已变化: 激活成功/试用到期)
+    [_tableView reloadData];
     // 性能面板现在作为表格中的一行，可能尚未创建
     if (_perfView) [_perfView startUpdating];
 }
@@ -274,24 +292,27 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 #pragma mark - TableView
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
-    return 3;
+    return 4;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    if (section == 0) return 3; // TAS 服务 + 悬浮窗口 + 服务地址
-    if (section == 1) return 3; // 通用: 查看脚本日志 + 查看系统日志 + 性能面板
+    if (section == 0) return 1; // 卡密: 注册状态
+    if (section == 1) return 3; // TAS 服务 + 悬浮窗口 + 服务地址
+    if (section == 2) return 3; // 通用: 查看脚本日志 + 查看系统日志 + 性能面板
     return 3;                    // 设备信息: 设备 + 版本号 + 包名
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    if (section == 0) return @"服务";
-    if (section == 1) return @"通用";
+    if (section == 0) return @"卡密";
+    if (section == 1) return @"服务";
+    if (section == 2) return @"通用";
     return @"设备信息";
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
-    if (ip.section == 1 && ip.row == 2) return 160;
-    if (ip.section == 2) return UITableViewAutomaticDimension;
+    if (ip.section == 0) return UITableViewAutomaticDimension; // 卡密状态行(可能两行文字)
+    if (ip.section == 2 && ip.row == 2) return 160;
+    if (ip.section == 3) return UITableViewAutomaticDimension;
     return 44;
 }
 
@@ -300,8 +321,43 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    // ── 卡密区: 注册状态 (未注册可点击激活) ──
+    if (ip.section == 0) {
+        TSInfoCell *c = [tv dequeueReusableCellWithIdentifier:@"info"];
+        c.detailLabel.font = [UIFont systemFontOfSize:13];
+        if ([[TSLicense shared] isActivated]) {
+            c.iconView.image = [self _icon:@"checkmark.seal.fill"];
+            c.titleLabel.text = @"卡密";
+            NSString *ex = [[TSLicense shared] expireDateString] ?: @"未知";
+            c.detailLabel.text = [NSString stringWithFormat:@"已激活\n到期 %@", ex];
+            c.detailLabel.textColor = [TSColors tint];
+            c.accessoryType = UITableViewCellAccessoryNone;
+            c.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else {
+            c.iconView.image = [self _icon:@"key"];
+            c.titleLabel.text = @"卡密";
+            // 未注册: 展示未注册状态 + 试用剩余情况, 点击可激活
+            TSTrialManager *tm = [TSTrialManager shared];
+            NSString *rem;
+            if (tm.isExpired) {
+                rem = @"试用已结束";
+            } else if (tm.remainingSeconds > 0) {
+                int mm = (int)(tm.remainingSeconds / 60);
+                int ss = (int)tm.remainingSeconds % 60;
+                rem = [NSString stringWithFormat:@"试用剩余 %02d:%02d", mm, ss];
+            } else {
+                rem = @"点击激活";
+            }
+            c.detailLabel.text = [NSString stringWithFormat:@"未注册 · %@", rem];
+            c.detailLabel.textColor = [TSColors secondaryLabel];
+            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            c.selectionStyle = UITableViewCellSelectionStyleDefault;
+        }
+        return c;
+    }
+
     // ── 通用区: 查看日志 + 性能面板 ──
-    if (ip.section == 1) {
+    if (ip.section == 2) {
         if (ip.row == 2) {
             // 性能面板: 作为表格行随主界面上下滑动
             UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"perf"];
@@ -338,7 +394,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     }
 
     // ── 设备信息区 ──
-    if (ip.section == 2) {
+    if (ip.section == 3) {
         TSInfoCell *c = [tv dequeueReusableCellWithIdentifier:@"info"];
         c.detailLabel.font = [UIFont systemFontOfSize:13];
         c.detailLabel.textColor = [TSColors secondaryLabel];
@@ -391,7 +447,15 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
-    if (ip.section == 1) {
+    // ── 卡密区: 未注册时点击弹出输入框激活 ──
+    if (ip.section == 0) {
+        if (![[TSLicense shared] isActivated]) {
+            [self _showActivateDialog];
+        }
+        return;
+    }
+
+    if (ip.section == 2) {
         if (ip.row == 2) return; // 性能面板行
         // row0 = 查看脚本日志(debug.log), row1 = 查看系统日志(touch.log)
         TSLogViewController *vc = [[TSLogViewController alloc]
@@ -400,18 +464,73 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         return;
     }
 
-    if (ip.section == 0 && ip.row == 2) {
+    if (ip.section == 1 && ip.row == 2) {
         [self _showCopiedToast:[self _serviceURL]];
         return;
     }
 
-    if (ip.section == 2) {
+    if (ip.section == 3) {
         NSString *copy = nil;
         if (ip.row == 0)      copy = [self _deviceInfoDetail];
         else if (ip.row == 1) copy = [self _appVersionDetail];
         else                  copy = [self _bundleIDDetail];
         [self _showCopiedToast:copy];
     }
+}
+
+#pragma mark - 卡密激活
+
+// 未注册: 弹出输入卡密的二级弹窗
+- (void)_showActivateDialog {
+    if ([[TSLicense shared] isActivated]) return;
+
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"卡密激活"
+                                                                message:@"请输入卡密激活，解除试用限制"
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"请输入卡密";
+        tf.keyboardType = UIKeyboardTypeASCIICapable;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    __weak typeof(self) ws = self;
+    __weak UIAlertController *weakAC = ac;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消"
+                                           style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"激活"
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(UIAlertAction *action) {
+        __strong typeof(ws) self = ws;
+        if (!self) return;
+        UIAlertController *ac2 = weakAC;
+        NSString *card = [ac2.textFields.firstObject.text
+                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (card.length == 0) {
+            [[TSHUDHost shared] showToast:@"卡密不能为空" duration:1.5 hidden:NO];
+            return;
+        }
+        [self _doActivateWithCard:card];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)_doActivateWithCard:(NSString *)card {
+    __weak typeof(self) ws = self;
+    [[TSLicense shared] activateWithCard:card completion:^(BOOL ok, NSString *msg) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(ws) self = ws;
+            if (!self) return;
+            if (ok) {
+                // 激活成功: 取消试用倒计时, 解除过期锁定
+                [[TSTrialManager shared] cancelTrial];
+                [[TSHUDHost shared] showToast:@"卡密激活成功" duration:1.5 hidden:NO];
+            } else {
+                [[TSHUDHost shared] showToast:(msg.length ? msg : @"激活失败，请检查卡密") duration:2 hidden:NO];
+            }
+            [self.tableView reloadData];
+        });
+    }];
 }
 
 - (UIImage *)_icon:(NSString *)name {

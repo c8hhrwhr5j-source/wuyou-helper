@@ -53,6 +53,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "TSScriptListViewController.h"
 #import "../Core/TSToolExecutor.h"
 #import "TSScriptCipher.h"
+#import "TSTrialManager.h"
 
 // ────────────────────────── 前向声明 ──────────────────────────
 static void _pushNSObjectToLua(lua_State *L, id obj);
@@ -1934,12 +1935,22 @@ static void lua_register_all(lua_State *L) {
     // 脚本运行期间会一直持有 self 锁, 主线程 stop() 抢锁会永久阻塞导致应用卡死。
     // _luaQueue 本身就是串行队列, 已保证同一时间只有一个脚本在跑。
     dispatch_async(_luaQueue, ^{
+        // 未激活设备 15 分钟试用到期后禁止再启动脚本
+        if ([[TSTrialManager shared] isExpired]) {
+            lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
+            return;
+        }
         [self _execute:code filePath:nil];
     });
 }
 
 - (void)runFile:(NSString *)path {
     dispatch_async(_luaQueue, ^{
+        // 未激活设备 15 分钟试用到期后禁止再启动脚本
+        if ([[TSTrialManager shared] isExpired]) {
+            lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
+            return;
+        }
         NSError *err = nil;
         NSString *code = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
         if (err || !code) {

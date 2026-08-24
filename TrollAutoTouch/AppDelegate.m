@@ -12,7 +12,7 @@
 #import "HUD/TSHUDHost.h"
 #import "Core/TSDaemonManager.h"
 #import "Core/TSLicense.h"
-#import "Core/TSActivationViewController.h"
+#import "Core/TSTrialManager.h"
 #import "Script/TSLuaBridge.h"
 #import "Script/TSHTTPServer.h"
 #import "Common/TSPaths.h"
@@ -37,33 +37,15 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     [self _syncBuiltinScripts];
 
     // ── 创建主窗口（旧式 UIWindow，不依赖 UIScene）──
-    // 卡密门禁: 未激活 → 显示激活页面, 不启动任何核心服务;
-    //           已激活 → 正常进入主界面, 并在后台做启动联网校验。
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [TSColors bg];
+    self.window.rootViewController = [[MainTabBarController alloc] init];
+    [self.window makeKeyAndVisible];
+    [self _startCoreServices];
 
-    __weak typeof(self) weakSelf = self;
-    if ([[TSLicense shared] isActivated]) {
-        self.window.rootViewController = [[MainTabBarController alloc] init];
-        [self.window makeKeyAndVisible];
-        [self _startCoreServices];
-        // 每次启动联网校验: 失败(含离线超宽限期/卡密失效/被封锁) → 锁定回激活页
-        [[TSLicense shared] startupCheckWithCompletion:^(BOOL ok, NSString *msg) {
-            if (!ok) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [weakSelf _lockToActivationWithMessage:msg];
-                });
-            }
-        }];
-    } else {
-        TSActivationViewController *vc = [[TSActivationViewController alloc] init];
-        vc.onActivated = ^{
-            [weakSelf _startCoreServices];
-            weakSelf.window.rootViewController = [[MainTabBarController alloc] init];
-        };
-        self.window.rootViewController = vc;
-        [self.window makeKeyAndVisible];
-    }
+    // ── 卡密: 已激活无限制; 未激活设备每次启动获得 15 分钟试用窗口,
+    //    到期强制停止脚本并阻止新脚本 (可在 设置-卡密 中输入卡密激活) ──
+    [[TSTrialManager shared] startIfNeeded];
 
     // ── 预热进程内 HUD 宿主（单 App 架构）──
     // 提前创建 HUD 全屏透明窗口 (窗口内 hitTest 穿透, 不托管时不影响触摸)。
@@ -127,23 +109,6 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         [[TSLuaBridge shared] startGlobalVolumeMonitoring];
         [[TSHTTPServer shared] start];
     }
-}
-
-// ── 校验失败锁定: 停止所有服务, 切回激活页面 ──
-- (void)_lockToActivationWithMessage:(NSString *)msg {
-    [[TSDaemonManager shared] stopAll];
-    [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
-    [[TSHTTPServer shared] stop];
-    [[TSLicense shared] deactivate];
-
-    __weak typeof(self) weakSelf = self;
-    TSActivationViewController *vc = [[TSActivationViewController alloc] init];
-    vc.initialMessage = msg;
-    vc.onActivated = ^{
-        [weakSelf _startCoreServices];
-        weakSelf.window.rootViewController = [[MainTabBarController alloc] init];
-    };
-    self.window.rootViewController = vc;
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {

@@ -21,6 +21,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 本地是否有激活凭证
 @property (nonatomic, readonly) BOOL isActivated;
 
+/// 激活卡密的到期时间字符串(土豆 exTime, 如 "2025-07-11 15:04:07"); 未激活或未知返回 nil
+@property (nonatomic, readonly, nullable) NSString *expireDateString;
+
 /// 激活卡密: 联网验证通过后持久化到 keychain
 - (void)activateWithCard:(NSString *)card
               completion:(void (^)(BOOL ok, NSString *_Nullable msg))completion;

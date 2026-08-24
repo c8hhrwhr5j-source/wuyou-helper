@@ -48,18 +48,25 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
 - (void)activateWithCard:(NSString *)card
               completion:(void (^)(BOOL ok, NSString *_Nullable msg))completion {
     [self _requestVerifyCard:card
-                  completion:^(BOOL ok, BOOL networkError, NSString *msg) {
+                  completion:^(BOOL ok, BOOL networkError, NSString *msg, NSString *exTime) {
         if (ok) {
             NSDictionary *rec = @{
                 @"card": card ?: @"",
                 @"deviceId": [TSLicense deviceId],
                 @"activatedAt": @([[NSDate date] timeIntervalSince1970]),
+                @"exTime": exTime ?: @"",
             };
             [self _saveActivationRecord:rec];
             self->_activated = YES;
         }
         if (completion) completion(ok, msg);
     }];
+}
+
+- (NSString *)expireDateString {
+    NSDictionary *rec = [self _loadActivationRecord];
+    NSString *t = rec[@"exTime"];
+    return ([t isKindOfClass:NSString.class] && t.length) ? t : nil;
 }
 
 - (void)startupCheckWithCompletion:(void (^)(BOOL ok, NSString *_Nullable msg))completion {
@@ -70,7 +77,7 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         return;
     }
     [self _requestVerifyCard:rec[@"card"]
-                  completion:^(BOOL ok, BOOL networkError, NSString *msg) {
+                  completion:^(BOOL ok, BOOL networkError, NSString *msg, NSString *exTime) {
         if (ok) {
             if (completion) completion(YES, @"验证通过");
             return;
@@ -98,9 +105,9 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
 // MARK: - 土豆 API 请求
 
 - (void)_requestVerifyCard:(NSString *)card
-                completion:(void (^)(BOOL ok, BOOL networkError, NSString *_Nullable msg))completion {
+                completion:(void (^)(BOOL ok, BOOL networkError, NSString *_Nullable msg, NSString *_Nullable exTime))completion {
     if (card.length == 0) {
-        if (completion) completion(NO, NO, @"卡密为空");
+        if (completion) completion(NO, NO, @"卡密为空", nil);
         return;
     }
 
@@ -144,7 +151,7 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         if (error) {
             NSString *msg = [NSString stringWithFormat:@"网络错误(%ld): %@",
                              (long)error.code, error.localizedDescription];
-            if (completion) completion(NO, YES, msg);
+            if (completion) completion(NO, YES, msg, nil);
             return;
         }
         NSInteger statusCode = [(NSHTTPURLResponse *)resp statusCode];
@@ -173,8 +180,16 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         NSDictionary *dataObj = [obj isKindOfClass:NSDictionary.class] ? obj[@"data"] : nil;
         BOOL verifyOk = [code isEqualToString:@"200"] && [dataObj[@"verify"] boolValue];
 
+        // 卡密到期时间(土豆返回 exTime, 格式 "2025-07-11 15:04:07")
+        NSString *exTime = nil;
+        if ([dataObj isKindOfClass:NSDictionary.class]) {
+            id t = dataObj[@"exTime"];
+            if ([t isKindOfClass:NSString.class] && [t length]) exTime = t;
+            else if ([t isKindOfClass:NSNumber.class]) exTime = [t stringValue];
+        }
+
         if (verifyOk) {
-            if (completion) completion(YES, NO, @"验证通过");
+            if (completion) completion(YES, NO, @"验证通过", exTime);
             return;
         }
 
@@ -183,7 +198,7 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
             [bodyStr substringToIndex:500] : bodyStr;
         if (statusCode != 200) {
             NSString *msg = [NSString stringWithFormat:@"HTTP %ld: %@", (long)statusCode, rawPreview];
-            if (completion) completion(NO, NO, msg);
+            if (completion) completion(NO, NO, msg, nil);
             return;
         }
         NSString *msg = nil;
@@ -195,7 +210,7 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
             msg = [NSString stringWithFormat:@"响应解析失败, raw=%@, dec=%@",
                    rawPreview, jsonStr ?: @"(nil)"];
         }
-        if (completion) completion(NO, NO, msg);
+        if (completion) completion(NO, NO, msg, nil);
     }];
     [task resume];
 }
