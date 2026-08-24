@@ -1040,5 +1040,24 @@
 	<true/>
 	<key>com.apple.springboard.activate</key>
 	<true/>
+	<key>BSServiceDomains</key>
+	<dict>
+		<key>com.apple.frontboard</key>
+		<dict>
+			<key>DerivedServiceRestrictions</key>
+			<array>
+				<string>com.apple.uis.applicationStateService</string>
+				<string>com.apple.uis.applicationSupportService</string>
+				<string>com.apple.frontboard.layout-monitor</string>
+			</array>
+			<key>Services</key>
+			<dict>
+				<key>com.apple.frontboard.system-service</key>
+				<dict/>
+				<key>com.apple.frontboard.workspace-service</key>
+				<dict/>
+			</dict>
+		</dict>
+	</dict>
 </dict>
 </plist>

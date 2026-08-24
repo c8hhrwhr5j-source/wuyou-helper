@@ -2,17 +2,22 @@
 //  TSVolumeKeyMonitor.m
 //  TrollAutoTouch
 //
-//  App 进程内音量键识别 (iOS 15 物理按键感知版):
-//    ⚠ iOS 15.5+/TrollStore(CoreTrust 2) 拿不到 platform 身份, 以下两条
-//      "原始按键事件"通道在 iOS 15.8.4 上实测不可行 (保留但不依赖):
-//      ① CPDistributedMessagingCenter 连接 SpringBoard 硬件按键服务
-//         (非 platform 进程 mach lookup 被拒, SpringBoard 端不信任);
-//      ② IOHIDEventSystemClient 全局 HID 事件 (需 platform + event-dispatch)。
-//    实际有效方案 (不依赖 platform):
-//      KVO 监听 AVAudioSession.outputVolume (iOS 15 公开可靠信号) 为主通道;
-//      音量贴 0/1 边界时用 Celestial AVSystemController setVolumeTo:forCategory:
-//      悄悄拉回 0.05/0.95 —— 此后空音量按音量- 也产生真实音量变化 (0.05→0),
-//      持续触发回调。200ms 轮询 + AVSystemController 私有通知为兜底。
+//  App 进程内音量键识别 (iOS 15+ 物理按键感知版):
+//
+//  【通道架构 - 按优先级排序】
+//  ① BKS 硬件事件路由 (BackBoardServices.framework):
+//     使用 BKSHIDEventRouter/BKSHIDEventDeliveryManager 直接拦截硬件按键事件,
+//     绕过音频系统, 音量为 0 时仍能检测到物理按键。这是 TrollAutoScript 逆向
+//     确认的核心实现方式 —— HUDServices 守护进程通过 BSServiceDomains 权限
+//     注册为系统服务, 使用 BackBoardServices 私有 API 获取原始 HID 事件。
+//  ② SpringBoard 硬件按键推送 (CPDistributedMessagingCenter):
+//     连接 SpringBoard 消息中心, 订阅 hardware-button-service 事件。
+//  ③ IOHIDEventSystemClient 全局 HID 事件:
+//     通过 IOKit 框架直接获取物理 HID 事件。
+//  ④ KVO + 边界回弹 (主通道兜底):
+//     KVO 监听 AVAudioSession.outputVolume, 音量贴 0/1 边界时用
+//     AVSystemController 悄悄拉回 0.05/0.95, 保证后续按键产生真实音量变化。
+//  ⑤ 200ms 轮询 + AVSystemController 私有通知 (最终兜底)。
 
 #import "TSVolumeKeyMonitor.h"
 #import <AVFoundation/AVFoundation.h>
@@ -21,7 +26,15 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 
-// ── SpringBoard 硬件按键服务 (TrollAutoScript 逆向确认) ──
+// ── BackBoardServices 硬件事件路由 (TrollAutoScript 逆向核心机制) ──
+static NSString *const kBKSFrameworkPath =
+    @"/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices";
+static NSString *const kBKSVolumeDownEventName = @"BKSHIDEventVolumeDown";
+static NSString *const kBKSVolumeUpEventName = @"BKSHIDEventVolumeUp";
+static NSString *const kBKSHIDEventDeliveryManagerClass = @"BKSHIDEventDeliveryManager";
+static NSString *const kBKSApplicationIdentifier = @"com.trollautotouch.apple";
+
+// ── SpringBoard 硬件按键服务 ──
 static NSString *const kSpringBoardServiceName = @"com.apple.springboard";
 static NSString *const kHardwareButtonMessageName =
     @"com.apple.springboard.hardware-button-service.event-consumption";
@@ -75,6 +88,10 @@ enum {
     IOHIDEventSystemClientRef _hidClient;   // IOHIDEventSystemClient
     dispatch_queue_t _hidQueue;
     os_unfair_lock _lock;
+    // BKS 硬件事件路由 (BackBoardServices)
+    id _bksDeliveryManager;    // BKSHIDEventDeliveryManager 实例
+    id _bksEventObserver;       // BKS 事件观察者/路由对象
+    dispatch_queue_t _bksQueue; // BKS 事件处理队列
 }
 
 + (instancetype)shared {
@@ -121,8 +138,13 @@ enum {
     _warmupUntil = CACurrentMediaTime() + TSVolumeWarmupDuration;
     _lastEventAt = 0;
 
-    [self _installCPDMMachListener];   // 主通道① SpringBoard 硬件按键推送
-    [self _installHIDListener];        // 主通道② IOHID 物理事件
+    // 通道① BKS 硬件事件路由 (TrollAutoScript 逆向核心) — 最优先级
+    [self _installBKSListener];
+    // 通道② SpringBoard 硬件按键推送
+    [self _installCPDMMachListener];
+    // 通道③ IOHID 物理事件
+    [self _installHIDListener];
+    // 通道④⑤ 兜底
     [self _installNotificationListener];
     [self _installPollFallback];
 }
@@ -141,6 +163,21 @@ enum {
     [[NSNotificationCenter defaultCenter] removeObserver:self
                                                     name:kAVSystemVolumeChangedNotif
                                                   object:nil];
+
+    // 清理 BKS 硬件事件路由
+    if (_bksDeliveryManager) {
+        [self _unregisterBKSDeliveryManager];
+        _bksDeliveryManager = nil;
+    }
+    if (_bksEventObserver) {
+        _bksEventObserver = nil;
+    }
+    if (_bksQueue) {
+        // dispatch_queue 不需要手动释放 (ARC)
+        _bksQueue = nil;
+    }
+
+    // 清理 CPDM (SpringBoard 硬件按键)
     if (_messagingCenter) {
         SEL sel = NSSelectorFromString(@"unregisterMessageName:target:");
         if ([_messagingCenter respondsToSelector:sel]) {
@@ -149,14 +186,16 @@ enum {
         }
         _messagingCenter = nil;
     }
+
+    // 清理 IOHID
     if (_hidClient) {
-        // 私有: IOHIDEventSystemClientUnregisterEventCallback + Invalidate
         void (*fnInvalidate)(IOHIDEventSystemClientRef) =
             (void (*)(IOHIDEventSystemClientRef))dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientInvalidate");
         if (fnInvalidate) fnInvalidate(_hidClient);
         CFRelease(_hidClient);
         _hidClient = NULL;
     }
+
     _avSystemController = nil;
     if (_timer) {
         dispatch_source_cancel(_timer);
@@ -164,7 +203,194 @@ enum {
     }
 }
 
-// ═══════════ 主通道①: SpringBoard 硬件按键事件 (CPDistributedMessagingCenter) ═══════════
+// ═══════════ 主通道①: BKS 硬件事件路由 (BackBoardServices.framework) ═══════════
+// TrollAutoScript 逆向核心: HUDServices 守护进程通过 BackBoardServices 私有 API
+// 的 BKSHIDEventDeliveryManager 直接获取硬件按键事件, 绕过音频系统, 音量为 0 时
+// 仍能检测到物理按键。BSServiceDomains 权限是此通道生效的前提。
+- (void)_installBKSListener {
+    // 动态加载 BackBoardServices 私有框架
+    void *bksHandle = dlopen([kBKSFrameworkPath UTF8String], RTLD_NOW);
+    if (!bksHandle) {
+        NSLog(@"[TSVolumeKeyMonitor] dlopen BackBoardServices 失败: %s", dlerror());
+        return;
+    }
+
+    // 获取 BKSHIDEventDeliveryManager 类
+    Class deliveryMgrClass = NSClassFromString(kBKSHIDEventDeliveryManagerClass);
+    if (!deliveryMgrClass) {
+        NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 类不存在");
+        return;
+    }
+
+    // 获取单例或实例
+    SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+    if ([deliveryMgrClass respondsToSelector:sharedSel]) {
+        _bksDeliveryManager = ((id (*)(id, SEL))objc_msgSend)(deliveryMgrClass, sharedSel);
+    } else {
+        // 尝试 alloc/init
+        _bksDeliveryManager = ((id (*)(id, SEL))objc_msgSend)(deliveryMgrClass, @selector(alloc));
+        if (_bksDeliveryManager) {
+            _bksDeliveryManager = ((id (*)(id, SEL))objc_msgSend)(_bksDeliveryManager, @selector(init));
+        }
+    }
+
+    if (!_bksDeliveryManager) {
+        NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 实例化失败");
+        return;
+    }
+
+    NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 已获取: %@", _bksDeliveryManager);
+
+    _bksQueue = dispatch_queue_create("com.trollautotouch.volumekey.bks", DISPATCH_QUEUE_SERIAL);
+
+    // 注册音量键事件观察
+    // BKSHIDEventDeliveryManager 支持多种注册方式, 逐一尝试:
+
+    // 方式 A: registerForVolumeEventsWithHandler: (block-based, iOS 14+)
+    SEL regVolumeSel = NSSelectorFromString(@"registerForVolumeEventsWithHandler:");
+    if ([_bksDeliveryManager respondsToSelector:regVolumeSel]) {
+        __weak typeof(self) weakSelf = self;
+        void (^handler)(BOOL volumeUp) = ^(BOOL volumeUp) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf _onKeyDetectedWithUp:volumeUp];
+            });
+        };
+        ((void (*)(id, SEL, id))objc_msgSend)(_bksDeliveryManager, regVolumeSel, handler);
+        _bksEventObserver = handler;
+        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerForVolumeEventsWithHandler:)");
+        return;
+    }
+
+    // 方式 B: registerForEventOfType:withHandler: (block-based, 通用事件类型)
+    // 音量键事件类型: com.apple.hid.event.volume-down / volume-up
+    SEL regEventTypeSel = NSSelectorFromString(@"registerForEventOfType:withHandler:");
+    if ([_bksDeliveryManager respondsToSelector:regEventTypeSel]) {
+        __weak typeof(self) weakSelf = self;
+        void (^handler)(NSString *eventType) = ^(NSString *eventType) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            BOOL isUp = [eventType containsString:@"Up"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf _onKeyDetectedWithUp:isUp];
+            });
+        };
+        // 注册音量下事件
+        NSString *volDownType = @"com.apple.hid.event.volume-down";
+        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regEventTypeSel, volDownType, handler);
+        // 注册音量上事件
+        NSString *volUpType = @"com.apple.hid.event.volume-up";
+        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regEventTypeSel, volUpType, handler);
+        _bksEventObserver = handler;
+        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerForEventOfType:withHandler:)");
+        return;
+    }
+
+    // 方式 C: BKSHIDEventRouter (iOS 13+ 替代方案)
+    Class routerClass = NSClassFromString(@"BKSHIDEventRouter");
+    if (routerClass) {
+        id router = ((id (*)(id, SEL))objc_msgSend)(routerClass, @selector(alloc));
+        if (router) {
+            router = ((id (*)(id, SEL))objc_msgSend)(router, @selector(init));
+            // setRoute:forApplication: 或 registerAsObserver:
+            SEL setRouteSel = NSSelectorFromString(@"setRoute:forApplication:");
+            if ([router respondsToSelector:setRouteSel]) {
+                // route 可能是一个 BKS 事件路由描述对象
+                id route = ((id (*)(id, SEL))objc_msgSend)(
+                    NSClassFromString(@"BKSHIDEventRoute"), @selector(alloc));
+                if (route) {
+                    route = ((id (*)(id, SEL))objc_msgSend)(route, @selector(init));
+                    // 设置路由的事件类型为音量键
+                    SEL setEventsSel = NSSelectorFromString(@"setEventTypes:");
+                    if ([route respondsToSelector:setEventsSel]) {
+                        NSArray *volumeEvents = @[kBKSVolumeDownEventName, kBKSVolumeUpEventName];
+                        ((void (*)(id, SEL, id))objc_msgSend)(route, setEventsSel, volumeEvents);
+                    }
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(router, setRouteSel, route, kBKSApplicationIdentifier);
+                    _bksEventObserver = router;
+                    NSLog(@"[TSVolumeKeyMonitor] BKS BKSHIDEventRouter 已设置路由");
+                    return;
+                }
+            }
+        }
+    }
+
+    // 方式 D: BKSHIDEventDeliveryManager registerObserver:forEvents: (观察者模式)
+    SEL regObserverSel = NSSelectorFromString(@"registerObserver:forEvents:");
+    if ([_bksDeliveryManager respondsToSelector:regObserverSel]) {
+        // 构造观察者对象 (使用一个 helper 对象)
+        // 由于无法直接实现协议, 使用 block 包装
+        __weak typeof(self) weakSelf = self;
+        id observerBlock = ^(NSString *eventType, NSDictionary *eventInfo) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            BOOL isUp = [eventType containsString:@"Up"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf _onKeyDetectedWithUp:isUp];
+            });
+        };
+        NSArray *events = @[kBKSVolumeDownEventName, kBKSVolumeUpEventName];
+        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regObserverSel, observerBlock, events);
+        _bksEventObserver = observerBlock;
+        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerObserver:forEvents:)");
+        return;
+    }
+
+    // 方式 E: 尝试更通用的 registerConsumer: 方法
+    SEL regConsumerSel = NSSelectorFromString(@"registerConsumer:withIdentifier:");
+    if ([_bksDeliveryManager respondsToSelector:regConsumerSel]) {
+        __weak typeof(self) weakSelf = self;
+        id consumer = ^(NSDictionary *event) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            NSString *eventType = event[@"type"] ?: event[@"eventType"] ?: @"";
+            BOOL isUp = [eventType containsString:@"Up"] || [eventType integerValue] == 1;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf _onKeyDetectedWithUp:isUp];
+            });
+        };
+        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regConsumerSel, consumer, kBKSApplicationIdentifier);
+        _bksEventObserver = consumer;
+        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerConsumer:withIdentifier:)");
+        return;
+    }
+
+    NSLog(@"[TSVolumeKeyMonitor] BKS 通道: 所有注册方式均未匹配 (可能此 iOS 版本不支持)");
+}
+
+// 清理 BKS 硬件事件路由
+- (void)_unregisterBKSDeliveryManager {
+    if (!_bksDeliveryManager) return;
+
+    // 尝试各种取消注册方法
+    // unregisterForVolumeEvents
+    SEL unregVolSel = NSSelectorFromString(@"unregisterForVolumeEvents");
+    if ([_bksDeliveryManager respondsToSelector:unregVolSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(_bksDeliveryManager, unregVolSel);
+        NSLog(@"[TSVolumeKeyMonitor] BKS 已取消注册 (unregisterForVolumeEvents)");
+        return;
+    }
+
+    // unregisterObserver:
+    if (_bksEventObserver) {
+        SEL unregObsSel = NSSelectorFromString(@"unregisterObserver:");
+        if ([_bksDeliveryManager respondsToSelector:unregObsSel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(_bksDeliveryManager, unregObsSel, _bksEventObserver);
+            NSLog(@"[TSVolumeKeyMonitor] BKS 已取消注册 (unregisterObserver:)");
+        }
+    }
+
+    // invalidate / removeRoutes
+    SEL invalidateSel = NSSelectorFromString(@"invalidate");
+    if ([_bksDeliveryManager respondsToSelector:invalidateSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(_bksDeliveryManager, invalidateSel);
+    }
+
+    NSLog(@"[TSVolumeKeyMonitor] BKS 通道已清理");
+}
+
+// ═══════════ 主通道②: SpringBoard 硬件按键事件 (CPDistributedMessagingCenter) ═══════════
 // TrollAutoScript 逆向结论: 不用 registerForMessageName:target:selector:,
 // 而是连接后 sendMessageAndReceiveReplyName: 发送订阅请求, 并实现
 // handleMessageNamed:withUserInfo: 方法接收 SpringBoard 后续推送的按键事件。
