@@ -28,8 +28,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)activateWithCard:(NSString *)card
               completion:(void (^)(BOOL ok, NSString *_Nullable msg))completion;
 
-/// 启动时联网校验; 网络失败且处于宽限期仍放行, 校验不通过会清除激活状态
-- (void)startupCheckWithCompletion:(void (^)(BOOL ok, NSString *_Nullable msg))completion;
+/// 已激活状态下与服务器校验卡密是否仍可用(启动时静默调用):
+///   valid=YES  → 有效, 若服务端返回新到期时间则同步更新本地凭证
+///   networkError=YES → 网络异常, 保持激活状态离线放行(不误杀)
+///   两者皆 NO → 服务端明确判定卡密无效(被删/禁用/到期/机器码不匹配), 已清除本地激活
+- (void)refreshValidWithCompletion:(void (^)(BOOL valid, BOOL networkError, NSString *_Nullable msg))completion;
 
 /// 清除本地激活凭证
 - (void)deactivate;

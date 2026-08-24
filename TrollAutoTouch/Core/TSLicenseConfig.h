@@ -28,7 +28,4 @@
 /// 加解密秘钥 (AES-128, 必须 16 字节, 后台"加解密秘钥"框)
 #define kTSLicenseEncryptSecret @"aB3#kL9$mN2pQ7wX"
 
-/// 断网时允许离线使用的宽限天数 (用户选择了"每次启动联网校验+宽限")
-#define kTSLicenseGracePeriodDays 3
-
 #endif /* TSLicenseConfig_h */

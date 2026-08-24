@@ -14,13 +14,15 @@
 
 static const NSTimeInterval kTSTrialDuration = 15 * 60.0;   // 试用时长: 15 分钟
 static const NSTimeInterval kTSTrialCheckInterval = 2.0;    // 到期检查间隔(秒)
+static const NSTimeInterval kTSLicenseRefreshInterval = 6 * 60 * 60.0; // 已激活状态下的周期联网校验间隔(秒)
 
 NSNotificationName const TSTrialStateChangedNotification = @"TSTrialStateChangedNotification";
 
 @interface TSTrialManager ()
 @property (nonatomic, assign) BOOL expired;
 @property (nonatomic, strong) NSDate *deadline;      // 试用截止时刻
-@property (nonatomic, strong) dispatch_source_t timer;
+@property (nonatomic, strong) dispatch_source_t timer;               // 试用到期检查定时器
+@property (nonatomic, strong) dispatch_source_t licenseRefreshTimer; // 已激活状态周期校验定时器(6h)
 @end
 
 @implementation TSTrialManager
@@ -51,14 +53,20 @@ NSNotificationName const TSTrialStateChangedNotification = @"TSTrialStateChanged
         dispatch_source_cancel(_timer);
         _timer = nil;
     }
+    if (_licenseRefreshTimer) {
+        dispatch_source_cancel(_licenseRefreshTimer);
+        _licenseRefreshTimer = nil;
+    }
 }
 
 // MARK: - 对外接口
 
 - (void)startIfNeeded {
     if ([[TSLicense shared] isActivated]) {
-        // 已激活: 无试用限制
+        // 已激活: 无试用限制; 但每次启动都要与服务器校验卡密是否仍可用
         [self cancelTrial];
+        [self _startLicenseRefreshTimer]; // 已激活期间周期(6h)联网校验
+        [self _verifyLicenseAsync];       // 启动立即校验
         return;
     }
     if (!_deadline) {
@@ -112,6 +120,49 @@ NSNotificationName const TSTrialStateChangedNotification = @"TSTrialStateChanged
         dispatch_source_cancel(_timer);
         _timer = nil;
     }
+}
+
+// 已激活状态下的周期联网校验定时器(每 6 小时一次, 幂等)
+- (void)_startLicenseRefreshTimer {
+    if (_licenseRefreshTimer) return;
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                 dispatch_get_main_queue());
+    dispatch_source_set_timer(t, dispatch_walltime(NULL, kTSLicenseRefreshInterval * NSEC_PER_SEC),
+                              (uint64_t)(kTSLicenseRefreshInterval * NSEC_PER_SEC), 0);
+    __weak typeof(self) ws = self;
+    dispatch_source_set_event_handler(t, ^{
+        [ws _verifyLicenseAsync];
+    });
+    dispatch_resume(t);
+    _licenseRefreshTimer = t;
+}
+
+// 已激活设备的联网校验: 后台线程回调, 结果回主线程处理
+- (void)_verifyLicenseAsync {
+    if (![[TSLicense shared] isActivated]) return; // 未激活时无需校验(如已被判失效转入试用)
+    __weak typeof(self) ws = self;
+    [[TSLicense shared] refreshValidWithCompletion:^(BOOL valid, BOOL networkError, NSString *msg) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(ws) self = ws;
+            if (!self) return;
+            if (valid) {
+                // 校验通过(可能已同步最新到期时间): 刷新设置页卡密区展示
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:TSTrialStateChangedNotification object:self];
+                return;
+            }
+            if (networkError) {
+                // 网络异常: 离线放行, 保持已激活状态, 不打扰用户
+                return;
+            }
+            // 服务端明确判定卡密无效(已清除本地激活): 立即进入 15 分钟试用
+            [self startIfNeeded];
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:TSTrialStateChangedNotification object:self];
+            [[TSHUDHost shared] showToast:(msg.length ? msg : @"卡密已失效，进入 15 分钟试用")
+                                 duration:3 hidden:NO];
+        });
+    }];
 }
 
 - (void)_appDidBecomeActive:(NSNotification *)note {

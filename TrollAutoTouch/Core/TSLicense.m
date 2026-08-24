@@ -69,37 +69,42 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
     return ([t isKindOfClass:NSString.class] && t.length) ? t : nil;
 }
 
-- (void)startupCheckWithCompletion:(void (^)(BOOL ok, NSString *_Nullable msg))completion {
+- (void)deactivate {
+    [self _deleteActivationRecord];
+    _activated = NO;
+}
+
+// 已激活状态下的静默联网校验(每次启动调用):
+//   - 服务端明确判定无效 → 清除激活, 由调用方转入试用流程
+//   - 网络异常 → 保留激活离线放行, 避免误杀
+//   - 校验通过 → 若服务端返回到期时间则更新本地凭证(修复"长期有效"陈旧信息)
+- (void)refreshValidWithCompletion:(void (^)(BOOL valid, BOOL networkError, NSString *_Nullable msg))completion {
     NSDictionary *rec = [self _loadActivationRecord];
     if (!rec || ![rec[@"card"] length]) {
-        _activated = NO;
-        if (completion) completion(NO, @"未激活");
+        if (completion) completion(NO, NO, @"未激活");
         return;
     }
     [self _requestVerifyCard:rec[@"card"]
                   completion:^(BOOL ok, BOOL networkError, NSString *msg, NSString *exTime) {
         if (ok) {
-            if (completion) completion(YES, @"验证通过");
+            // 校验通过: 同步服务端最新到期时间, 避免本地凭证过期不更新
+            if (exTime.length) {
+                NSMutableDictionary *m = [rec mutableCopy];
+                m[@"exTime"] = exTime;
+                [self _saveActivationRecord:m];
+            }
+            if (completion) completion(YES, NO, nil);
             return;
         }
-        // 网络失败 → 离线宽限期放行
         if (networkError) {
-            double at = [rec[@"activatedAt"] doubleValue];
-            double now = [[NSDate date] timeIntervalSince1970];
-            if (at > 0 && (now - at) <= kTSLicenseGracePeriodDays * 86400.0) {
-                if (completion) completion(YES, @"离线宽限期内");
-                return;
-            }
+            // 离线放行, 保持激活状态, 下次启动再校验
+            if (completion) completion(NO, YES, msg);
+            return;
         }
-        // 卡密失效 / 被封 / 机器码不匹配 / 超宽限期 → 锁定
+        // 服务端明确返回校验不通过: 卡密被删/禁用/到期/机器码不匹配 → 清除本地激活
         [self deactivate];
-        if (completion) completion(NO, msg ?: @"激活校验失败");
+        if (completion) completion(NO, NO, msg ?: @"卡密校验失败");
     }];
-}
-
-- (void)deactivate {
-    [self _deleteActivationRecord];
-    _activated = NO;
 }
 
 // MARK: - 土豆 API 请求
