@@ -177,8 +177,8 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _mainBtn.frame = CGRectMake([self _ballX] + (kBallSize - kBallVisSize) / 2,
                                 (kBallSize - kBallVisSize) / 2,
                                 kBallVisSize, kBallVisSize);
-    // 悬浮球图标: 白色粗体 "T" (按需求替换原闪电 bolt.fill)
-    [self _applyTLabelTo:_mainBtn];
+    // 悬浮球图标: QQ 音乐图标 (替换原白色 "T")
+    [self _applyQQMusicIconTo:_mainBtn];
     // 悬浮球带拖拽
     _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(_panMain:)];
     [_mainBtn addGestureRecognizer:_pan];
@@ -303,36 +303,36 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     b.tintColor = [UIColor whiteColor];
 }
 
-// 悬浮球图标: 白色粗体 "T" (替换闪电 bolt.fill)。
-// 按钮 frame 由 _relayoutForDock 调整, label 用 autoresizing 跟随按钮尺寸。
-- (void)_applyTLabelTo:(UIButton *)b {
-    UILabel *t = [[UILabel alloc] initWithFrame:b.bounds];
-    t.text = @"T";
-    t.textColor = [UIColor whiteColor];
-    t.font = [UIFont boldSystemFontOfSize:17];
-    t.textAlignment = NSTextAlignmentCenter;
-    t.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    t.userInteractionEnabled = NO;
-    [b addSubview:t];
+// 悬浮球图标: QQ 音乐图标 (替换白色粗体 "T")。
+// 使用 Assets 中的 QQMusicIcon 图片, 保持原始颜色 (黄底绿色音符)。
+- (void)_applyQQMusicIconTo:(UIButton *)b {
+    UIImage *icon = [UIImage imageNamed:@"QQMusicIcon"];
+    if (icon) {
+        [b setImage:icon forState:UIControlStateNormal];
+        b.tintColor = nil;
+        b.imageView.contentMode = UIViewContentModeScaleAspectFit;
+    }
 }
 
 #pragma mark - 状态刷新
 
 - (void)_refreshButtons {
     // 注意: 按钮 alpha 完全由展开/收起动画管理, 这里只更新图标与可用状态。
-    // 之前无条件写 _pauseBtn.alpha=1.0, 收起状态收到 Lua 状态通知会把按钮
-    // alpha 拉回 1.0, 导致"收起后按钮仍可见/状态错乱"。
-    // 悬浮球本体三态颜色 (照抄 AutoGo: floaticon 深灰 #333333 为停止色,
-    // 运行 systemGreenColor, 暂停 systemOrangeColor), 图标保持白色。
+    // 主按钮使用 QQ 音乐图标 (黄底绿色音符), 背景改为白色让图标更清晰。
+    // 状态通过边框颜色表示: 灰色=未运行, 绿色=运行中, 橙色=暂停
+    _mainBtn.backgroundColor = [UIColor whiteColor];
     if (_scriptRunning && _paused) {
         // 暂停: systemOrangeColor (255,149,0)
-        _mainBtn.backgroundColor = [UIColor colorWithRed:1.0 green:149.0/255.0 blue:0.0 alpha:1.0];
+        _mainBtn.layer.borderWidth = 2.0;
+        _mainBtn.layer.borderColor = [UIColor colorWithRed:1.0 green:149.0/255.0 blue:0.0 alpha:1.0].CGColor;
     } else if (_scriptRunning) {
         // 运行中: systemGreenColor (52,199,89)
-        _mainBtn.backgroundColor = [UIColor colorWithRed:52.0/255.0 green:199.0/255.0 blue:89.0/255.0 alpha:1.0];
+        _mainBtn.layer.borderWidth = 2.0;
+        _mainBtn.layer.borderColor = [UIColor colorWithRed:52.0/255.0 green:199.0/255.0 blue:89.0/255.0 alpha:1.0].CGColor;
     } else {
-        // 未运行: 深灰 #333333 (floaticon 同款)
-        _mainBtn.backgroundColor = [UIColor colorWithWhite:0.20 alpha:1.0];
+        // 未运行: 灰色边框
+        _mainBtn.layer.borderWidth = 1.5;
+        _mainBtn.layer.borderColor = [UIColor colorWithWhite:0.6 alpha:1.0].CGColor;
     }
     // 暂停/恢复: 脚本未运行时灰色禁用
     if (_scriptRunning) {

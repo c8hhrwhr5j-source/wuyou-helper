@@ -1,0 +1,23 @@
+﻿{
+  "images" : [
+    {
+      "filename" : "QQMusicIcon_1x.png",
+      "idiom" : "universal",
+      "scale" : "1x"
+    },
+    {
+      "filename" : "QQMusicIcon_2x.png",
+      "idiom" : "universal",
+      "scale" : "2x"
+    },
+    {
+      "filename" : "QQMusicIcon_3x.png",
+      "idiom" : "universal",
+      "scale" : "3x"
+    }
+  ],
+  "info" : {
+    "author" : "TrollAutoTouch",
+    "version" : 1
+  }
+}
