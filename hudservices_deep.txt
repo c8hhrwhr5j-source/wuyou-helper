@@ -1,0 +1,34 @@
+=== HUDServices Deep Analysis ===
+Total strings found: 163
+Relevant strings: 26
+
+Found API patterns (0):
+
+All relevant strings:
+  "/System/Library/Frameworks/Foundation.framework/Foundation
+"  "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+"  "/System/Library/Frameworks/UIKit.framework/UIKit
+"  "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices
+"  "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices
+"  "/System/Library/PrivateFrameworks/AppSupport.framework/AppSupport
+"  "/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices
+"  "/System/Library/PrivateFrameworks/FrontBoard.framework/FrontBoard
+"  "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices
+"  "/System/Library/PrivateFrameworks/Preferences.framework/Preferences
+"  "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices
+"  "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+"  "/usr/lib/libSystem.B.dylib
+"  "/System/Library/Frameworks/CFNetwork.framework/CFNetwork
+"  "/System/Library/Frameworks/Combine.framework/Combine
+"  "/System/Library/Frameworks/Contacts.framework/Contacts
+"  "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics
+"  "/System/Library/Frameworks/CoreImage.framework/CoreImage
+"  "/System/Library/Frameworks/CoreServices.framework/CoreServices
+"  "/System/Library/Frameworks/CoreVideo.framework/CoreVideo
+"  "/System/Library/Frameworks/IOSurface.framework/IOSurface
+"  "/System/Library/Frameworks/QuartzCore.framework/QuartzCore
+"  "/System/Library/Frameworks/SafariServices.framework/SafariServices
+"  "/System/Library/Frameworks/Security.framework/Security
+"  "/System/Library/Frameworks/WebKit.framework/WebKit
+"  "/usr/lib/swift/libswiftSwiftOnoneSupport.dylib
+"

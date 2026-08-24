@@ -1,0 +1,86 @@
+
+=== multi_account.conf ===
+1→# key -> user | value -> pwd 
+2→npc=npc.pwd
+
+=== npc.conf ===
+ 1→[common]
+ 2→server_addr=127.0.0.1:8024
+ 3→conn_type=tcp
+ 4→vkey=123
+ 5→auto_reconnection=true
+ 6→max_conn=1000
+ 7→flow_limit=1000
+ 8→rate_limit=1000
+ 9→basic_username=11
+10→basic_password=3
+11→web_username=user
+12→web_password=1234
+13→crypt=true
+14→compress=true
+15→#pprof_addr=0.0.0.0:9999
+16→disconnect_timeout=60
+17→
+18→[health_check_test1]
+19→health_check_timeout=1
+20→health_check_max_failed=3
+21→health_check_interval=1
+22→health_http_url=/
+23→health_check_type=http
+24→health_check_target=127.0.0.1:8083,127.0.0.1:8082
+25→
+26→[health_check_test2]
+27→health_check_timeout=1
+28→health_check_max_failed=3
+29→health_check_interval=1
+30→health_check_type=tcp
+31→health_check_target=127.0.0.1:8083,127.0.0.1:8082
+32→
+33→[web]
+34→host=c.o.com
+35→target_addr=127.0.0.1:8083,127.0.0.1:8082
+36→
+37→[tcp]
+38→mode=tcp
+39→target_addr=127.0.0.1:8080
+40→server_port=10000
+41→
+42→[socks5]
+43→mode=socks5
+44→server_port=19009
+45→multi_account=multi_account.conf
+46→
+47→[file]
+48→mode=file
+49→server_port=19008
+50→local_path=/Users/liuhe/Downloads
+51→strip_pre=/web/
+52→
+53→[http]
+54→mode=httpProxy
+55→server_port=19004
+56→
+57→[udp]
+58→mode=udp
+59→server_port=12253
+60→target_addr=114.114.114.114:53
+61→
+62→[ssh_secret]
+63→mode=secret
+64→password=ssh2
+65→target_addr=123.206.77.88:22
+66→
+67→[ssh_p2p]
+68→mode=p2p
+69→password=ssh3
+70→
+71→[secret_ssh]
+72→local_port=2001
+73→password=ssh2
+74→
+75→[p2p_ssh]
+76→local_port=2002
+77→password=ssh3
+78→target_addr=123.206.77.88:22
+
+Error reading C:/TrollAutoTouch/_reverse_eng/Payload/TrollAutoScript.app/PlugIns/TASWidgetExtension.appex/TASWidgetHelper.dylib: undefined

@@ -1,0 +1,19 @@
+
+
+=== wudiKeyBoard Strings ===
+Total strings: 62
+Filtered strings:
+  "/System/Library/Frameworks/Foundation.framework/Foundation
+  "/usr/lib/libSystem.B.dylib
+  "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+  "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics
+  "/System/Library/Frameworks/UIKit.framework/UIKit
+Keyboard uses Objective-C runtime
+Keyboard uses Foundation
+
+
+=== Main Executable Analysis ===
+Main uses Swift
+Main uses Objective-C runtime
+
+Total strings in main: 134

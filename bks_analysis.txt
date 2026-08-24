@@ -1,0 +1,23 @@
+=== HUDServices: BKS/BackBoard/HID Related Strings ===
+Total strings: 163
+Found relevant: 4
+
+  "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices
+  "/System/Library/PrivateFrameworks/FrontBoard.framework/FrontBoard
+  "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices
+  "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices
+
+
+=== Framework/Library References ===
+  "/System/Library/Frameworks/Foundation.framework/Foundation
+  "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+  "/System/Library/Frameworks/UIKit.framework/UIKit
+  "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices
+  "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices
+  "/System/Library/PrivateFrameworks/FrontBoard.framework/FrontBoard
+  "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices
+  "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices
+  "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+  "/usr/lib/swift/libswiftCoreFoundation.dylib
+  "/usr/lib/swift/libswiftSwiftOnoneSupport.dylib
+  "/usr/lib/swift/libswiftFoundation.dylib

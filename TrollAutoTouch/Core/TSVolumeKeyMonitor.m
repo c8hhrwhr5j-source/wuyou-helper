@@ -580,6 +580,10 @@ static void TSVolumeKeyHIDCallback(void *target, void *refcon,
 
 // 音量贴边界 (0 或 1) 时主动回弹, 保证按键可检测。幂等: 不在边界直接返回。
 - (void)_bounceIfAtBoundary:(float)current {
+    // ⚠️ 临时禁用回弹 - 测试 BKS 硬件事件通道能否在音量为 0 时直接检测按键
+    // TODO: 确认 BKS 通道工作正常后恢复此功能
+    return;
+
     if (!_avSystemController) return;
     if (current <= 0.001f) {
         [self _setMediaVolumeAndSync:0.05f];
