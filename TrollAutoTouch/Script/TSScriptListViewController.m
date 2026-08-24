@@ -117,12 +117,26 @@
 
     NSArray *all = [[TSToolExecutor shared] listDirectory:[TSPaths luaDir]];
     NSPredicate *pred = [NSPredicate predicateWithBlock:^BOOL(TSFileEntry *e, NSDictionary *b) {
-        if (e.isDirectory) return NO;
+        // 显示 .lua/.tas 文件 以及 包含 .lua 文件的文件夹
+        if (e.isDirectory) {
+            // 检查文件夹中是否有 .lua 文件
+            NSArray *subContents = [[TSToolExecutor shared] listDirectory:e.path];
+            for (TSFileEntry *sub in subContents) {
+                if (!sub.isDirectory &&
+                    [sub.name.pathExtension.lowercaseString isEqualToString:@"lua"]) {
+                    return YES;
+                }
+            }
+            return NO; // 空文件夹不显示
+        }
         NSString *ext = [e.name.pathExtension lowercaseString];
         return [ext isEqualToString:@"lua"] || [ext isEqualToString:@"tas"];
     }];
     _scripts = [[all filteredArrayUsingPredicate:pred]
                 sortedArrayUsingComparator:^NSComparisonResult(TSFileEntry *a, TSFileEntry *b) {
+        // 文件夹排在文件前面
+        if (a.isDirectory && !b.isDirectory) return NSOrderedAscending;
+        if (!a.isDirectory && b.isDirectory) return NSOrderedDescending;
         return [b.modificationDate compare:a.modificationDate];
     }];
     [_tableView reloadData];
@@ -166,6 +180,13 @@
 }
 
 - (void)_runScript:(TSFileEntry *)e {
+    // 文件夹 → 作为项目运行
+    if (e.isDirectory) {
+        [[TSLuaBridge shared] runProject:e.path];
+        [TSScriptListViewController setSelectedScriptName:e.name];
+        return;
+    }
+
     NSString *content = [[TSToolExecutor shared] readTextFile:e.path];
     if (!content) {
         [self _alert:@"读取失败" msg:@"无法打开脚本文件"];
@@ -272,18 +293,28 @@
     cell.textLabel.text = e.name;
     cell.textLabel.textColor = [TSColors label];
 
-    BOOL isTAS = [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
+    BOOL isDir = e.isDirectory;
+    BOOL isTAS = !isDir && [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     df.dateFormat = @"yyyy-MM-dd HH:mm";
     NSString *dateStr = e.modificationDate ? [df stringFromDate:e.modificationDate] : @"";
+    NSString *typeLabel = isDir ? @"📁 项目" : (isTAS ? @"已加密" : @"");
     cell.detailTextLabel.text = [NSString stringWithFormat:@"%@%@  |  %lld B",
-                                 isTAS ? @"已加密 | " : @"", dateStr, e.size];
+                                 typeLabel.length ? [typeLabel stringByAppendingString:@" | "] : @"",
+                                 dateStr, e.size];
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 
     // 选中脚本显示打勾图标 + 淡色高亮背景 (音量键快速运行的对象); .tas 加密脚本用锁图标
     BOOL isSelected = [[TSScriptListViewController selectedScriptName] isEqualToString:e.name];
     if (@available(iOS 13.0, *)) {
-        NSString *icon = isSelected ? @"checkmark.circle.fill" : (isTAS ? @"lock.doc" : @"doc.text");
+        NSString *icon;
+        if (isDir) {
+            icon = isSelected ? @"folder.fill.badge.checkmark" : @"folder";
+        } else if (isTAS) {
+            icon = isSelected ? @"checkmark.circle.fill" : @"lock.doc";
+        } else {
+            icon = isSelected ? @"checkmark.circle.fill" : @"doc.text";
+        }
         cell.imageView.image = [UIImage systemImageNamed:icon];
     }
     if (isSelected) {
@@ -318,11 +349,25 @@
     // 点击即设为选中 (持久化, 供音量键快速运行), 刷新勾选显示
     [TSScriptListViewController setSelectedScriptName:e.name];
     [_tableView reloadData];
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:e.name
-                                                                   message:[NSString stringWithFormat:@"%@\n%lld B", e.modificationDate ?: @"", e.size]
+
+    BOOL isDir = e.isDirectory;
+    NSString *title = isDir ? [NSString stringWithFormat:@"📁 %@", e.name] : e.name;
+    NSString *typeLabel = isDir ? @"项目目录" : @"";
+    NSString *msg = [NSString stringWithFormat:@"%@\n%@\n%lld B",
+                     typeLabel.length ? typeLabel : @"",
+                     e.modificationDate ?: @"", e.size];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:title
+                                                                   message:msg
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     TSLuaBridge *lua = [TSLuaBridge shared];
-    BOOL isThisRunning = lua.isRunning && [lua.runningPath.lastPathComponent isEqualToString:e.name];
+    BOOL isThisRunning = NO;
+    if (isDir) {
+        isThisRunning = lua.isRunning && [lua.runningPath hasPrefix:e.path];
+    } else {
+        isThisRunning = lua.isRunning && [lua.runningPath.lastPathComponent isEqualToString:e.name];
+    }
+
     if (isThisRunning) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"■ 停止" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
             [lua stop];
@@ -332,15 +377,19 @@
             [self _runScript:e];
         }]];
     }
-    BOOL isTAS = [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
-    if (!isTAS) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"✎ 编辑" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self _editScript:e];
-        }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"🔒 加密" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [self _encryptScript:e];
-        }]];
+
+    if (!isDir) {
+        BOOL isTAS = [e.path.pathExtension.lowercaseString isEqualToString:@"tas"];
+        if (!isTAS) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"✎ 编辑" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                [self _editScript:e];
+            }]];
+            [sheet addAction:[UIAlertAction actionWithTitle:@"🔒 加密" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                [self _encryptScript:e];
+            }]];
+        }
     }
+
     [sheet addAction:[UIAlertAction actionWithTitle:@"✏️ 重命名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         [self _renameScript:e];
     }]];

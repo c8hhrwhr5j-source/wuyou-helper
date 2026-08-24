@@ -1563,6 +1563,17 @@ static int l_file_readImage(lua_State *L) {
     return 2;
 }
 
+// 返回当前脚本/项目所在目录 (通过读取 _SCRIPT_DIR_ 全局变量)
+static int l_file_scriptDir(lua_State *L) {
+    lua_getglobal(L, "_SCRIPT_DIR_");
+    if (lua_isstring(L, -1)) {
+        return 1;
+    }
+    lua_pop(L, 1);
+    lua_pushstring(L, [TSPaths luaDir].UTF8String);
+    return 1;
+}
+
 #pragma mark - 剪贴板
 
 static int l_pasteboard_get(lua_State *L) {
@@ -1892,6 +1903,7 @@ static void lua_register_all(lua_State *L) {
         {"luaDir",   l_file_luaDir},    // /var/mobile/touch/lua  (脚本)
         {"logDir",   l_file_logDir},    // /var/mobile/touch/log  (日志)
         {"resDir",   l_file_resDir},    // /var/mobile/touch/res  (资源)
+        {"scriptDir", l_file_scriptDir}, // 当前脚本/项目所在目录
         {"readImage",    l_file_readImage},
         {NULL, NULL}
     };
@@ -1969,6 +1981,64 @@ static void lua_register_all(lua_State *L) {
         }
         [self _execute:code filePath:path];
     });
+}
+
+- (void)runProject:(NSString *)dirPath {
+    dispatch_async(_luaQueue, ^{
+        if ([[TSTrialManager shared] isExpired]) {
+            lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
+            return;
+        }
+
+        // 查找入口文件
+        NSString *entryFile = [self _findEntryPointInDirectory:dirPath];
+        if (!entryFile) {
+            lua_log([NSString stringWithFormat:@"[Lua] 项目目录 %@ 中未找到 .lua 文件", dirPath]);
+            return;
+        }
+
+        // 读取入口文件
+        NSError *err = nil;
+        NSString *code = [NSString stringWithContentsOfFile:entryFile encoding:NSUTF8StringEncoding error:&err];
+        if (err || !code) {
+            lua_log([NSString stringWithFormat:@"[Lua] 读取项目入口文件失败: %@", entryFile]);
+            return;
+        }
+
+        lua_log([NSString stringWithFormat:@"[Lua] 运行项目: %@ (入口: %@)",
+                 dirPath.lastPathComponent, entryFile.lastPathComponent]);
+
+        // 执行, 传入项目目录作为第二个参数
+        [self _executeProject:code entryFile:entryFile projectDir:dirPath];
+    });
+}
+
+// 在目录中查找 Lua 入口文件
+- (NSString *)_findEntryPointInDirectory:(NSString *)dirPath {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:dirPath isDirectory:&isDir] || !isDir) return nil;
+
+    NSArray *contents = [fm contentsOfDirectoryAtPath:dirPath error:nil];
+    if (!contents) return nil;
+
+    // 按优先级查找入口文件
+    NSArray *preferred = @[@"main.lua", @"init.lua", @"index.lua", @"app.lua"];
+    for (NSString *name in preferred) {
+        NSString *fullPath = [dirPath stringByAppendingPathComponent:name];
+        if ([fm fileExistsAtPath:fullPath]) return fullPath;
+    }
+
+    // 没有首选入口 → 找第一个 .lua 文件
+    NSPredicate *luaPred = [NSPredicate predicateWithBlock:^BOOL(NSString *name, NSDictionary *b) {
+        return name.pathExtension.lowercaseString isEqualToString:@"lua"];
+    }];
+    NSArray *luaFiles = [[contents filteredArrayUsingPredicate:luaPred] sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)];
+    if (luaFiles.count > 0) {
+        return [dirPath stringByAppendingPathComponent:luaFiles[0]];
+    }
+
+    return nil;
 }
 
 - (void)stop {
@@ -2172,6 +2242,117 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     lua_log(@"[Lua] 脚本执行结束");
 }
 
+// ═══════════ 项目执行 (文件夹) ═══════════
+// 与 _execute:filePath: 类似, 但额外设置:
+//   - _SCRIPT_DIR_ 全局变量 (项目目录)
+//   - _PROJECT_DIR_ 全局变量 (项目目录, 同义)
+//   - Lua package.path 包含项目目录 (支持 require())
+//   - 自定义 dofile/loadfile 可解析相对路径
+- (void)_executeProject:(NSString *)code entryFile:(NSString *)entryFile projectDir:(NSString *)projectDir {
+    _stopRequested = NO;
+    _pauseRequested = NO;
+    self.isPaused = NO;
+    self.runningPath = entryFile;
+    self.isRunning = YES;
+
+    // 预热 HUD + 保活 (与 _execute 相同)
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        [[TSHUDService sharedInstance] warmUp];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+            lua_log([NSString stringWithFormat:@"[HUD] %@",
+                     [[TSHUDHost shared] registrationStatusDescription]]);
+        });
+    });
+    [[TSAudioKeepAlive shared] start];
+
+    lua_State *L = luaL_newstate();
+    if (!L) {
+        lua_log(@"[Lua] 创建 Lua 状态失败");
+        self.runningPath = nil;
+        self.isRunning = NO;
+        return;
+    }
+    luaL_openlibs(L);
+    lua_register_all(L);
+
+    // 设置路径全局变量
+    lua_pushstring(L, entryFile.UTF8String);
+    lua_setglobal(L, "_SCRIPT_PATH_");
+    lua_pushstring(L, projectDir.UTF8String);
+    lua_setglobal(L, "_SCRIPT_DIR_");
+    lua_pushstring(L, projectDir.UTF8String);
+    lua_setglobal(L, "_PROJECT_DIR_");
+
+    // 配置 Lua package.path 包含项目目录 (支持 require())
+    // 将项目目录添加到 package.path, 这样 require('module') 会在项目目录中查找
+    NSString *packagePath = [NSString stringWithFormat:@"%@/?.lua;%@/?/init.lua;%@",
+                              projectDir, projectDir,
+                              projectDir.stringByDeletingLastPathComponent];
+    lua_getglobal(L, "package");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "path");
+        if (lua_isstring(L, -1)) {
+            const char *oldPath = lua_tostring(L, -1);
+            NSString *newPath = [NSString stringWithFormat:@"%@;%s", packagePath, oldPath];
+            lua_pop(L, 1);
+            lua_pushstring(L, newPath.UTF8String);
+            lua_setfield(L, -2, "path");
+        } else {
+            lua_pop(L, 1);
+            lua_pushstring(L, packagePath.UTF8String);
+            lua_setfield(L, -2, "path");
+        }
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    // 设置 settings (项目级)
+    [self _injectSettingsTable:L scriptPath:projectDir];
+
+    // 执行脚本
+    const char *utf8Code = code.UTF8String;
+    int ret = luaL_loadbuffer(L, utf8Code, strlen(utf8Code),
+                              entryFile.lastPathComponent.UTF8String);
+    if (ret != LUA_OK) {
+        size_t errLen = 0;
+        const char *errMsg = lua_tolstring(L, -1, &errLen);
+        lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %@", luaToNSString(errMsg, errLen)]);
+        lua_close(L);
+        self.runningPath = nil;
+        self.isRunning = NO;
+        return;
+    }
+
+    lua_sethook(L, luaStopHook, LUA_MASKCOUNT, 5000);
+
+    int pcallRet = lua_pcall(L, 0, 0, 0);
+    if (pcallRet != LUA_OK) {
+        size_t errLen = 0;
+        const char *err = lua_tolstring(L, -1, &errLen);
+        lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %@", luaToNSString(err, errLen)]);
+        lua_pop(L, 1);
+    }
+    lua_close(L);
+
+    [[TSHIDEventTouch shared] releaseAllTouches];
+
+    _stopRequested = NO;
+    _pauseRequested = NO;
+    self.isPaused = NO;
+    self.runningPath = nil;
+    self.isRunning = NO;
+    [[TSAudioKeepAlive shared] stop];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.volumeMenuAlert) {
+            [self.volumeMenuAlert dismissViewControllerAnimated:NO completion:nil];
+            self.volumeMenuAlert = nil;
+        }
+    });
+    lua_log(@"[Lua] 项目执行结束");
+}
+
 // 音量键被按下 (TSVolumeKeyMonitor 监听回调, 任意线程 → 转主线程):
 //   空闲未运行 → 弹"运行脚本/取消"选择(运行当前选中脚本);
 //   脚本运行中 → App 前台弹选择菜单; App 后台(游戏等)走 HUD 系统级弹窗
@@ -2252,37 +2433,46 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
         return;
     }
     NSString *path = [TSPaths pathForLua:name];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             s_idleMenuShowing = NO;
             g_lastVolumeKeyAt = 0;
-            [[TSHUDHost shared] showToast:@"所选脚本已不存在" duration:1.2 hidden:NO];
+            [[TSHUDHost shared] showToast:@"所选脚本/项目已不存在" duration:1.2 hidden:NO];
         });
-        lua_log(@"[音量键] 空闲: 选中脚本不存在, 忽略");
+        lua_log(@"[音量键] 空闲: 选中项不存在, 忽略");
         return;
     }
 
-    lua_log([NSString stringWithFormat:@"[音量键] 空闲: 询问是否运行「%@」", name]);
+    NSString *typeLabel = isDir ? @"项目" : @"脚本";
+    lua_log([NSString stringWithFormat:@"[音量键] 空闲: 询问是否运行「%@」(%@)", name, typeLabel]);
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程
         NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
-                                                                     message:[NSString stringWithFormat:@"运行脚本「%@」？", name]
+                                                                     message:[NSString stringWithFormat:@"运行%@「%@」？", typeLabel, name]
                                                                      buttons:@[@"运行", @"取消"]
                                                                      timeout:0];
         dispatch_async(dispatch_get_main_queue(), ^{
             s_idleMenuShowing = NO;
             g_lastVolumeKeyAt = 0; // 弹窗关闭后立即允许再次按键触发
             if ([clicked isEqualToString:@"运行"]) {
-                NSString *content = [[TSToolExecutor shared] readTextFile:path];
-                if ([TSScriptCipher isEncryptedContent:content]) {
-                    content = [TSScriptCipher decryptScript:content];
-                }
-                if (content.length) {
-                    [[NSNotificationCenter defaultCenter] postNotificationName:@"TSRunScript"
-                                                                        object:nil
-                                                                      userInfo:@{@"path": path, @"content": content}];
+                if (isDir) {
+                    // 文件夹 → 作为项目运行
+                    [[TSLuaBridge shared] runProject:path];
                 } else {
-                    lua_log([NSString stringWithFormat:@"[音量键] 读取脚本失败: %@", path]);
+                    // 文件 → 读取内容后运行
+                    NSString *content = [[TSToolExecutor shared] readTextFile:path];
+                    if ([TSScriptCipher isEncryptedContent:content]) {
+                        content = [TSScriptCipher decryptScript:content];
+                    }
+                    if (content.length) {
+                        [[NSNotificationCenter defaultCenter] postNotificationName:@"TSRunScript"
+                                                                            object:nil
+                                                                          userInfo:@{@"path": path, @"content": content}];
+                    } else {
+                        lua_log([NSString stringWithFormat:@"[音量键] 读取脚本失败: %@", path]);
+                    }
                 }
             }
             // "取消" 或 HUD 不可用(返回 nil): 什么都不做

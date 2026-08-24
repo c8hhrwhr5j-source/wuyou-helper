@@ -48,6 +48,11 @@ FOUNDATION_EXPORT NSNotificationName const TSLuaRunningStateChangedNotification;
 /// 在后台线程执行 Lua 代码字符串
 - (void)runString:(NSString *)code;
 
+/// 在后台线程执行 Lua 项目 (文件夹)
+/// 自动查找入口文件 (main.lua > init.lua > 第一个 .lua 文件)
+/// 设置 _SCRIPT_DIR_ 为项目目录，配置 package.path 支持 require()
+- (void)runProject:(NSString *)dirPath;
+
 /// 请求停止当前脚本(脚本下一次调用 mSleep/sleep 时抛出错误中断)
 - (void)stop;
 

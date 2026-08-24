@@ -93,16 +93,27 @@
                 break;
             }
             case TSHUDActionToggleScript: {
-                // 启动/停止当前选中的 Lua 脚本
+                // 启动/停止当前选中的 Lua 脚本或项目
                 if (lua.isRunning) {
                     [lua stop];
                 } else {
                     NSString *name = [TSScriptListViewController selectedScriptName];
                     NSString *path = [TSPaths pathForLua:name];
-                    if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                    NSFileManager *fm = [NSFileManager defaultManager];
+                    BOOL isDir = NO;
+                    if (path && [fm fileExistsAtPath:path isDirectory:&isDir] && isDir) {
+                        // 选中的是文件夹 → 作为项目运行
+                        [lua runProject:path];
+                    } else if (path && [fm fileExistsAtPath:path]) {
+                        // 选中的是文件 → 直接运行
+                        [lua runFile:path];
+                    } else {
+                        // 未找到 → 尝试 main.lua
                         path = [TSPaths pathForLua:@"main.lua"];
+                        if (path && [fm fileExistsAtPath:path]) {
+                            [lua runFile:path];
+                        }
                     }
-                    if (path) [lua runFile:path];
                 }
                 break;
             }
@@ -118,7 +129,13 @@
 - (void)_handleRunScriptNotification:(NSNotification *)note {
     NSString *path = note.userInfo[@"path"];
     if (!path.length) return;
-    [[TSLuaBridge shared] runFile:path];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if ([fm fileExistsAtPath:path isDirectory:&isDir] && isDir) {
+        [[TSLuaBridge shared] runProject:path];
+    } else {
+        [[TSLuaBridge shared] runFile:path];
+    }
 }
 
 - (void)_handleLuaStateNotification:(NSNotification *)note {
