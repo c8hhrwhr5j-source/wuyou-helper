@@ -79,6 +79,7 @@ enum {
 
 @implementation TSVolumeKeyMonitor {
     dispatch_source_t _timer;
+    dispatch_source_t _watchdogTimer;  // 看门狗: 持续维持最小音量级别
     float _lastVolume;
     BOOL _running;
     double _warmupUntil;
@@ -154,6 +155,27 @@ enum {
     // 通道④⑤ 兜底
     [self _installNotificationListener];
     [self _installPollFallback];
+
+    // ═══════════════════════════════════════════════════════════
+    // 看门狗定时器: 持续维持最小音量级别 (0.05)
+    // 当音量为 0 时, 自动弹回 0.05, 确保下一次物理按键产生可检测的音量变化。
+    // 这是"空音量检测"的关键: 系统音量永远不会停留在 0,
+    // 每次按音量键都会产生 0.05↔0 的变化, 被 KVO 捕获。
+    // ═══════════════════════════════════════════════════════════
+    _watchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0));
+    if (_watchdogTimer) {
+        dispatch_source_set_timer(_watchdogTimer,
+            DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+        __weak typeof(self) weakSelf = self;
+        dispatch_source_set_event_handler(_watchdogTimer, ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf->_running) return;
+            [strongSelf _volumeWatchdog];
+        });
+        dispatch_resume(_watchdogTimer);
+        NSLog(@"[TSVolumeKeyMonitor] 看门狗定时器已启动 (300ms 间隔)");
+    }
 }
 
 - (void)stop {
@@ -186,9 +208,15 @@ enum {
 
     // 清理 CPDM (SpringBoard 硬件按键)
     if (_messagingCenter) {
-        SEL sel = NSSelectorFromString(@"unregisterMessageName:target:");
-        if ([_messagingCenter respondsToSelector:sel]) {
-            ((void (*)(id, SEL, id, id))objc_msgSend)(_messagingCenter, sel,
+        // 取消 delegate
+        SEL setDelSel = NSSelectorFromString(@"setDelegate:");
+        if ([_messagingCenter respondsToSelector:setDelSel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(_messagingCenter, setDelSel, nil);
+        }
+        // 取消消息注册
+        SEL unregSel = NSSelectorFromString(@"unregisterMessageName:target:");
+        if ([_messagingCenter respondsToSelector:unregSel]) {
+            ((void (*)(id, SEL, id, id))objc_msgSend)(_messagingCenter, unregSel,
                 kHardwareButtonMessageName, self);
         }
         _messagingCenter = nil;
@@ -207,6 +235,10 @@ enum {
     if (_timer) {
         dispatch_source_cancel(_timer);
         _timer = nil;
+    }
+    if (_watchdogTimer) {
+        dispatch_source_cancel(_watchdogTimer);
+        _watchdogTimer = nil;
     }
 }
 
@@ -438,6 +470,22 @@ enum {
     }
     _messagingCenter = center;
 
+    // ⚠️ 关键: 设置 delegate, SpringBoard 才会通过 handleMessageNamed:withUserInfo: 回调
+    SEL setDelSel = NSSelectorFromString(@"setDelegate:");
+    if ([center respondsToSelector:setDelSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(center, setDelSel, self);
+        NSLog(@"[TSVolumeKeyMonitor] 已设置 CPDMC delegate");
+    }
+
+    // 也尝试 registerForMessageName:target:selector: 方式 (双重保险)
+    SEL regMsgSel = NSSelectorFromString(@"registerForMessageName:target:selector:");
+    if ([center respondsToSelector:regMsgSel]) {
+        ((void (*)(id, SEL, id, id, SEL))objc_msgSend)(center,
+            regMsgSel, kHardwareButtonMessageName, self,
+            @selector(handleMessageNamed:withUserInfo:));
+        NSLog(@"[TSVolumeKeyMonitor] 已注册 CPDMC 消息监听 (registerForMessageName)");
+    }
+
     // 发送订阅请求: SpringBoard 收到后向本进程推送硬件按键事件 (同步等 reply)。
     // 消息名 = 硬件按键服务名 (TrollAutoScript 从自身 embedded entitlements 读取,
     // 我们直接硬编码同名)。userInfo 空即可, 订阅由 mach 服务端按消息名匹配。
@@ -453,10 +501,31 @@ enum {
 }
 
 // 接收 SpringBoard 推送的回调, 方法名必须精确匹配 handleMessageNamed:withUserInfo:。
-// userInfo 字段未公开文档, 只关心"是否物理按键"——任何事件都触发弹窗。
+// userInfo 字段未公开文档, 尝试从字典中提取按键方向信息。
 - (NSDictionary *)handleMessageNamed:(NSString *)name withUserInfo:(NSDictionary *)userInfo {
-    NSLog(@"[TSVolumeKeyMonitor] mach 硬件按键事件: %@ %@", name, userInfo ?: @"");
-    [self _onKeyDetectedWithUp:YES];
+    NSLog(@"[TSVolumeKeyMonitor] CPDMC 硬件按键事件: %@ userInfo=%@", name, userInfo ?: @"");
+    
+    // 尝试判断按键方向
+    BOOL isUp = YES; // 默认上
+    if (userInfo) {
+        // 常见字段名尝试
+        NSString *eventType = userInfo[@"eventType"] ?: userInfo[@"type"] ?: userInfo[@"event"] ?: @"";
+        if ([eventType containsString:@"Down"] || [eventType containsString:@"down"] ||
+            [eventType containsString:@"VolumeDown"]) {
+            isUp = NO;
+        } else if ([eventType containsString:@"Up"] || [eventType containsString:@"up"]) {
+            isUp = YES;
+        }
+        // 也可能是数值编码
+        NSNumber *direction = userInfo[@"direction"] ?: userInfo[@"buttonDirection"];
+        if (direction) {
+            isUp = [direction boolValue]; // 1=up, 0=down 或相反
+        }
+    }
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self _onKeyDetectedWithUp:isUp];
+    });
     return nil;
 }
 
@@ -578,12 +647,24 @@ static void TSVolumeKeyHIDCallback(void *target, void *refcon,
     [self _bounceIfAtBoundary:newVol];
 }
 
+// 看门狗: 持续维持最小音量级别 (0.05)
+// 当音量为 0 时, 自动弹回 0.05, 确保下一次物理按键产生 0.05→0 的变化被 KVO 捕获。
+// ⚠️ 这是检测"空音量物理按键"的核心机制: 系统永远不会停在 0 音量。
+- (void)_volumeWatchdog {
+    float vol = [self _currentVolume];
+    if (vol <= 0.001f) {
+        // 音量为 0, 悄悄拉到 0.05
+        // 使用 AVSystemController 私有 API 设置 (不经过系统音量 UI)
+        [self _setMediaVolumeAndSync:0.05f];
+        NSLog(@"[TSVolumeKeyMonitor] 看门狗: 音量为0 → 弹回 0.05");
+    } else if (vol >= 0.99f) {
+        // 音量满格, 悄悄拉到 0.95 (对称处理)
+        [self _setMediaVolumeAndSync:0.95f];
+    }
+}
+
 // 音量贴边界 (0 或 1) 时主动回弹, 保证按键可检测。幂等: 不在边界直接返回。
 - (void)_bounceIfAtBoundary:(float)current {
-    // ⚠️ 临时禁用回弹 - 测试 BKS 硬件事件通道能否在音量为 0 时直接检测按键
-    // TODO: 确认 BKS 通道工作正常后恢复此功能
-    return;
-
     if (!_avSystemController) return;
     if (current <= 0.001f) {
         [self _setMediaVolumeAndSync:0.05f];
