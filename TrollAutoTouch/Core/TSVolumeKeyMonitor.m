@@ -2,19 +2,17 @@
 //  TSVolumeKeyMonitor.m
 //  TrollAutoTouch
 //
-//  App 进程内音量键识别 (TrollAutoScript 同款方案):
-//    主通道① CPDistributedMessagingCenter.framework (系统私有框架, 运行时 dlopen):
-//      连接 SpringBoard 的硬件按键服务 (com.apple.springboard), 注册
-//      com.apple.springboard.hardware-button-service.event-consumption 消息,
-//      发送订阅请求激活, SpringBoard 把"物理按键事件"推送到本进程 ——
-//      与系统音量值是否变化完全解耦, 音量到 0/满格时按对应键照收。
-//    主通道② IOHIDEventSystemClient (IOKit 私有 API, 运行时 dlopen):
-//      直接订阅系统 HID 事件, 从物理层面拿音量键, 不依赖 SpringBoard 派发。
-//    兜底通道  AVSystemController 通知 + 200ms 轮询。
-//
-//  entitlement 已在 TrollAutoTouch.entitlements 声明 (platform-application /
-//  com.apple.springboard.hardware-button-service.event-consumption /
-//  com.apple.private.hid.client.event-monitor / iokit-user-client-class)。
+//  App 进程内音量键识别 (iOS 15 物理按键感知版):
+//    ⚠ iOS 15.5+/TrollStore(CoreTrust 2) 拿不到 platform 身份, 以下两条
+//      "原始按键事件"通道在 iOS 15.8.4 上实测不可行 (保留但不依赖):
+//      ① CPDistributedMessagingCenter 连接 SpringBoard 硬件按键服务
+//         (非 platform 进程 mach lookup 被拒, SpringBoard 端不信任);
+//      ② IOHIDEventSystemClient 全局 HID 事件 (需 platform + event-dispatch)。
+//    实际有效方案 (不依赖 platform):
+//      KVO 监听 AVAudioSession.outputVolume (iOS 15 公开可靠信号) 为主通道;
+//      音量贴 0/1 边界时用 Celestial AVSystemController setVolumeTo:forCategory:
+//      悄悄拉回 0.05/0.95 —— 此后空音量按音量- 也产生真实音量变化 (0.05→0),
+//      持续触发回调。200ms 轮询 + AVSystemController 私有通知为兜底。
 
 #import "TSVolumeKeyMonitor.h"
 #import <AVFoundation/AVFoundation.h>
@@ -113,6 +111,11 @@ enum {
     } else {
         [session setActive:YES error:NULL];
     }
+    // iOS 15 起 AVSystemController 私有通知停发, KVO 是唯一可靠变化信号
+    [session addObserver:self
+              forKeyPath:@"outputVolume"
+                 options:NSKeyValueObservingOptionNew
+                 context:NULL];
 
     _lastVolume = [self _currentVolume];
     _warmupUntil = CACurrentMediaTime() + TSVolumeWarmupDuration;
@@ -127,6 +130,11 @@ enum {
 - (void)stop {
     if (!_running) return;
     _running = NO;
+    @try {
+        [[AVAudioSession sharedInstance] removeObserver:self
+                                             forKeyPath:@"outputVolume"
+                                                context:NULL];
+    } @catch (NSException *exception) { /* 未注册过 KVO 则忽略 */ }
     [[NSNotificationCenter defaultCenter] removeObserver:self
                                                     name:kAVVolumeChangedNotification
                                                   object:nil];
@@ -264,6 +272,11 @@ static void TSVolumeKeyHIDCallback(void *target, void *refcon,
 // ═══════════ 兜底通道①: AVSystemController 通知 ═══════════
 - (void)_installNotificationListener {
     Class cls = NSClassFromString(@"AVSystemController");
+    if (!cls) {
+        // Celestial 私有框架通常已被 UIKit 隐式加载; 未加载时主动 dlopen
+        dlopen("/System/Library/PrivateFrameworks/Celestial.framework/Celestial", RTLD_NOW);
+        cls = NSClassFromString(@"AVSystemController");
+    }
     if (cls && [cls respondsToSelector:@selector(sharedAVSystemController)]) {
         _avSystemController = ((id (*)(id, SEL))objc_msgSend)(cls,
             NSSelectorFromString(@"sharedAVSystemController"));
@@ -284,17 +297,70 @@ static void TSVolumeKeyHIDCallback(void *target, void *refcon,
     if ([ui[kAVUserVolumeParamKey] isKindOfClass:NSNumber.class]) {
         newVol = [ui[kAVUserVolumeParamKey] floatValue];
     }
-    NSString *reason = ui[kAVChangeReasonKey];
-    BOOL isButton = (reason.length &&
-                     [reason rangeOfString:@"button" options:NSCaseInsensitiveSearch].location != NSNotFound);
+    [self _onVolumeValueChangedTo:newVol];
+}
+
+// ═══════════ 统一音量变化处理 + 边界回弹 (iOS 15 空音量检测核心) ═══════════
+// KVO 回调 (公开 API, iOS 15 唯一可靠变化信号; 线程不定, 内部有锁)
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object
+                        change:(NSDictionary *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"outputVolume"]) {
+        NSNumber *v = change[NSKeyValueChangeNewKey];
+        if ([v isKindOfClass:NSNumber.class]) {
+            [self _onVolumeValueChangedTo:v.floatValue];
+        }
+    }
+}
+
+// 音量值变化统一入口 (KVO / 私有通知 / 轮询共用)。
+// 关键: 音量到 0 后系统不再改变音量, 任何通道都收不到"按键"。
+// 因此检测到边界时主动把音量拉回活跃区 (0.05/0.95), 使后续物理按键
+// 每次都产生真实音量变化 (0.05→0), 空音量按音量- 也持续触发回调。
+- (void)_onVolumeValueChangedTo:(float)newVol {
     os_unfair_lock_lock(&_lock);
     BOOL volumeMoved = (fabsf(newVol - _lastVolume) >= 0.001f);
     BOOL up = (newVol > _lastVolume + 0.0005f);
-    _lastVolume = newVol;
+    if (volumeMoved) _lastVolume = newVol;
     os_unfair_lock_unlock(&_lock);
-    if (isButton || volumeMoved) {
+    if (volumeMoved) {
         [self _onKeyDetectedWithUp:up];
     }
+    [self _bounceIfAtBoundary:newVol];
+}
+
+// 音量贴边界 (0 或 1) 时主动回弹, 保证按键可检测。幂等: 不在边界直接返回。
+- (void)_bounceIfAtBoundary:(float)current {
+    if (!_avSystemController) return;
+    if (current <= 0.001f) {
+        [self _setMediaVolumeAndSync:0.05f];
+    } else if (current >= 0.99f) {
+        [self _setMediaVolumeAndSync:0.95f];
+    }
+}
+
+// 私有 API 设置媒体音量 (Celestial AVSystemController, 运行时调用)。
+// category 依次尝试 Audio/Video → MediaPlayback, 以第一个返回 YES 的为准。
+- (BOOL)_setMediaVolume:(float)vol {
+    if (!_avSystemController) return NO;
+    SEL sel = NSSelectorFromString(@"setVolumeTo:forCategory:");
+    if (![_avSystemController respondsToSelector:sel]) return NO;
+    for (NSString *cat in @[@"Audio/Video", @"MediaPlayback"]) {
+        BOOL ok = ((BOOL (*)(id, SEL, float, id))objc_msgSend)(_avSystemController, sel, vol, cat);
+        if (ok) return YES;
+    }
+    return NO;
+}
+
+// 立即同步内部基线 + 主线程执行设置。
+// 先同步基线: 使"回弹产生的音量变化 (0→0.05)"在 KVO/轮询中判定为 moved=NO,
+// 不误触发按键回调。
+- (void)_setMediaVolumeAndSync:(float)target {
+    os_unfair_lock_lock(&_lock);
+    _lastVolume = target;
+    os_unfair_lock_unlock(&_lock);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self _setMediaVolume:target];
+    });
 }
 
 // ═══════════ 兜底通道②: 200ms 轮询 ═══════════
@@ -315,14 +381,7 @@ static void TSVolumeKeyHIDCallback(void *target, void *refcon,
 - (void)_poll {
     if (!_running) return;
     float vol = [self _currentVolume];
-    os_unfair_lock_lock(&_lock);
-    BOOL moved = (fabsf(vol - _lastVolume) >= 0.001f);
-    BOOL up = (vol > _lastVolume + 0.0005f);
-    _lastVolume = vol;
-    os_unfair_lock_unlock(&_lock);
-    if (moved) {
-        [self _onKeyDetectedWithUp:up];
-    }
+    [self _onVolumeValueChangedTo:vol];
 }
 
 // 统一入口: 启动校准 + 多通道去重 + 回调

@@ -2,15 +2,15 @@
 //  TSVolumeKeyMonitor.h
 //  TrollAutoTouch
 //
-//  App 进程内音量键识别 (物理按键感知版):
-//    双通道检测 ——
-//    ① 私有通知 AVSystemController_VolumeChangedNotification (主通道):
-//       iOS 音量键是"物理按键事件"广播, 与当前音量值是否变化无关。
-//       因此音量已到 0 / 静音时按音量- 依然能收到事件, 与 TrollAutoScript 行为一致。
-//    ② 200ms 轮询 AVAudioSession.outputVolume (兜底通道, 公开 API):
-//       通知通道被系统屏蔽/未生效时的降级, 音量值变化即判定按键。
+//  App 进程内音量键识别 (iOS 15 物理按键感知版):
+//    iOS 15 起 AVSystemController 私有通知停发, 主通道改为 KVO 监听
+//    AVAudioSession.outputVolume (公开 API, 真机有效)。
+//    空音量检测核心: 音量贴 0/1 边界时用 Celestial AVSystemController
+//    setVolumeTo:forCategory: 悄悄拉回 0.05/0.95, 使物理按键每次都能
+//    产生真实音量变化 (0.05→0), 空音量按音量- 也持续触发回调。
+//    另保留 200ms 轮询 + 私有通知作为兜底, 多通道去重。
 //
-//  线程模型: 回调在任意线程触发 (通知线程/轮询线程), 调用方自行转主线程。
+//  线程模型: 回调在任意线程触发 (KVO/通知/轮询线程), 调用方自行转主线程。
 
 #import <Foundation/Foundation.h>
 
