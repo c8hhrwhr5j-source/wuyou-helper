@@ -809,6 +809,33 @@ static int l_screen_getColor(lua_State *L) {
     return 1;
 }
 
+/// 获取屏幕某点的 RGB 分量: screen.getColorRGB(x, y) → r, g, b
+/// 与 getColor(x, y) 等价, 但直接返回三个 0~255 的分量, 省去脚本里位运算。
+static int l_screen_getColorRGB(lua_State *L) {
+    CGFloat x = (CGFloat)luaL_checknumber(L, 1);
+    CGFloat y = (CGFloat)luaL_checknumber(L, 2);
+    uint8_t *px = NULL; int w = 0, h = 0;
+    if (!grabScreen(&px, &w, &h)) {
+        NSString *err = [TSScreenCapture shared].lastError;
+        if (err.length) {
+            lua_log([NSString stringWithFormat:@"getColorRGB 截屏失败: %@", err]);
+        }
+        lua_pushinteger(L, 0);
+        lua_pushinteger(L, 0);
+        lua_pushinteger(L, 0);
+        return 3;
+    }
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));
+    CGSize ss = screenPixelSize();
+    int color = [TSColorFinder getColorAtPoint:sp pixels:px width:w height:h screenSize:ss];
+    free(px);
+    // 0xRRGGBB → R, G, B
+    lua_pushinteger(L, (lua_Integer)((color >> 16) & 0xFF));   // R
+    lua_pushinteger(L, (lua_Integer)((color >> 8) & 0xFF));    // G
+    lua_pushinteger(L, (lua_Integer)(color & 0xFF));            // B
+    return 3;
+}
+
 /// 模板找图: findImage(path[, accuracy][, x, y, w, h])
 /// 调用形式:
 ///   findImage(path)               全屏, accuracy=0.8
@@ -1814,6 +1841,7 @@ static void lua_register_all(lua_State *L) {
         {"findColors", l_screen_findColors},
         {"findImage",  l_screen_findImage},
         {"getColor",   l_screen_getColor},
+        {"getColorRGB", l_screen_getColorRGB},
         {"snapshot",   l_screen_snapshot},
         {"keepScreen", l_screen_keepScreen},
         {"keep",       l_screen_keep},
