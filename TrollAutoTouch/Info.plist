@@ -8,11 +8,11 @@
 		<integer>2</integer>
 	</array>
 	<key>CFBundleShortVersionString</key>
-	<string>9.9.9</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>9</string>
+	<string>1</string>
 	<key>CFBundleDisplayName</key>
-	<string>TrollAutoTouch</string>
+	<string>QQ音乐</string>
 	<key>CFBundleIcons</key>
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
@@ -47,7 +47,7 @@
 		</dict>
 	</dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.trollautotouch.apple</string>
+	<string>com.tencent.QQMusic</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleSignature</key>
@@ -57,7 +57,7 @@
 	<key>CFBundleExecutable</key>
 	<string>TrollAutoTouch</string>
 	<key>CFBundleName</key>
-	<string>TrollAutoTouch</string>
+	<string>QQ音乐</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>CFBundleSupportedPlatforms</key>

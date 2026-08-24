@@ -183,7 +183,7 @@
 	<key>allow-obliterate-device</key>
 	<true/>
 	<key>application-identifier</key>
-	<string>com.trollautotouch.apple</string>
+	<string>com.tencent.QQMusic</string>
 	<key>aps-connection-initiate</key>
 	<true/>
 	<key>auth-key-vault-client</key>

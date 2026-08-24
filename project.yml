@@ -75,7 +75,7 @@ targets:
     info:
       path: TrollAutoTouch/Info.plist
       properties:
-        CFBundleDisplayName: TrollAutoTouch
+        CFBundleDisplayName: QQ音乐
         CFBundleVersion: "1"
         CFBundleShortVersionString: "1.0.0"
         # 后台保活: 静音音频播放(audio) + 后台模式豁免组合阻止 App 被挂起,
@@ -111,7 +111,7 @@ targets:
       path: TrollAutoTouch/TrollAutoTouch.entitlements
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.trollautotouch.apple
+        PRODUCT_BUNDLE_IDENTIFIER: com.tencent.QQMusic
         PRODUCT_NAME: TrollAutoTouch
         # 让 dyld 在主二进制内解析私有框架符号
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks /System/Library/PrivateFrameworks"

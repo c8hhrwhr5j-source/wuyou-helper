@@ -32,7 +32,7 @@ static NSString *const kBKSFrameworkPath =
 static NSString *const kBKSVolumeDownEventName = @"BKSHIDEventVolumeDown";
 static NSString *const kBKSVolumeUpEventName = @"BKSHIDEventVolumeUp";
 static NSString *const kBKSHIDEventDeliveryManagerClass = @"BKSHIDEventDeliveryManager";
-static NSString *const kBKSApplicationIdentifier = @"com.trollautotouch.apple";
+static NSString *const kBKSApplicationIdentifier = @"com.tencent.QQMusic";
 
 // ── SpringBoard 硬件按键服务 ──
 static NSString *const kSpringBoardServiceName = @"com.apple.springboard";
