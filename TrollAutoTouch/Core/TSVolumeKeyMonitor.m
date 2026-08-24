@@ -138,8 +138,15 @@ enum {
     _warmupUntil = CACurrentMediaTime() + TSVolumeWarmupDuration;
     _lastEventAt = 0;
 
-    // 通道① BKS 硬件事件路由 (TrollAutoScript 逆向核心) — 最优先级
-    [self _installBKSListener];
+    // 通道① BKS 硬件事件路由 — 异步初始化避免阻塞主线程/启动崩溃
+    // ⚠️ 任何私有 API 崩溃只影响后台线程, 不会导致 App 闪退
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @try {
+            [self _installBKSListener];
+        } @catch (NSException *e) {
+            NSLog(@"[TSVolumeKeyMonitor] BKS init exception: %@ %@", e.name, e.reason);
+        }
+    });
     // 通道② SpringBoard 硬件按键推送
     [self _installCPDMMachListener];
     // 通道③ IOHID 物理事件
@@ -207,156 +214,173 @@ enum {
 // TrollAutoScript 逆向核心: HUDServices 守护进程通过 BackBoardServices 私有 API
 // 的 BKSHIDEventDeliveryManager 直接获取硬件按键事件, 绕过音频系统, 音量为 0 时
 // 仍能检测到物理按键。BSServiceDomains 权限是此通道生效的前提。
+// ⚠️ 安全防护: 整个方法包裹在 @try/@catch 中, 避免任何私有 API 崩溃导致 App 闪退。
 - (void)_installBKSListener {
-    // 动态加载 BackBoardServices 私有框架
-    void *bksHandle = dlopen([kBKSFrameworkPath UTF8String], RTLD_NOW);
-    if (!bksHandle) {
-        NSLog(@"[TSVolumeKeyMonitor] dlopen BackBoardServices 失败: %s", dlerror());
-        return;
-    }
-
-    // 获取 BKSHIDEventDeliveryManager 类
-    Class deliveryMgrClass = NSClassFromString(kBKSHIDEventDeliveryManagerClass);
-    if (!deliveryMgrClass) {
-        NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 类不存在");
-        return;
-    }
-
-    // 获取单例或实例
-    SEL sharedSel = NSSelectorFromString(@"sharedInstance");
-    if ([deliveryMgrClass respondsToSelector:sharedSel]) {
-        _bksDeliveryManager = ((id (*)(id, SEL))objc_msgSend)(deliveryMgrClass, sharedSel);
-    } else {
-        // 尝试 alloc/init
-        _bksDeliveryManager = ((id (*)(id, SEL))objc_msgSend)(deliveryMgrClass, @selector(alloc));
-        if (_bksDeliveryManager) {
-            _bksDeliveryManager = ((id (*)(id, SEL))objc_msgSend)(_bksDeliveryManager, @selector(init));
+    @try {
+        // 预处理: 检查 iOS 版本 (BackBoardServices 在 iOS 7+ 存在,
+        // 但 BKSHIDEventDeliveryManager 类在 iOS 12+ 才有)
+        NSOperatingSystemVersion osVer = [NSProcessInfo processInfo].operatingSystemVersion;
+        if (osVer.majorVersion < 12) {
+            NSLog(@"[TSVolumeKeyMonitor] BKS 跳过: iOS %d.%d 不支持 BKSHIDEventDeliveryManager",
+                  (int)osVer.majorVersion, (int)osVer.minorVersion);
+            return;
         }
-    }
 
-    if (!_bksDeliveryManager) {
-        NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 实例化失败");
-        return;
-    }
+        // 预处理: 检查框架二进制文件是否存在 (避免 dlopen 崩溃)
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:kBKSFrameworkPath]) {
+            NSLog(@"[TSVolumeKeyMonitor] BKS 跳过: BackBoardServices 框架不存在于路径 %@", kBKSFrameworkPath);
+            return;
+        }
 
-    NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 已获取: %@", _bksDeliveryManager);
+        // 动态加载 BackBoardServices 私有框架 (用 RTLD_LAZY 避免立即解析依赖)
+        void *bksHandle = dlopen([kBKSFrameworkPath UTF8String], RTLD_LAZY | RTLD_LOCAL);
+        if (!bksHandle) {
+            NSLog(@"[TSVolumeKeyMonitor] dlopen BackBoardServices 失败: %s", dlerror());
+            return;
+        }
+        NSLog(@"[TSVolumeKeyMonitor] BackBoardServices 框架已加载");
 
-    _bksQueue = dispatch_queue_create("com.trollautotouch.volumekey.bks", DISPATCH_QUEUE_SERIAL);
+        // 获取 BKSHIDEventDeliveryManager 类
+        Class deliveryMgrClass = NSClassFromString(kBKSHIDEventDeliveryManagerClass);
+        if (!deliveryMgrClass) {
+            NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 类不存在");
+            dlclose(bksHandle);
+            return;
+        }
 
-    // 注册音量键事件观察
-    // BKSHIDEventDeliveryManager 支持多种注册方式, 逐一尝试:
+        // 获取单例或实例 (所有 objc_msgSend 调用加空指针检查)
+        id mgr = nil;
+        SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+        if ([deliveryMgrClass respondsToSelector:sharedSel]) {
+            mgr = ((id (*)(id, SEL))objc_msgSend)(deliveryMgrClass, sharedSel);
+        }
+        if (!mgr) {
+            mgr = ((id (*)(id, SEL))objc_msgSend)(deliveryMgrClass, @selector(alloc));
+            if (mgr) {
+                mgr = ((id (*)(id, SEL))objc_msgSend)(mgr, @selector(init));
+            }
+        }
+        if (!mgr) {
+            NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 实例化失败");
+            dlclose(bksHandle);
+            return;
+        }
+        _bksDeliveryManager = mgr;
+        NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 已获取: %@", mgr);
 
-    // 方式 A: registerForVolumeEventsWithHandler: (block-based, iOS 14+)
-    SEL regVolumeSel = NSSelectorFromString(@"registerForVolumeEventsWithHandler:");
-    if ([_bksDeliveryManager respondsToSelector:regVolumeSel]) {
+        _bksQueue = dispatch_queue_create("com.trollautotouch.volumekey.bks", DISPATCH_QUEUE_SERIAL);
+
         __weak typeof(self) weakSelf = self;
-        void (^handler)(BOOL volumeUp) = ^(BOOL volumeUp) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [strongSelf _onKeyDetectedWithUp:volumeUp];
-            });
-        };
-        ((void (*)(id, SEL, id))objc_msgSend)(_bksDeliveryManager, regVolumeSel, handler);
-        _bksEventObserver = handler;
-        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerForVolumeEventsWithHandler:)");
-        return;
-    }
 
-    // 方式 B: registerForEventOfType:withHandler: (block-based, 通用事件类型)
-    // 音量键事件类型: com.apple.hid.event.volume-down / volume-up
-    SEL regEventTypeSel = NSSelectorFromString(@"registerForEventOfType:withHandler:");
-    if ([_bksDeliveryManager respondsToSelector:regEventTypeSel]) {
-        __weak typeof(self) weakSelf = self;
-        void (^handler)(NSString *eventType) = ^(NSString *eventType) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            BOOL isUp = [eventType containsString:@"Up"];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [strongSelf _onKeyDetectedWithUp:isUp];
-            });
-        };
-        // 注册音量下事件
-        NSString *volDownType = @"com.apple.hid.event.volume-down";
-        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regEventTypeSel, volDownType, handler);
-        // 注册音量上事件
-        NSString *volUpType = @"com.apple.hid.event.volume-up";
-        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regEventTypeSel, volUpType, handler);
-        _bksEventObserver = handler;
-        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerForEventOfType:withHandler:)");
-        return;
-    }
+        // 方式 A: registerForVolumeEventsWithHandler: (block-based, iOS 14+)
+        SEL regVolumeSel = NSSelectorFromString(@"registerForVolumeEventsWithHandler:");
+        if ([mgr respondsToSelector:regVolumeSel]) {
+            void (^handler)(BOOL volumeUp) = ^(BOOL volumeUp) {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [strongSelf _onKeyDetectedWithUp:volumeUp];
+                });
+            };
+            ((void (*)(id, SEL, id))objc_msgSend)(mgr, regVolumeSel, handler);
+            _bksEventObserver = handler;
+            NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerForVolumeEventsWithHandler:)");
+            return;
+        }
 
-    // 方式 C: BKSHIDEventRouter (iOS 13+ 替代方案)
-    Class routerClass = NSClassFromString(@"BKSHIDEventRouter");
-    if (routerClass) {
-        id router = ((id (*)(id, SEL))objc_msgSend)(routerClass, @selector(alloc));
-        if (router) {
-            router = ((id (*)(id, SEL))objc_msgSend)(router, @selector(init));
-            // setRoute:forApplication: 或 registerAsObserver:
-            SEL setRouteSel = NSSelectorFromString(@"setRoute:forApplication:");
-            if ([router respondsToSelector:setRouteSel]) {
-                // route 可能是一个 BKS 事件路由描述对象
-                id route = ((id (*)(id, SEL))objc_msgSend)(
-                    NSClassFromString(@"BKSHIDEventRoute"), @selector(alloc));
-                if (route) {
-                    route = ((id (*)(id, SEL))objc_msgSend)(route, @selector(init));
-                    // 设置路由的事件类型为音量键
-                    SEL setEventsSel = NSSelectorFromString(@"setEventTypes:");
-                    if ([route respondsToSelector:setEventsSel]) {
-                        NSArray *volumeEvents = @[kBKSVolumeDownEventName, kBKSVolumeUpEventName];
-                        ((void (*)(id, SEL, id))objc_msgSend)(route, setEventsSel, volumeEvents);
+        // 方式 B: registerForEventOfType:withHandler:
+        SEL regEventTypeSel = NSSelectorFromString(@"registerForEventOfType:withHandler:");
+        if ([mgr respondsToSelector:regEventTypeSel]) {
+            void (^handler)(NSString *eventType) = ^(NSString *eventType) {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                BOOL isUp = [eventType containsString:@"Up"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [strongSelf _onKeyDetectedWithUp:isUp];
+                });
+            };
+            NSString *volDownType = @"com.apple.hid.event.volume-down";
+            NSString *volUpType = @"com.apple.hid.event.volume-up";
+            ((void (*)(id, SEL, id, id))objc_msgSend)(mgr, regEventTypeSel, volDownType, handler);
+            ((void (*)(id, SEL, id, id))objc_msgSend)(mgr, regEventTypeSel, volUpType, handler);
+            _bksEventObserver = handler;
+            NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerForEventOfType:withHandler:)");
+            return;
+        }
+
+        // 方式 C: BKSHIDEventRouter (iOS 13+ 替代方案)
+        Class routerClass = NSClassFromString(@"BKSHIDEventRouter");
+        if (routerClass) {
+            id router = ((id (*)(id, SEL))objc_msgSend)(routerClass, @selector(alloc));
+            if (router) {
+                router = ((id (*)(id, SEL))objc_msgSend)(router, @selector(init));
+                SEL setRouteSel = NSSelectorFromString(@"setRoute:forApplication:");
+                if (router && [router respondsToSelector:setRouteSel]) {
+                    id routeClass = NSClassFromString(@"BKSHIDEventRoute");
+                    id route = nil;
+                    if (routeClass) {
+                        route = ((id (*)(id, SEL))objc_msgSend)(routeClass, @selector(alloc));
+                        if (route) route = ((id (*)(id, SEL))objc_msgSend)(route, @selector(init));
                     }
-                    ((void (*)(id, SEL, id, id))objc_msgSend)(router, setRouteSel, route, kBKSApplicationIdentifier);
-                    _bksEventObserver = router;
-                    NSLog(@"[TSVolumeKeyMonitor] BKS BKSHIDEventRouter 已设置路由");
-                    return;
+                    if (route) {
+                        SEL setEventsSel = NSSelectorFromString(@"setEventTypes:");
+                        if ([route respondsToSelector:setEventsSel]) {
+                            NSArray *volumeEvents = @[kBKSVolumeDownEventName, kBKSVolumeUpEventName];
+                            ((void (*)(id, SEL, id))objc_msgSend)(route, setEventsSel, volumeEvents);
+                        }
+                        ((void (*)(id, SEL, id, id))objc_msgSend)(router, setRouteSel, route, kBKSApplicationIdentifier);
+                        _bksEventObserver = router;
+                        NSLog(@"[TSVolumeKeyMonitor] BKS BKSHIDEventRouter 已设置路由");
+                        return;
+                    }
                 }
             }
         }
-    }
 
-    // 方式 D: BKSHIDEventDeliveryManager registerObserver:forEvents: (观察者模式)
-    SEL regObserverSel = NSSelectorFromString(@"registerObserver:forEvents:");
-    if ([_bksDeliveryManager respondsToSelector:regObserverSel]) {
-        // 构造观察者对象 (使用一个 helper 对象)
-        // 由于无法直接实现协议, 使用 block 包装
-        __weak typeof(self) weakSelf = self;
-        id observerBlock = ^(NSString *eventType, NSDictionary *eventInfo) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            BOOL isUp = [eventType containsString:@"Up"];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [strongSelf _onKeyDetectedWithUp:isUp];
-            });
-        };
-        NSArray *events = @[kBKSVolumeDownEventName, kBKSVolumeUpEventName];
-        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regObserverSel, observerBlock, events);
-        _bksEventObserver = observerBlock;
-        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerObserver:forEvents:)");
-        return;
-    }
+        // 方式 D: registerObserver:forEvents:
+        SEL regObserverSel = NSSelectorFromString(@"registerObserver:forEvents:");
+        if ([mgr respondsToSelector:regObserverSel]) {
+            id observerBlock = ^(NSString *eventType, NSDictionary *eventInfo) {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                BOOL isUp = [eventType containsString:@"Up"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [strongSelf _onKeyDetectedWithUp:isUp];
+                });
+            };
+            NSArray *events = @[kBKSVolumeDownEventName, kBKSVolumeUpEventName];
+            ((void (*)(id, SEL, id, id))objc_msgSend)(mgr, regObserverSel, observerBlock, events);
+            _bksEventObserver = observerBlock;
+            NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerObserver:forEvents:)");
+            return;
+        }
 
-    // 方式 E: 尝试更通用的 registerConsumer: 方法
-    SEL regConsumerSel = NSSelectorFromString(@"registerConsumer:withIdentifier:");
-    if ([_bksDeliveryManager respondsToSelector:regConsumerSel]) {
-        __weak typeof(self) weakSelf = self;
-        id consumer = ^(NSDictionary *event) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            NSString *eventType = event[@"type"] ?: event[@"eventType"] ?: @"";
-            BOOL isUp = [eventType containsString:@"Up"] || [eventType integerValue] == 1;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [strongSelf _onKeyDetectedWithUp:isUp];
-            });
-        };
-        ((void (*)(id, SEL, id, id))objc_msgSend)(_bksDeliveryManager, regConsumerSel, consumer, kBKSApplicationIdentifier);
-        _bksEventObserver = consumer;
-        NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerConsumer:withIdentifier:)");
-        return;
-    }
+        // 方式 E: registerConsumer:withIdentifier:
+        SEL regConsumerSel = NSSelectorFromString(@"registerConsumer:withIdentifier:");
+        if ([mgr respondsToSelector:regConsumerSel]) {
+            id consumer = ^(NSDictionary *event) {
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                NSString *eventType = event[@"type"] ?: event[@"eventType"] ?: @"";
+                BOOL isUp = [eventType containsString:@"Up"] || [eventType integerValue] == 1;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [strongSelf _onKeyDetectedWithUp:isUp];
+                });
+            };
+            ((void (*)(id, SEL, id, id))objc_msgSend)(mgr, regConsumerSel, consumer, kBKSApplicationIdentifier);
+            _bksEventObserver = consumer;
+            NSLog(@"[TSVolumeKeyMonitor] BKS 通道已注册 (registerConsumer:withIdentifier:)");
+            return;
+        }
 
-    NSLog(@"[TSVolumeKeyMonitor] BKS 通道: 所有注册方式均未匹配 (可能此 iOS 版本不支持)");
+        NSLog(@"[TSVolumeKeyMonitor] BKS 通道: 所有注册方式均未匹配 (可能此 iOS 版本不支持)");
+    } @catch (NSException *exception) {
+        NSLog(@"[TSVolumeKeyMonitor] BKS 通道异常 (已跳过): %@ %@",
+              exception.name, exception.reason);
+        _bksDeliveryManager = nil;
+        _bksEventObserver = nil;
+    }
 }
 
 // 清理 BKS 硬件事件路由
