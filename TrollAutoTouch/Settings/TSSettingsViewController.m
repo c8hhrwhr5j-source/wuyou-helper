@@ -328,8 +328,10 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         if ([[TSLicense shared] isActivated]) {
             c.iconView.image = [self _icon:@"checkmark.seal.fill"];
             c.titleLabel.text = @"卡密";
-            NSString *ex = [[TSLicense shared] expireDateString] ?: @"未知";
-            c.detailLabel.text = [NSString stringWithFormat:@"已激活\n到期 %@", ex];
+            // 服务端未返回到期时间(永久卡/后台未设置)时显示"长期有效"而非"未知"
+            NSString *ex = [[TSLicense shared] expireDateString];
+            c.detailLabel.text = ex.length ?
+                [NSString stringWithFormat:@"已激活\n到期 %@", ex] : @"已激活\n长期有效";
             c.detailLabel.textColor = [TSColors tint];
             c.accessoryType = UITableViewCellAccessoryNone;
             c.selectionStyle = UITableViewCellSelectionStyleNone;

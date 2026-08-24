@@ -181,11 +181,22 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         BOOL verifyOk = [code isEqualToString:@"200"] && [dataObj[@"verify"] boolValue];
 
         // 卡密到期时间(土豆返回 exTime, 格式 "2025-07-11 15:04:07")
+        // 兼容不同后台的字段名; "0000-00-00 ..." / 空串视为"无到期时间"
         NSString *exTime = nil;
         if ([dataObj isKindOfClass:NSDictionary.class]) {
-            id t = dataObj[@"exTime"];
-            if ([t isKindOfClass:NSString.class] && [t length]) exTime = t;
-            else if ([t isKindOfClass:NSNumber.class]) exTime = [t stringValue];
+            NSArray<NSString *> *keys = @[@"exTime", @"expireTime", @"expiryTime",
+                                          @"endTime", @"expireDate", @"validTime"];
+            for (NSString *k in keys) {
+                id t = dataObj[k];
+                NSString *s = nil;
+                if ([t isKindOfClass:NSString.class]) {
+                    s = [t stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                } else if ([t isKindOfClass:NSNumber.class]) {
+                    s = [t stringValue];
+                }
+                if (s.length && ![s hasPrefix:@"0000"]) { exTime = s; break; }
+            }
         }
 
         if (verifyOk) {
