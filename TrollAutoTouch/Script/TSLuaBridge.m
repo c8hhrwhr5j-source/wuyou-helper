@@ -1606,8 +1606,8 @@ static int l_screen_paddleOcr(lua_State *L) {
 
     // 脚本坐标 -> 截屏物理坐标
     if (!CGRectIsEmpty(region)) {
-        CGPoint tl = tsScriptToBufferPoint(region.origin);
-        CGPoint br = tsScriptToBufferPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
+        CGPoint tl = tsScriptToActualPoint(region.origin);
+        CGPoint br = tsScriptToActualPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
         CGFloat scale = img.scale;
         region = CGRectMake(tl.x * scale, tl.y * scale,
                             (br.x - tl.x) * scale, (br.y - tl.y) * scale);
@@ -1647,8 +1647,8 @@ static int l_screen_visionOcr(lua_State *L) {
 
     // 脚本坐标 -> 截屏物理坐标
     if (!CGRectIsEmpty(region)) {
-        CGPoint tl = tsScriptToBufferPoint(region.origin);
-        CGPoint br = tsScriptToBufferPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
+        CGPoint tl = tsScriptToActualPoint(region.origin);
+        CGPoint br = tsScriptToActualPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
         CGFloat scale = img.scale;
         region = CGRectMake(tl.x * scale, tl.y * scale,
                             (br.x - tl.x) * scale, (br.y - tl.y) * scale);
@@ -2580,7 +2580,7 @@ static void lua_register_all(lua_State *L) {
 
     // 没有首选入口 → 找第一个 .lua 文件
     NSPredicate *luaPred = [NSPredicate predicateWithBlock:^BOOL(NSString *name, NSDictionary *b) {
-        return name.pathExtension.lowercaseString isEqualToString:@"lua"];
+        return [name.pathExtension.lowercaseString isEqualToString:@"lua"];
     }];
     NSArray *luaFiles = [[contents filteredArrayUsingPredicate:luaPred] sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)];
     if (luaFiles.count > 0) {
