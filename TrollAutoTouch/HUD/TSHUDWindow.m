@@ -760,6 +760,48 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     self.hidden = YES;
 }
 
+#pragma mark - 外部位置设置
+
+// 把悬浮球本体中心移动到指定屏幕坐标 (物理屏幕坐标)。
+// 直接修改窗口 frame, 不触发贴边动画 —— 用户主动指定位置时应保持该位置。
+// 横屏时窗口为 44×200 竖直条, 屏幕坐标轴与窗口坐标轴互换, 需对应换算。
+- (void)setBallPoint:(CGPoint)point {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setBallPoint:point];
+        });
+        return;
+    }
+    CGRect frame = self.frame;
+    CGSize screen = [self _effectiveScreenSize];
+
+    if (_landscape) {
+        // 横屏: 窗口宽 44 沿屏幕竖直, 窗口高 200 沿屏幕水平。
+        // 屏幕坐标 point.x 沿屏幕水平 → 对应窗口 y;
+        //        point.y 沿屏幕竖直 → 对应窗口 x。
+        // 悬浮球本体在窗口内的中心: (kBallSize/2, _ballY + kBallSize/2)
+        CGFloat ballCenterXInWin = kBallSize / 2.0;
+        CGFloat ballCenterYInWin = [self _ballY] + kBallSize / 2.0;
+        frame.origin.x = point.y - ballCenterXInWin;
+        frame.origin.y = point.x - ballCenterYInWin;
+        CGFloat maxX = MAX(0, screen.height - frame.size.width);   // 屏幕竖直
+        CGFloat maxY = MAX(0, screen.width  - frame.size.height);  // 屏幕水平
+        frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+    } else {
+        // 竖屏: 窗口坐标轴与屏幕一致
+        CGFloat ballCenterXInWin = [self _ballX] + kBallSize / 2.0;
+        CGFloat ballCenterYInWin = kBallSize / 2.0;
+        frame.origin.x = point.x - ballCenterXInWin;
+        frame.origin.y = point.y - ballCenterYInWin;
+        CGFloat maxX = MAX(0, screen.width  - frame.size.width);
+        CGFloat maxY = MAX(0, screen.height - frame.size.height);
+        frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+    }
+    self.frame = frame;
+}
+
 #pragma mark - 系统级托管 (跨应用显示)
 
 // app 进入后台: 把悬浮球窗口的 layer 通过 SBSAccessibilityWindowHostingController

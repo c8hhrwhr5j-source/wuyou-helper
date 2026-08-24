@@ -23,6 +23,10 @@
 #import "../Common/TSLogStore.h"
 #import "../HUD/TSHUDHost.h"
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <MediaPlayer/MediaPlayer.h>
+#import <mach/mach.h>
 
 NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningStateChanged";
 #import <CommonCrypto/CommonDigest.h>
@@ -49,6 +53,7 @@ NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningSt
 #import "../Core/TSVolumeKeyMonitor.h"
 #import "../Core/TSHUDService.h"
 #import "../HUD/TSHUDHost.h"
+#import "../HUD/TSHUDWindow.h"
 #import "../Views/TSScriptUIViewController.h"
 #import "TSScriptListViewController.h"
 #import "../Core/TSToolExecutor.h"
@@ -1240,6 +1245,228 @@ static int l_sys_battery(lua_State *L) {
     return 1;
 }
 
+/// sys.setFloatBallPoint(x, y)
+/// 把悬浮球本体中心移动到指定坐标。坐标使用脚本坐标系 (与 screen.init 设置的方向一致,
+/// 与 tap/findColor 等同源), 内部自动旋转到设备当前方向的屏幕显示坐标后定位。
+/// 若悬浮球未显示, 自动 show 后再移动。线程安全 (内部派发主线程)。
+static int l_sys_setFloatBallPoint(lua_State *L) {
+    CGFloat sx = (CGFloat)luaL_checknumber(L, 1);
+    CGFloat sy = (CGFloat)luaL_checknumber(L, 2);
+    lua_log([NSString stringWithFormat:@"[setFloatBallPoint] script(%.0f, %.0f)", sx, sy]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 脚本坐标(像素) -> 设备当前方向屏幕显示坐标(逻辑点)
+        // 与 tap/findColor 路径一致: 脚本坐标先转设备当前方向像素, 再除 scale 得逻辑点
+        CGPoint scriptPx = CGPointMake(sx, sy);
+        NSInteger curOri = tsCurrentOrientation();
+        CGPoint displayPx = tsTransformPixelPoint(scriptPx, s_scriptOrientation, curOri, tsPortraitPixelSize());
+        CGFloat scale = [UIScreen mainScreen].scale;
+        CGPoint displayPt = CGPointMake(displayPx.x / scale, displayPx.y / scale);
+
+        TSHUDWindow *win = [TSHUDWindow shared];
+        if (win.hidden) [win show];
+        [win setBallPoint:displayPt];
+    });
+    return 0;
+}
+
+/// sys.mtime() → number
+/// 毫秒级时间戳 (UTC, 自 1970-01-01 起的毫秒数)
+static int l_sys_mtime(lua_State *L) {
+    NSTimeInterval t = [[NSDate date] timeIntervalSince1970];
+    lua_pushnumber(L, t * 1000.0);
+    return 1;
+}
+
+/// sys.availableMemory() → number
+/// 系统可用内存 (字节)
+static int l_sys_availableMemory(lua_State *L) {
+    // 进程可用物理内存 (系统级)
+    vm_statistics_data_t vmStats;
+    mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+    kern_return_t kr = host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&vmStats, &count);
+    if (kr != KERN_SUCCESS) { lua_pushnumber(L, 0); return 1; }
+    vm_size_t pageSize = 0;
+    host_page_size(mach_host_self(), &pageSize);
+    // free + inactive + speculative 都算可用
+    uint64_t avail = (uint64_t)(vmStats.free_count + vmStats.inactive_count + vmStats.speculative_count) * pageSize;
+    lua_pushnumber(L, (lua_Number)avail);
+    return 1;
+}
+
+/// sys.processUsedMemory() → number
+/// 当前进程使用的物理内存 (字节, resident_size)
+static int l_sys_processUsedMemory(lua_State *L) {
+    task_basic_info_data_t info;
+    mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
+    kern_return_t kr = task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &count);
+    if (kr != KERN_SUCCESS) { lua_pushnumber(L, 0); return 1; }
+    lua_pushnumber(L, (lua_Number)info.resident_size);
+    return 1;
+}
+
+/// sys.usedMemory() → number
+/// 系统已用物理内存 (字节)
+static int l_sys_usedMemory(lua_State *L) {
+    vm_statistics_data_t vmStats;
+    mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+    kern_return_t kr = host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&vmStats, &count);
+    if (kr != KERN_SUCCESS) { lua_pushnumber(L, 0); return 1; }
+    vm_size_t pageSize = 0;
+    host_page_size(mach_host_self(), &pageSize);
+    uint64_t used = (uint64_t)(vmStats.active_count + vmStats.wire_count) * pageSize;
+    lua_pushnumber(L, (lua_Number)used);
+    return 1;
+}
+
+/// sys.version() → string
+/// App 版本号 (CFBundleShortVersionString)
+static int l_sys_version(lua_State *L) {
+    NSString *v = [[NSBundle mainBundle] infoDictionary][@"CFBundleShortVersionString"];
+    lua_pushstring(L, v.UTF8String ?: "");
+    return 1;
+}
+
+/// sys.palyAudio(path)  (保留原版拼写)
+/// 播放音频文件 (本地路径, 异步播放, 不阻塞)
+static int l_sys_palyAudio(lua_State *L) {
+    size_t len = 0;
+    const char *p = luaL_checklstring(L, 1, &len);
+    NSString *path = [[NSString alloc] initWithBytes:p length:len encoding:NSUTF8StringEncoding];
+    if (!path) { lua_pushboolean(L, NO); return 1; }
+
+    NSURL *url = [NSURL fileURLWithPath:path];
+    if (!url) { lua_pushboolean(L, NO); return 1; }
+
+    // 用静态 player 保持引用, 避免被释放导致播放中断
+    static AVAudioPlayer *sPlayer = nil;
+    NSError *err = nil;
+    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&err];
+    if (err || !player) {
+        lua_log([NSString stringWithFormat:@"[palyAudio] init failed: %@", err.localizedDescription]);
+        lua_pushboolean(L, NO);
+        return 1;
+    }
+    [player prepareToPlay];
+    sPlayer = player;
+    [player play];
+    lua_pushboolean(L, YES);
+    return 1;
+}
+
+/// device.udid() → string / nil
+/// 获取设备 UDID (TrollStore 环境通过 MobileGestalt 私有 API, 沙盒返回 nil)
+static int l_device_udid(lua_State *L) {
+    NSString *udid = [[TSDeviceInfo shared] udid];
+    if (udid.length > 0) {
+        lua_pushstring(L, udid.UTF8String);
+    } else {
+        lua_pushnil(L);
+        lua_log(@"[device.udid] failed: MobileGestalt unavailable or sandboxed");
+    }
+    return 1;
+}
+
+/// device.serialNumber() → string / nil
+static int l_device_serialNumber(lua_State *L) {
+    NSString *sn = [[TSDeviceInfo shared] serialNumber];
+    if (sn.length > 0) {
+        lua_pushstring(L, sn.UTF8String);
+    } else {
+        lua_pushnil(L);
+        lua_log(@"[device.serialNumber] failed: MobileGestalt unavailable or sandboxed");
+    }
+    return 1;
+}
+
+/// device.turnOnAssistiveTouch() → boolean
+/// 启用辅助触控 (小白点)。修改 Accessibility.plist + 广播 Darwin 通知让 SpringBoard 重载。
+static int l_device_turnOnAssistiveTouch(lua_State *L) {
+    BOOL ok = [[TSDeviceInfo shared] enableAssistiveTouch];
+    lua_pushboolean(L, ok);
+    lua_log([NSString stringWithFormat:@"[device.turnOnAssistiveTouch] result=%d", ok]);
+    return 1;
+}
+
+/// device.turnOffAssistiveTouch() → boolean
+/// 停用辅助触控 (小白点)
+static int l_device_turnOffAssistiveTouch(lua_State *L) {
+    BOOL ok = [[TSDeviceInfo shared] disableAssistiveTouch];
+    lua_pushboolean(L, ok);
+    lua_log([NSString stringWithFormat:@"[device.turnOffAssistiveTouch] result=%d", ok]);
+    return 1;
+}
+
+/// device.isScreenLocked() → boolean
+/// 查询屏幕是否锁定。无密码设备可配合 unlockScreen 唤醒。
+static int l_device_isScreenLocked(lua_State *L) {
+    BOOL locked = [[TSDeviceInfo shared] isScreenLocked];
+    lua_pushboolean(L, locked);
+    return 1;
+}
+
+/// device.unlockScreen() → boolean
+/// 唤醒屏幕 + 发 Home 键取消锁屏 (无密码设备会进桌面)。
+/// 有密码的设备此函数无法完全解锁到桌面, 由调用方自行处理。
+static int l_device_unlockScreen(lua_State *L) {
+    BOOL ok = [[TSDeviceInfo shared] unlockScreen];
+    lua_pushboolean(L, ok);
+    lua_log([NSString stringWithFormat:@"[device.unlockScreen] result=%d", ok]);
+    return 1;
+}
+
+/// device.name() → string
+/// 设备名 (UIDevice.name)
+static int l_device_name(lua_State *L) {
+    NSString *n = [[TSDeviceInfo shared] deviceName];
+    lua_pushstring(L, n.UTF8String ?: "");
+    return 1;
+}
+
+/// device.type() → string
+/// 设备类型: iPhone / iPad / TV / CarPlay / Mac / Unspecified
+static int l_device_type(lua_State *L) {
+    NSString *t = [[TSDeviceInfo shared] deviceType];
+    lua_pushstring(L, t.UTF8String);
+    return 1;
+}
+
+/// device.backlightLevel() → number
+/// 当前屏幕亮度 [0, 1]
+static int l_device_backlightLevel(lua_State *L) {
+    lua_pushnumber(L, [[TSDeviceInfo shared] backlightLevel]);
+    return 1;
+}
+
+/// device.setBacklightLevel(n)
+/// 设置屏幕亮度 [0, 1]
+static int l_device_setBacklightLevel(lua_State *L) {
+    CGFloat n = (CGFloat)luaL_checknumber(L, 1);
+    [[TSDeviceInfo shared] setBacklightLevel:n];
+    return 0;
+}
+
+/// device.lockScreen()
+/// 锁定屏幕 (电源键, 复用 GSEventLockDevice)
+static int l_device_lockScreen(lua_State *L) {
+    [[TSDeviceInfo shared] lockScreen];
+    return 0;
+}
+
+/// device.vibrator()
+/// 系统震动反馈
+static int l_device_vibrator(lua_State *L) {
+    [[TSDeviceInfo shared] vibrate];
+    return 0;
+}
+
+/// device.setVolume(n)
+/// 设置系统音量 [0, 1]
+static int l_device_setVolume(lua_State *L) {
+    float n = (float)luaL_checknumber(L, 1);
+    [[TSDeviceInfo shared] setSystemVolume:n];
+    return 0;
+}
+
 #pragma mark - 应用管理
 
 static int l_app_frontBid(lua_State *L) {
@@ -1334,6 +1561,105 @@ static int l_screen_findText(lua_State *L) {
     lua_pushnumber(L, c.x);
     lua_pushnumber(L, c.y);
     return 2;
+}
+
+// 把 OCR 结果数组压入 Lua 表
+// 表结构: {{string=, x=, y=, w=, h=, confidence=}, ...}
+// 坐标已转换为脚本坐标系
+static void pushOCRResults(lua_State *L, NSArray<TSOCRResult *> *results) {
+    lua_newtable(L);
+    for (NSUInteger i = 0; i < results.count; i++) {
+        TSOCRResult *r = results[i];
+        CGPoint tl = tsBufferToScriptPoint(CGPointMake(r.rect.origin.x, r.rect.origin.y));
+        CGPoint br = tsBufferToScriptPoint(CGPointMake(CGRectGetMaxX(r.rect), CGRectGetMaxY(r.rect)));
+        lua_newtable(L);
+        lua_pushstring(L, r.text.UTF8String);
+        lua_setfield(L, -2, "string");
+        lua_pushnumber(L, tl.x);
+        lua_setfield(L, -2, "x");
+        lua_pushnumber(L, tl.y);
+        lua_setfield(L, -2, "y");
+        lua_pushnumber(L, br.x - tl.x);
+        lua_setfield(L, -2, "w");
+        lua_pushnumber(L, br.y - tl.y);
+        lua_setfield(L, -2, "h");
+        lua_pushnumber(L, r.confidence);
+        lua_setfield(L, -2, "confidence");
+        lua_rawseti(L, -2, (int)(i + 1));
+    }
+}
+
+/// screen.paddleOcr([x1, y1, x2, y2]) → 文本数组
+/// 全屏/区域 OCR, 默认中英文, 返回 {string, x, y, w, h, confidence} 列表
+static int l_screen_paddleOcr(lua_State *L) {
+    CGRect region = CGRectZero;
+    if (lua_gettop(L) >= 4) {
+        CGFloat x1 = (CGFloat)luaL_checknumber(L, 1);
+        CGFloat y1 = (CGFloat)luaL_checknumber(L, 2);
+        CGFloat x2 = (CGFloat)luaL_checknumber(L, 3);
+        CGFloat y2 = (CGFloat)luaL_checknumber(L, 4);
+        region = CGRectMake(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    UIImage *img = [[TSScreenCapture shared] captureImage];
+    if (!img) { lua_pushnil(L); return 1; }
+
+    // 脚本坐标 -> 截屏物理坐标
+    if (!CGRectIsEmpty(region)) {
+        CGPoint tl = tsScriptToBufferPoint(region.origin);
+        CGPoint br = tsScriptToBufferPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
+        CGFloat scale = img.scale;
+        region = CGRectMake(tl.x * scale, tl.y * scale,
+                            (br.x - tl.x) * scale, (br.y - tl.y) * scale);
+    }
+
+    NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img inRegion:region];
+    pushOCRResults(L, results);
+    return 1;
+}
+
+/// screen.visionOcr([lang], [x1, y1, x2, y2]) → 文本数组
+/// 支持自定义识别语言, 返回 {string, x, y, w, h, confidence} 列表
+static int l_screen_visionOcr(lua_State *L) {
+    NSString *lang = nil;
+    CGRect region = CGRectZero;
+    int idx = 1;
+
+    // 第一个参数是字符串 → 识别语言
+    if (lua_gettop(L) >= 1 && lua_type(L, 1) == LUA_TSTRING) {
+        size_t len = 0;
+        const char *s = luaL_checklstring(L, 1, &len);
+        lang = [[NSString alloc] initWithBytes:s length:len encoding:NSUTF8StringEncoding];
+        idx = 2;
+    }
+
+    // 后续 4 个参数是区域坐标
+    if (lua_gettop(L) >= idx + 3) {
+        CGFloat x1 = (CGFloat)luaL_checknumber(L, idx);
+        CGFloat y1 = (CGFloat)luaL_checknumber(L, idx + 1);
+        CGFloat x2 = (CGFloat)luaL_checknumber(L, idx + 2);
+        CGFloat y2 = (CGFloat)luaL_checknumber(L, idx + 3);
+        region = CGRectMake(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    UIImage *img = [[TSScreenCapture shared] captureImage];
+    if (!img) { lua_pushnil(L); return 1; }
+
+    // 脚本坐标 -> 截屏物理坐标
+    if (!CGRectIsEmpty(region)) {
+        CGPoint tl = tsScriptToBufferPoint(region.origin);
+        CGPoint br = tsScriptToBufferPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
+        CGFloat scale = img.scale;
+        region = CGRectMake(tl.x * scale, tl.y * scale,
+                            (br.x - tl.x) * scale, (br.y - tl.y) * scale);
+    }
+
+    NSArray<NSString *> *languages = lang ? @[lang] : nil;
+    NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img
+                                                              inRegion:region
+                                                              languages:languages];
+    pushOCRResults(L, results);
+    return 1;
 }
 
 #pragma mark - JSON
@@ -1601,6 +1927,167 @@ static int l_file_scriptDir(lua_State *L) {
     return 1;
 }
 
+/// file.addText(path, text)
+/// 追加文本到文件末尾 (文件不存在则创建)
+static int l_file_addText(lua_State *L) {
+    const char *p = luaL_checkstring(L, 1);
+    size_t tlen = 0;
+    const char *t = luaL_checklstring(L, 2, &tlen);
+    NSString *path = @(p);
+    NSString *text = [[NSString alloc] initWithBytes:t length:tlen encoding:NSUTF8StringEncoding];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) {
+        // 不存在则直接写入
+        NSError *err = nil;
+        BOOL ok = [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+        lua_pushboolean(L, ok);
+        return 1;
+    }
+    // 读取已有内容并追加 (大文件场景不优, 但 Lua API 用途如此)
+    NSError *err = nil;
+    NSString *existing = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+    if (err) { lua_pushboolean(L, NO); return 1; }
+    NSString *combined = [existing stringByAppendingString:text];
+    BOOL ok = [combined writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+/// file.size(path) → number
+/// 文件大小 (字节), 不存在返回 -1
+static int l_file_size(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    NSError *err = nil;
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:@(path) error:&err];
+    if (err || !attrs) { lua_pushinteger(L, -1); return 1; }
+    unsigned long long sz = [attrs fileSize];
+    lua_pushnumber(L, (lua_Number)sz);
+    return 1;
+}
+
+/// file.list(path) → table
+/// 列出目录下文件名 (不含路径, 不递归)
+static int l_file_list(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    NSError *err = nil;
+    NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@(path) error:&err];
+    if (err) { lua_pushnil(L); return 1; }
+    lua_newtable(L);
+    for (NSUInteger i = 0; i < items.count; i++) {
+        lua_pushstring(L, items[i].UTF8String);
+        lua_rawseti(L, -2, (int)(i + 1));
+    }
+    return 1;
+}
+
+/// file.md5(path) → string / nil
+/// 计算文件 MD5 (十六进制小写)
+static int l_file_md5(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    NSData *data = [NSData dataWithContentsOfFile:@(path)];
+    if (!data) { lua_pushnil(L); return 1; }
+
+    uint8_t digest[CC_MD5_DIGEST_LENGTH];
+    CC_MD5(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
+        [hex appendFormat:@"%02x", digest[i]];
+    }
+    lua_pushstring(L, hex.UTF8String);
+    return 1;
+}
+
+/// file.getLines(path) → table / nil
+/// 读取所有行 (按 \n 分割, 不含换行符)
+static int l_file_getLines(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:&err];
+    if (err || !content) { lua_pushnil(L); return 1; }
+    NSArray<NSString *> *lines = [content componentsSeparatedByString:@"\n"];
+    lua_newtable(L);
+    for (NSUInteger i = 0; i < lines.count; i++) {
+        lua_pushstring(L, lines[i].UTF8String);
+        lua_rawseti(L, -2, (int)(i + 1));
+    }
+    return 1;
+}
+
+/// file.lineCount(path) → number
+/// 总行数 (不存在或读取失败返回 -1)
+static int l_file_lineCount(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:&err];
+    if (err || !content) { lua_pushinteger(L, -1); return 1; }
+    NSUInteger count = [content componentsSeparatedByString:@"\n"].count;
+    lua_pushinteger(L, (lua_Integer)count);
+    return 1;
+}
+
+/// file.getLineText(path, n) → string / nil
+/// 获取第 n 行 (1-based)
+static int l_file_getLineText(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    int n = (int)luaL_checkinteger(L, 2);
+    if (n < 1) { lua_pushnil(L); return 1; }
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:&err];
+    if (err || !content) { lua_pushnil(L); return 1; }
+    NSArray<NSString *> *lines = [content componentsSeparatedByString:@"\n"];
+    if ((NSUInteger)n > lines.count) { lua_pushnil(L); return 1; }
+    lua_pushstring(L, lines[(NSUInteger)(n - 1)].UTF8String);
+    return 1;
+}
+
+/// file.resetLineText(path, n, text)
+/// 替换第 n 行 (1-based), 行不存在则不操作
+static int l_file_resetLineText(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    int n = (int)luaL_checkinteger(L, 2);
+    size_t tlen = 0;
+    const char *t = luaL_checklstring(L, 3, &tlen);
+    if (n < 1) { lua_pushboolean(L, NO); return 1; }
+
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:&err];
+    if (err || !content) { lua_pushboolean(L, NO); return 1; }
+    NSMutableArray<NSString *> *lines = [[content componentsSeparatedByString:@"\n"] mutableCopy];
+    if ((NSUInteger)n > lines.count) { lua_pushboolean(L, NO); return 1; }
+    lines[(NSUInteger)(n - 1)] = [[NSString alloc] initWithBytes:t length:tlen encoding:NSUTF8StringEncoding];
+    NSString *result = [lines componentsJoinedByString:@"\n"];
+    BOOL ok = [result writeToFile:@(path) atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+/// file.insertLineText(path, n, text)
+/// 在第 n 行前插入一行 (1-based), n 超过总行数则追加到末尾
+static int l_file_insertLineText(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    int n = (int)luaL_checkinteger(L, 2);
+    size_t tlen = 0;
+    const char *t = luaL_checklstring(L, 3, &tlen);
+    if (n < 1) { lua_pushboolean(L, NO); return 1; }
+
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:&err];
+    if (err || !content) { lua_pushboolean(L, NO); return 1; }
+    NSMutableArray<NSString *> *lines = [[content componentsSeparatedByString:@"\n"] mutableCopy];
+    NSString *newLine = [[NSString alloc] initWithBytes:t length:tlen encoding:NSUTF8StringEncoding];
+    NSUInteger insertIdx = (NSUInteger)(n - 1);
+    if (insertIdx >= lines.count) {
+        [lines addObject:newLine];
+    } else {
+        [lines insertObject:newLine atIndex:insertIdx];
+    }
+    NSString *result = [lines componentsJoinedByString:@"\n"];
+    BOOL ok = [result writeToFile:@(path) atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
 #pragma mark - 剪贴板
 
 static int l_pasteboard_get(lua_State *L) {
@@ -1848,6 +2335,8 @@ static void lua_register_all(lua_State *L) {
         {"unkeep",     l_screen_unkeep},
         {"getSize",    l_screen_getSize},
         {"findText",   l_screen_findText},
+        {"paddleOcr",  l_screen_paddleOcr},
+        {"visionOcr",  l_screen_visionOcr},
         {NULL, NULL}
     };
     luaL_newlib(L, screenLib);
@@ -1864,13 +2353,36 @@ static void lua_register_all(lua_State *L) {
         {"alert",       l_sys_alert},
         {"alertButtons",l_sys_alertButtons},
         {"toast",       l_sys_toast},
+        {"setFloatBallPoint", l_sys_setFloatBallPoint},
+        {"mtime",              l_sys_mtime},
+        {"availableMemory",    l_sys_availableMemory},
+        {"processUsedMemory",  l_sys_processUsedMemory},
+        {"usedMemory",          l_sys_usedMemory},
+        {"version",             l_sys_version},
+        {"palyAudio",           l_sys_palyAudio},
         {NULL, NULL}
     };
     luaL_newlib(L, sysLib);
     lua_setglobal(L, "sys");
 
-    // ── device 模块(别名) ──
-    luaL_newlib(L, sysLib);
+    // ── device 模块 ──
+    static const luaL_Reg deviceLib[] = {
+        {"udid",                  l_device_udid},
+        {"serialNumber",          l_device_serialNumber},
+        {"turnOnAssistiveTouch",  l_device_turnOnAssistiveTouch},
+        {"turnOffAssistiveTouch", l_device_turnOffAssistiveTouch},
+        {"isScreenLocked",        l_device_isScreenLocked},
+        {"unlockScreen",          l_device_unlockScreen},
+        {"name",                  l_device_name},
+        {"type",                  l_device_type},
+        {"backlightLevel",        l_device_backlightLevel},
+        {"setBacklightLevel",     l_device_setBacklightLevel},
+        {"lockScreen",            l_device_lockScreen},
+        {"vibrator",              l_device_vibrator},
+        {"setVolume",             l_device_setVolume},
+        {NULL, NULL}
+    };
+    luaL_newlib(L, deviceLib);
     lua_setglobal(L, "device");
 
     // ── app 模块 ──
@@ -1933,6 +2445,15 @@ static void lua_register_all(lua_State *L) {
         {"resDir",   l_file_resDir},    // /var/mobile/touch/res  (资源)
         {"scriptDir", l_file_scriptDir}, // 当前脚本/项目所在目录
         {"readImage",    l_file_readImage},
+        {"addText",      l_file_addText},
+        {"size",         l_file_size},
+        {"list",         l_file_list},
+        {"md5",          l_file_md5},
+        {"getLines",     l_file_getLines},
+        {"lineCount",    l_file_lineCount},
+        {"getLineText",  l_file_getLineText},
+        {"resetLineText",l_file_resetLineText},
+        {"insertLineText", l_file_insertLineText},
         {NULL, NULL}
     };
     luaL_newlib(L, fileLib);

@@ -1004,10 +1004,7 @@ end
 
 -- 单点RGB找色（范围）：bj(x, y, color, err)，x/y 为脚本坐标，color 为 0xRRGGBB
 function bj(x, y, color, err)
-    local c = getColor(x, y)   -- 本项目 API：返回 0xRRGGBB 整数
-    local r  = math.modf(c / 65536)
-    local g  = math.modf(c / 256) % 256
-    local b  = c % 256
+    local r, g, b = screen.getColorRGB(x, y)   -- 直接返回 0~255 的 RGB 分量
     local r1 = math.modf(color / 65536)
     local g1 = math.modf(color / 256) % 256
     local b1 = color % 256

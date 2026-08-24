@@ -28,6 +28,10 @@ typedef NS_ENUM(NSInteger, TSHUDAction) {
 - (void)hide;
 - (void)setScriptRunning:(BOOL)running;
 
+/// 把悬浮球本体中心移动到指定屏幕坐标 (物理屏幕坐标, 不触发贴边动画)。
+/// 限制在屏内, 横竖屏自适应。线程安全 (内部派发主线程)。
+- (void)setBallPoint:(CGPoint)point;
+
 @end
 
 NS_ASSUME_NONNULL_END

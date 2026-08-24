@@ -45,10 +45,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// @return 识别结果数组（按文字在画面中的位置排序）
 - (NSArray<TSOCRResult *> *)recognize:(UIImage *)image;
 
+/// 整屏 OCR (自定义语言)
+/// @param languages 识别语言数组, 如 @[@"zh-Hans", @"en-US"]; 传 nil 用默认
+- (NSArray<TSOCRResult *> *)recognize:(UIImage *)image languages:(nullable NSArray<NSString *> *)languages;
+
 /// 区域 OCR
 /// @param image 待识别的截图
 /// @param region 识别区域（图像坐标）
 - (NSArray<TSOCRResult *> *)recognize:(UIImage *)image inRegion:(CGRect)region;
+
+/// 区域 OCR (自定义语言)
+- (NSArray<TSOCRResult *> *)recognize:(UIImage *)image
+                              inRegion:(CGRect)region
+                              languages:(nullable NSArray<NSString *> *)languages;
 
 /// 在图像中查找包含指定文字的 OCR 结果
 /// @param text  要搜索的文字（支持正则）

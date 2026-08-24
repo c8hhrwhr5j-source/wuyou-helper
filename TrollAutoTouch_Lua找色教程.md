@@ -393,6 +393,139 @@ end
 
 ---
 
+### 3.3 屏幕 OCR（Paddle 风格）`screen.paddleOcr`
+
+对屏幕全屏或指定区域进行 OCR 识别，返回所有识别到的文本块及坐标。底层基于 Apple Vision Framework，与原版 PaddleOCR 行为一致。
+
+#### 调用形式
+
+```lua
+screen.paddleOcr()                      -- 全屏识别
+screen.paddleOcr(x1, y1, x2, y2)       -- 区域识别
+```
+
+#### 参数
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `x1, y1` | number | 可选，区域左上角，默认 `0, 0` |
+| `x2, y2` | number | 可选，区域右下角，默认屏幕右下角 |
+
+#### 返回值
+
+返回数组，每个元素是包含以下字段的 table：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `string` | string | 识别到的文本 |
+| `x` | number | 文本框左上角横坐标（脚本坐标系） |
+| `y` | number | 文本框左上角纵坐标 |
+| `w` | number | 文本框宽度 |
+| `h` | number | 文本框高度 |
+| `confidence` | number | 置信度 [0,1] |
+
+#### 示例
+
+```lua
+-- 全屏识别
+local result = screen.paddleOcr()
+print("识别结果", result)
+for k, v in pairs(result) do
+    print(k, v.string, v.x, v.y, v.w, v.h, v.confidence)
+end
+
+-- 区域识别
+local result = screen.paddleOcr(100, 100, 200, 200)
+print("识别结果", result)
+
+-- 全屏识别并用 screenDraw 框选
+local result = screen.paddleOcr()
+local tab = {}
+for k, v in pairs(result) do
+    local drawView = screenDraw.init(
+        math.ceil(v.x), math.ceil(v.y),
+        math.ceil(v.w), math.ceil(v.h),
+        v.string, 0x00ff00, 1.0, 12, 0x00ff00)
+    table.insert(tab, drawView)
+    drawView:show()
+end
+sys.msleep(1000 * 10)
+```
+
+> 默认识别语言为简体中文、繁体中文、英文。
+
+---
+
+### 3.4 屏幕 OCR（多语言）`screen.visionOcr`
+
+支持自定义识别语言的屏幕 OCR，可识别英语、法语、中文、日语、韩语、俄语等 13 种语言。
+
+#### 调用形式
+
+```lua
+screen.visionOcr()                                -- 全屏, 默认 zh-Hans
+screen.visionOcr(x1, y1, x2, y2)                  -- 区域, 默认 zh-Hans
+screen.visionOcr("en-US", x1, y1, x2, y2)         -- 指定语言 + 区域
+screen.visionOcr("ko-KR")                         -- 指定语言, 全屏
+```
+
+#### 参数
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `lang` | string | 可选，识别语言代码，默认 `zh-Hans` |
+| `x1, y1` | number | 可选，区域左上角，默认 `0, 0` |
+| `x2, y2` | number | 可选，区域右下角，默认屏幕右下角 |
+
+##### 支持的语言代码
+
+| 代码 | 语言 |
+|---|---|
+| `en-US` | 美式英语 |
+| `fr-FR` | 法语 |
+| `it-IT` | 意大利语 |
+| `de-DE` | 德语 |
+| `es-ES` | 西班牙语 |
+| `pt-BR` | 葡萄牙语 |
+| `zh-Hans` | 简体中文 |
+| `zh-Hant` | 繁体中文 |
+| `yue-Hans` | 粤语简体 |
+| `yue-Hant` | 粤语繁体 |
+| `ko-KR` | 韩语 |
+| `ja-JP` | 日语 |
+| `ru-RU` | 俄语 |
+| `uk-UA` | 乌克兰语 |
+
+> 不同 iOS 版本支持的语言可能不同，未支持的语言会被引擎自动忽略。
+
+#### 返回值
+
+返回数组（结构同 `screen.paddleOcr`）：`{string=, x=, y=, w=, h=, confidence=}`。
+
+#### 示例
+
+```lua
+-- 全屏识别（默认中文）
+local result = screen.visionOcr()
+print("识别结果", result)
+
+-- 区域识别（中文）
+local result = screen.visionOcr(100, 100, 200, 200)
+print("识别结果", result)
+
+-- 区域识别（韩文）
+local result = screen.visionOcr("ko-KR", 100, 100, 200, 200)
+print("识别结果", result)
+
+-- 区域识别（英文）
+local result = screen.visionOcr("en-US", 100, 100, 200, 200)
+print("识别结果", result)
+```
+
+> 注：`screen.paddleOcr` 与 `screen.visionOcr` 底层均基于 Apple Vision Framework 的 `VNRecognizeTextRequest`，区别在于 `visionOcr` 支持自定义语言，`paddleOcr` 仅用默认中英文。
+
+---
+
 ## 4. 截屏与屏幕缓存
 
 ### 4.1 保存截屏 `snapshot`
@@ -627,6 +760,127 @@ toast("兼容写法")
 
 ---
 
+### 7.4 设置悬浮球位置 `sys.setFloatBallPoint`
+
+把悬浮球本体中心移动到指定坐标。坐标使用**脚本坐标系**（与 `screen.init` 设置的方向一致，与 `tap`/`findColor` 等同源）——`init(1)` 横屏后传入的就是横屏坐标，`init(0)` 竖屏就是竖屏坐标。若悬浮球当前未显示，会自动显示后再移动。
+
+```lua
+sys.setFloatBallPoint(x, y)
+```
+
+#### 参数
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `x` | number | 脚本坐标系横坐标（与 `screen.init` 方向一致，像素单位） |
+| `y` | number | 脚本坐标系纵坐标 |
+
+#### 示例
+
+```lua
+-- 竖屏脚本: 移到屏幕左上角附近
+screen.init(0)
+sys.setFloatBallPoint(100, 100)
+
+-- 横屏脚本: 移到横屏坐标 (100, 100)
+screen.init(1)
+sys.setFloatBallPoint(100, 100)
+
+-- 移到屏幕中部 (与方向自适应)
+local w, h = getScreenSize()
+sys.setFloatBallPoint(w / 2, h / 2)
+```
+
+> 注：
+> - 坐标对应**悬浮球本体的中心点**，不是窗口左上角。
+> - 移动后**不会触发贴边动画**，悬浮球会停留在指定位置；若后续用户手动拖拽，松手仍会自动贴边。
+> - 坐标系与 `tap(x, y)` / `findColor` 完全一致，无需手动换算。
+
+---
+
+## 7.5 时间戳与内存 `sys.mtime` / `sys.availableMemory` / `sys.processUsedMemory` / `sys.usedMemory`
+
+```lua
+sys.mtime()               -- → number  毫秒级时间戳 (UTC, 自 1970-01-01 起的毫秒数)
+sys.availableMemory()     -- → number  系统可用物理内存 (字节)
+sys.processUsedMemory()   -- → number  当前进程使用的物理内存 (字节, resident_size)
+sys.usedMemory()          -- → number  系统已用物理内存 (字节)
+```
+
+#### 示例
+
+```lua
+-- 计时
+local t1 = sys.mtime()
+-- ... 执行任务 ...
+local t2 = sys.mtime()
+print(string.format("耗时: %.0f ms", t2 - t1))
+
+-- 监控内存
+print(string.format("可用: %.2f MB, 进程占用: %.2f MB",
+    sys.availableMemory() / 1048576,
+    sys.processUsedMemory() / 1048576))
+
+-- 内存不足时报警
+if sys.availableMemory() < 50 * 1024 * 1024 then
+    print("⚠️ 内存不足 50MB")
+    device.vibrator()
+end
+```
+
+#### 实现说明
+
+- `mtime` 用 `NSDate.timeIntervalSince1970 * 1000`，毫秒精度。
+- 三个内存函数都基于 `mach` API（`host_statistics` + `task_info`）。
+- `availableMemory = (free + inactive + speculative) * pageSize`，这是系统级可回收的内存。
+- `processUsedMemory` 用 `task_basic_info.resident_size`，表示本进程实际占用的物理内存。
+- `usedMemory = (active + wire) * pageSize`，是系统已committed的内存。
+
+---
+
+## 7.6 App 版本号 `sys.version`
+
+```lua
+sys.version()    -- → string  App 版本 (CFBundleShortVersionString)
+```
+
+#### 示例
+
+```lua
+print("当前 App 版本: " .. sys.version())
+```
+
+---
+
+## 7.7 播放音频 `sys.palyAudio`
+
+> 注意函数名拼写为 `palyAudio`（保留原版拼写兼容旧脚本）。
+
+异步播放本地音频文件（不阻塞，可重复调用切换音频）。
+
+```lua
+sys.palyAudio(path)    -- path: 音频文件本地路径
+```
+
+#### 示例
+
+```lua
+-- 播放提示音
+sys.palyAudio(file.resDir() .. "/alert.mp3")
+
+-- 任务完成播放铃声
+sys.palyAudio("/var/mobile/touch/res/done.wav")
+```
+
+#### 实现说明
+
+- 使用 `AVAudioPlayer`，内部用静态变量保持 player 引用，避免被释放导致播放中断。
+- 支持 `.mp3` / `.wav` / `.m4a` 等系统原生支持的格式。
+- 重复调用会停止上一次播放并切换到新音频。
+- 失败时返回 `false`（如文件不存在、格式不支持），并输出日志。
+
+---
+
 ## 8. 屏幕方向与坐标系
 
 ### 8.1 屏幕尺寸 `getScreenSize`
@@ -659,6 +913,229 @@ screen.init(2)   -- 脚本坐标系 = home 在左
 - 返回值也统一换算回脚本坐标系：`getScreenSize`、`findText`、`appNode` 节点坐标
 
 > 示例：横屏游戏按 `screen.init(1)` 写脚本，即使设备被切到竖屏，触摸和取色依然落在横屏坐标系的正确位置。
+
+---
+
+## 8.3 设备唯一标识 `device.udid` / `device.serialNumber`
+
+获取设备 UDID 和序列号。**仅 TrollStore 安装的 App 可用**（依赖 MobileGestalt 私有 API 和 `com.apple.private.MobileGestalt.AllowedProtectedKeys` 权限）；沙盒 App Store 安装会返回 `nil`。
+
+```lua
+device.udid()              -- → string / nil
+device.serialNumber()      -- → string / nil
+```
+
+#### 返回值
+
+| 函数 | 类型 | 说明 |
+|---|---|---|
+| `device.udid()` | string / nil | 设备 UDID（如 `00008101-001A1B2C3D4E`） |
+| `device.serialNumber()` | string / nil | 设备序列号 |
+
+#### 示例
+
+```lua
+local udid = device.udid()
+if udid then
+    print(string.format("当前设备的 UDID: %s", udid))
+else
+    print("无法获取 UDID（沙盒环境或权限不足）")
+end
+
+local sn = device.serialNumber()
+if sn then
+    print(string.format("当前设备的序列号: %s", sn))
+end
+```
+
+> 实现说明：通过 `dlopen` 动态加载 `MobileGestalt.framework`，调用 `MGCopyAnswer(@"UniqueDeviceID")` / `MGCopyAnswer(@"SerialNumber")` 读取。本 App 的 entitlements 已声明 `com.apple.private.MobileGestalt.AllowedProtectedKeys=true`，TrollStore 重签后即可访问。
+
+---
+
+## 8.4 辅助触控开关 `device.turnOnAssistiveTouch` / `device.turnOffAssistiveTouch`
+
+启用或停用 iOS 的辅助触控（小白点）。**仅 TrollStore 安装的 App 可用**（需 `com.apple.assistivetouch.daemon` 权限，已在 entitlements 中声明）。
+
+```lua
+device.turnOnAssistiveTouch()    -- 启用辅助触控 → boolean
+device.turnOffAssistiveTouch()   -- 停用辅助触控 → boolean
+```
+
+#### 返回值
+
+| 函数 | 类型 | 说明 |
+|---|---|---|
+| `device.turnOnAssistiveTouch()` | boolean | `true` = 成功修改 plist + 已发送通知 |
+| `device.turnOffAssistiveTouch()` | boolean | 同上 |
+
+#### 示例
+
+```lua
+-- 启用辅助触控
+if device.turnOnAssistiveTouch() then
+    print("辅助触控已启用")
+else
+    print("启用失败 (权限不足或存储问题)")
+end
+
+-- 停用辅助触控
+device.turnOffAssistiveTouch()   -- 停用屏幕上的小白点
+```
+
+#### 实现说明
+
+1. 修改 `/var/mobile/Library/Preferences/com.apple.Accessibility.plist` 中的 AssistiveTouch 相关键（兼容多个 iOS 版本的键名）
+2. 通过 `CFNotificationCenterPostNotification` 广播 Darwin 通知 `com.apple.accessibility.assistiveTouch.changed`
+3. SpringBoard 监听到通知后重新加载 plist，刷新 AssistiveTouch 状态
+
+> **注意**：
+> - 调用后辅助触控状态会立即生效，不需要重启 SpringBoard。
+> - 如果返回 `false`，可能是 plist 写入失败（存储满）或权限不足（非 TrollStore 环境）。
+> - 用户手动到「设置 → 辅助功能 → 触控 → 辅助触控」中切换时也会写同一个 plist，所以脚本设置的状态会被用户后续手动操作覆盖。
+
+---
+
+## 8.5 屏幕锁定查询与解锁 `device.isScreenLocked` / `device.unlockScreen`
+
+查询屏幕是否锁定，以及在无密码设备上唤醒并解锁屏幕。挂机脚本通常搭配使用：检测到锁屏就调用解锁。
+
+```lua
+device.isScreenLocked()    -- → boolean
+device.unlockScreen()      -- → boolean
+```
+
+#### 返回值
+
+| 函数 | 类型 | 说明 |
+|---|---|---|
+| `device.isScreenLocked()` | boolean | `true` = 屏幕锁定中 |
+| `device.unlockScreen()` | boolean | `true` = 唤醒+解锁事件已发送 |
+
+#### 示例
+
+```lua
+-- 检测锁屏并解锁
+if device.isScreenLocked() then
+    print("屏幕锁定中, 尝试解锁...")
+    device.unlockScreen()
+    sys.msleep(1000)   -- 等待系统响应
+    if device.isScreenLocked() then
+        print("解锁失败 (可能有密码?)")
+    else
+        print("已解锁")
+    end
+else
+    print("屏幕未锁定")
+end
+
+-- 挂机脚本定期检查
+while true do
+    if device.isScreenLocked() then
+        device.unlockScreen()
+        sys.msleep(2000)
+    end
+    -- ... 挂机逻辑
+    sys.msleep(5000)
+end
+```
+
+#### 实现说明
+
+- **`isScreenLocked`**：通过 Darwin 通知 `com.apple.springboard.lockstate` 的 `notify_get_state` 查询，SpringBoard 维护此状态值（1=锁定，0=解锁）。
+- **`unlockScreen`**：
+  1. 调用 BackBoardServices 的 `SBSSetBacklightLevel(1.0)` 唤醒屏幕（备选 `BKSDisplaySetBacklightFactor`，再备选 `GSEventSetBacklightLevel`）
+  2. 等待 300ms 让背光亮起
+  3. 发送 Home 键事件（复用 `TSKeyboardInjector.pressHome`），无密码设备会直接进桌面
+
+> **关于密码**：
+> - 设备**没有设置锁屏密码**时，`unlockScreen` 可直接解锁到桌面。
+> - 设备**设置了密码**时，`unlockScreen` 只能唤醒屏幕到锁屏界面，**无法**自动输入密码进桌面。这是 iOS 安全机制决定的，需要用户在挂机前关闭密码。
+> - 函数始终返回 `true`（只要唤醒+事件注入完成），调用方应配合 `isScreenLocked` 复查是否真的解锁成功。
+
+---
+
+## 8.6 设备基础信息 `device.name` / `device.type`
+
+查询设备名称与类型。
+
+```lua
+device.name()    -- → string  设备名
+device.type()    -- → string  iPhone / iPad / TV / CarPlay / Mac / Unspecified
+```
+
+#### 示例
+
+```lua
+print("设备名: " .. device.name())
+print("设备类型: " .. device.type())
+```
+
+---
+
+## 8.7 屏幕亮度控制 `device.backlightLevel` / `device.setBacklightLevel`
+
+读取或设置屏幕亮度（基于 `UIScreen.mainScreen.brightness`，公开 API）。
+
+```lua
+device.backlightLevel()        -- → number  [0, 1] 当前亮度
+device.setBacklightLevel(n)    -- n ∈ [0, 1]
+```
+
+#### 示例
+
+```lua
+-- 调暗屏幕省电
+device.setBacklightLevel(0.3)
+
+-- 检测低亮度环境再调亮
+if device.backlightLevel() < 0.5 then
+    device.setBacklightLevel(1.0)
+end
+```
+
+---
+
+## 8.8 锁屏与震动 `device.lockScreen` / `device.vibrator`
+
+```lua
+device.lockScreen()    -- 锁定屏幕 (等同电源键)
+device.vibrator()      -- 系统震动反馈
+```
+
+`lockScreen` 复用 `TSKeyboardInjector.pressLock`（优先 `GSEventLockDevice`，备选发送 lock 按键事件）。
+
+#### 示例
+
+```lua
+-- 执行完任务后锁屏
+device.lockScreen()
+
+-- 任务完成震动提示
+device.vibrator()
+```
+
+---
+
+## 8.9 系统音量 `device.setVolume`
+
+设置系统音量（通过 `MPVolumeView` 滑块 hack 实现，公开 API 范围内）。
+
+```lua
+device.setVolume(n)    -- n ∈ [0, 1]
+```
+
+#### 实现说明
+
+- iOS 11+ 苹果禁止纯代码直接修改系统音量，函数会在屏幕外创建一个临时 `MPVolumeView`，找到其内部的 `UISlider` 子视图并设置 value，触发系统音量更新，然后移除视图。
+- 函数**异步执行**（派发主线程），调用后 200ms 内生效。
+
+#### 示例
+
+```lua
+device.setVolume(0.5)   -- 设置音量为 50%
+device.setVolume(0.0)   -- 静音
+device.setVolume(1.0)   -- 最大音量
+```
 
 ---
 
@@ -804,6 +1281,98 @@ local configPath = file.scriptDir() .. "/config.json"
 local configText = file.read(configPath)
 local config = json.decode(configText)
 ```
+
+### 11.5 追加文本 `file.addText`
+
+追加文本到文件末尾（文件不存在则创建）。
+
+```lua
+file.addText(path, text)    -- → boolean
+```
+
+```lua
+-- 日志追加
+file.addText(file.logDir() .. "/run.log",
+             os.date("[%Y-%m-%d %H:%M:%S] 任务完成\n"))
+```
+
+### 11.6 文件大小 `file.size`
+
+```lua
+file.size(path)    -- → number  字节数, 不存在返回 -1
+```
+
+```lua
+local sz = file.size("/var/mobile/touch/res/big.png")
+print(string.format("文件大小: %.2f KB", sz / 1024))
+```
+
+### 11.7 目录列表 `file.list`
+
+列出目录下所有条目（不含路径，不递归）。
+
+```lua
+file.list(dirPath)    -- → table {name1, name2, ...} / nil
+```
+
+```lua
+local files = file.list(file.luaDir())
+for i, name in ipairs(files) do
+    print(i, name)
+end
+```
+
+### 11.8 文件 MD5 `file.md5`
+
+```lua
+file.md5(path)    -- → string  32 位十六进制小写 / nil
+```
+
+```lua
+-- 校验文件完整性
+local h1 = file.md5(file.resDir() .. "/template.png")
+print("MD5: " .. h1)
+```
+
+### 11.9 行操作 `file.getLines` / `file.lineCount` / `file.getLineText` / `file.resetLineText` / `file.insertLineText`
+
+按行读写文件（1-based 索引）。
+
+```lua
+file.getLines(path)               -- → table {line1, line2, ...} / nil
+file.lineCount(path)              -- → number  总行数 (-1 表示失败)
+file.getLineText(path, n)        -- → string  第 n 行 / nil
+file.resetLineText(path, n, text) -- → boolean  替换第 n 行
+file.insertLineText(path, n, text) -- → boolean 在第 n 行前插入
+```
+
+```lua
+local path = file.scriptDir() .. "/config.txt"
+
+-- 读取所有行
+local lines = file.getLines(path)
+print("共 " .. #lines .. " 行")
+
+-- 读取第 3 行
+local line3 = file.getLineText(path, 3)
+print("第 3 行: " .. line3)
+
+-- 替换第 2 行
+file.resetLineText(path, 2, "新内容")
+
+-- 在第 1 行前插入
+file.insertLineText(path, 1, "插入的首行")
+
+-- 追加到末尾 (n 超过总行数即追加)
+file.insertLineText(path, 999, "末尾追加")
+```
+
+#### 实现说明
+
+- 行分隔符统一为 `\n`，写入时也会用 `\n` 重新拼接。
+- `resetLineText` 当 `n > lineCount` 时不操作返回 `false`。
+- `insertLineText` 当 `n > lineCount` 时自动追加到末尾。
+- 大文件场景下效率不高（每次都全量读+写），适合配置文件、日志索引等小文件。
 
 ---
 
@@ -1141,6 +1710,8 @@ end
 | `getColor(x, y)` | 取色 → 0xRRGGBB |
 | `screen.getColorRGB(x, y)` | 取色 RGB 分量 → r, g, b（0~255） |
 | `findText(text)` | OCR 找文字 → x,y / nil |
+| `screen.paddleOcr([x1,y1,x2,y2])` | 屏幕 OCR（默认中英文） → 文本数组 |
+| `screen.visionOcr([lang][,x1,y1,x2,y2])` | 屏幕 OCR（多语言） → 文本数组 |
 
 ### 截屏与缓存
 
@@ -1172,6 +1743,7 @@ end
 | `toast(msg[, ms][, hidden])` / `sys.toast(...)` | 屏幕悬浮提示（非阻塞） |
 | `sys.alert(msg[, timeout][, title])` | 阻塞弹窗 |
 | `sys.alertButtons(msg, {btns}[, title][, timeout])` | 带按钮弹窗 → 按钮文本 / nil |
+| `sys.setFloatBallPoint(x, y)` | 设置悬浮球位置（物理屏幕坐标，中心点） |
 
 ### 屏幕与方向
 
@@ -1189,6 +1761,28 @@ end
 | `sys.model()` | 设备型号 |
 | `sys.getIP()` | WiFi IP |
 | `sys.battery()` | 电量 0~1 |
+| `sys.mtime()` | 毫秒级时间戳 → number |
+| `sys.availableMemory()` | 系统可用内存 (字节) → number |
+| `sys.processUsedMemory()` | 进程内存 (字节) → number |
+| `sys.usedMemory()` | 系统已用内存 (字节) → number |
+| `sys.version()` | App 版本 → string |
+| `sys.palyAudio(path)` | 播放音频文件 → boolean |
+| `sys.alert(msg)` | 阻塞弹窗 |
+| `sys.toast(msg)` | 屏幕悬浮提示 |
+| `sys.setFloatBallPoint(x, y)` | 移动悬浮球 |
+| `device.udid()` | 设备 UDID → string / nil |
+| `device.serialNumber()` | 设备序列号 → string / nil |
+| `device.turnOnAssistiveTouch()` | 启用辅助触控 → boolean |
+| `device.turnOffAssistiveTouch()` | 停用辅助触控 → boolean |
+| `device.isScreenLocked()` | 屏幕是否锁定 → boolean |
+| `device.unlockScreen()` | 唤醒+解锁屏幕 → boolean |
+| `device.name()` | 设备名 → string |
+| `device.type()` | 设备类型 → string (iPhone/iPad/...) |
+| `device.backlightLevel()` | 屏幕亮度 [0,1] → number |
+| `device.setBacklightLevel(n)` | 设置屏幕亮度 |
+| `device.lockScreen()` | 锁定屏幕 |
+| `device.vibrator()` | 系统震动 |
+| `device.setVolume(n)` | 设置系统音量 [0,1] |
 
 ### 应用管理
 
@@ -1225,6 +1819,15 @@ end
 | `file.resDir()` | `/var/mobile/touch/res` |
 | `file.scriptDir()` | 当前脚本/项目目录 |
 | `file.readImage(path)` | 图片尺寸 → w,h（像素） |
+| `file.addText(path, text)` | 追加文本 → boolean |
+| `file.size(path)` | 文件大小（字节）→ number / -1 |
+| `file.list(path)` | 目录列表 → table / nil |
+| `file.md5(path)` | 文件 MD5 → string / nil |
+| `file.getLines(path)` | 所有行 → table / nil |
+| `file.lineCount(path)` | 总行数 → number |
+| `file.getLineText(path, n)` | 第 n 行 → string / nil |
+| `file.resetLineText(path, n, text)` | 替换第 n 行 → boolean |
+| `file.insertLineText(path, n, text)` | 插入到第 n 行前 → boolean |
 
 ### 字符串与 JSON
 

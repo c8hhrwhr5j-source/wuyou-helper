@@ -50,10 +50,20 @@
 #pragma mark - 整屏 OCR
 
 - (NSArray<TSOCRResult *> *)recognize:(UIImage *)image {
-    return [self recognize:image inRegion:CGRectMake(0, 0, image.size.width, image.size.height)];
+    return [self recognize:image inRegion:CGRectZero languages:nil];
+}
+
+- (NSArray<TSOCRResult *> *)recognize:(UIImage *)image languages:(NSArray<NSString *> *)languages {
+    return [self recognize:image inRegion:CGRectZero languages:languages];
 }
 
 - (NSArray<TSOCRResult *> *)recognize:(UIImage *)image inRegion:(CGRect)region {
+    return [self recognize:image inRegion:region languages:nil];
+}
+
+- (NSArray<TSOCRResult *> *)recognize:(UIImage *)image
+                              inRegion:(CGRect)region
+                              languages:(NSArray<NSString *> *)languages {
     if (!image) return @[];
 
     CGImageRef cgImage = image.CGImage;
@@ -123,7 +133,12 @@
 
     // 配置识别参数
     req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;  // 精确模式
-    req.recognitionLanguages = @[@"zh-Hans", @"zh-Hant", @"en-US"]; // 中英文
+    // 语言: 传入则用传入的, 否则用默认中英文
+    if (languages.count > 0) {
+        req.recognitionLanguages = languages;
+    } else {
+        req.recognitionLanguages = @[@"zh-Hans", @"zh-Hant", @"en-US"];
+    }
     req.usesLanguageCorrection = YES;
     req.minimumTextHeight = 0.01;  // 最小识别文字高度(归一化)
 
