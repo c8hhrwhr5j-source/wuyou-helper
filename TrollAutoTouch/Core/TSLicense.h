@@ -40,6 +40,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 设备机器码 (keychain 持久 UUID, 供土豆 mac 参数做设备绑定)
 + (NSString *)deviceId;
 
+/// 本机硬件指纹是否与激活时绑定的指纹一致(防 deviceId 被复制到其他设备共享卡密):
+///   - 从未绑定指纹(老版本/读取不到硬件标识) → YES 放行
+///   - 绑定过且当前读到的硬件标识 hash 与绑定值一致 → YES
+///   - 绑定过但不一致(设备号被复制) → NO, 调用方应清除激活并锁定
++ (BOOL)isHardwareMatch;
+
 @end
 
 NS_ASSUME_NONNULL_END

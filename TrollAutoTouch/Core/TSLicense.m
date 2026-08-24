@@ -12,13 +12,19 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <CommonCrypto/CommonCryptor.h>
 #import <Security/Security.h>
+#import <dlfcn.h>
 
 static NSString *const kKeychainService = @"com.trollautotouch.license";
 static NSString *const kKeychainAccountActivation = @"activation";   // 激活凭证 JSON
 static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备机器码
+static NSString *const kKeychainAccountFingerprint = @"hwFingerprint"; // 激活时绑定的硬件指纹(md5)
+
+// 硬件指纹混淆盐: 避免指纹直接可被识别为 hash(UDID)
+static NSString *const kFingerprintSalt = @"trollautotouch.hw.v1";
 
 @interface TSLicense ()
 @property (nonatomic, assign) BOOL activated;
++ (void)bindHardwareFingerprint; // 私有类方法: 供激活/校验链路调用
 @end
 
 @implementation TSLicense
@@ -59,6 +65,8 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
             };
             [self _saveActivationRecord:rec];
             self->_activated = YES;
+            // 绑定本机硬件指纹(UDID/序列号), 防 deviceId 被复制到其他设备共享卡密
+            [TSLicense bindHardwareFingerprint];
             // 把服务器到期时间隐藏写入本地三份(防篡改冗余)
             if (exTime.length) {
                 NSDate *d = [self _parseExTime:exTime];
@@ -78,6 +86,7 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
 - (void)deactivate {
     [self _deleteActivationRecord];
     [TSExpiryStore clearAll]; // 同时清除三份到期时间文件
+    KeychainDelete(kKeychainService, kKeychainAccountFingerprint); // 清除硬件指纹
     _activated = NO;
 }
 
@@ -92,10 +101,17 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         if (completion) completion(NO, NO, @"未激活");
         return;
     }
+    // 硬件指纹校验(本地): 本机 UDID/序列号与激活时绑定值不一致 → 判定 deviceId 被复制, 锁定
+    if (![TSLicense isHardwareMatch]) {
+        [self deactivate];
+        if (completion) completion(NO, NO, @"设备硬件指纹校验异常，已锁定");
+        return;
+    }
     [self _requestVerifyCard:rec[@"card"]
                   completion:^(BOOL ok, BOOL networkError, NSString *msg, NSString *exTime) {
         if (ok) {
             // 校验通过: 同步服务端最新到期时间, 避免本地凭证过期不更新
+            [TSLicense bindHardwareFingerprint]; // 兼容: 老版本激活未绑指纹, 校验通过后自动补绑
             if (exTime.length) {
                 NSDate *d = [self _parseExTime:exTime];
                 if (d) {
@@ -396,6 +412,58 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
     KeychainSave(kKeychainService, kKeychainAccountDevice,
                  [did dataUsingEncoding:NSUTF8StringEncoding]);
     return did;
+}
+
+// MARK: - 硬件指纹 (防设备号复制共享)
+
+typedef CFTypeRef (*MGCopyAnswerFunc)(CFStringRef key);
+
+// 动态调用 MobileGestalt 私有 API(MGCopyAnswer), 需 no-sandbox + platform-application entitlement;
+// 库或符号不可用时返回 nil, 调用方按"读不到硬件标识"降级放行, 避免误伤
+static NSString *MGAnswerString(NSString *key) {
+    static MGCopyAnswerFunc func = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void *handle = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
+        if (handle) {
+            func = (MGCopyAnswerFunc)dlsym(handle, "MGCopyAnswer");
+        }
+    });
+    if (!func) return nil;
+    CFTypeRef value = func((__bridge CFStringRef)key);
+    if (!value) return nil;
+    if (CFGetTypeID(value) == CFStringGetTypeID()) {
+        return (__bridge_transfer NSString *)value; // Copy 约定: 转移所有权交由 ARC 释放
+    }
+    CFRelease(value);
+    return nil;
+}
+
+// 本机硬件标识: UDID 优先(与硬件绑定, 重装/删 App 不重置), 序列号兜底
++ (NSString *)hardwareIdentifier {
+    NSString *udid = MGAnswerString(@"UniqueDeviceID");
+    if (udid.length) return udid;
+    return MGAnswerString(@"SerialNumber");
+}
+
+// 激活时把当前硬件标识的 md5 写入 keychain(与 deviceId 分开存, 复制 keychain 也带不走本机硬件标识)
++ (void)bindHardwareFingerprint {
+    NSString *hw = [self hardwareIdentifier];
+    if (!hw.length) return; // 读不到硬件(非 no-sandbox 等)保持"未绑定"状态, 校验时放行
+    NSString *fp = [self md5Hex:[NSString stringWithFormat:@"%@|%@", hw, kFingerprintSalt]];
+    KeychainSave(kKeychainService, kKeychainAccountFingerprint,
+                 [fp dataUsingEncoding:NSUTF8StringEncoding]);
+}
+
++ (BOOL)isHardwareMatch {
+    NSData *d = KeychainData(kKeychainService, kKeychainAccountFingerprint);
+    if (!d.length) return YES; // 从未绑定(老版本/读不到硬件) → 放行
+    NSString *stored = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!stored.length) return YES;
+    NSString *hw = [self hardwareIdentifier];
+    if (!hw.length) return YES; // 当前读不到硬件 → 降级放行(不误伤)
+    NSString *cur = [self md5Hex:[NSString stringWithFormat:@"%@|%@", hw, kFingerprintSalt]];
+    return [cur isEqualToString:stored];
 }
 
 // MARK: - keychain
