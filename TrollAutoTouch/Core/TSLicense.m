@@ -7,6 +7,7 @@
 
 #import "TSLicense.h"
 #import "TSLicenseConfig.h"
+#import "TSExpiryStore.h"
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <CommonCrypto/CommonCryptor.h>
@@ -58,6 +59,11 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
             };
             [self _saveActivationRecord:rec];
             self->_activated = YES;
+            // 把服务器到期时间隐藏写入本地三份(防篡改冗余)
+            if (exTime.length) {
+                NSDate *d = [self _parseExTime:exTime];
+                if (d) [TSExpiryStore writeExpiryTime:d];
+            }
         }
         if (completion) completion(ok, msg);
     }];
@@ -71,13 +77,15 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
 
 - (void)deactivate {
     [self _deleteActivationRecord];
+    [TSExpiryStore clearAll]; // 同时清除三份到期时间文件
     _activated = NO;
 }
 
-// 已激活状态下的静默联网校验(每次启动调用):
+// 已激活状态下的静默联网校验(每次启动 + 每6小时周期调用):
+//   - 校验通过 → 若服务端返回到期时间则更新本地凭证并覆盖写入三份隐藏到期文件
 //   - 服务端明确判定无效 → 清除激活, 由调用方转入试用流程
-//   - 网络异常 → 保留激活离线放行, 避免误杀
-//   - 校验通过 → 若服务端返回到期时间则更新本地凭证(修复"长期有效"陈旧信息)
+//   - 网络异常 → 校验本地三份隐藏到期文件: 三份一致且未到期放行;
+//                 不一致判定非法设备锁定; 三份缺失(从未联网写入)放行
 - (void)refreshValidWithCompletion:(void (^)(BOOL valid, BOOL networkError, NSString *_Nullable msg))completion {
     NSDictionary *rec = [self _loadActivationRecord];
     if (!rec || ![rec[@"card"] length]) {
@@ -89,15 +97,42 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         if (ok) {
             // 校验通过: 同步服务端最新到期时间, 避免本地凭证过期不更新
             if (exTime.length) {
-                NSMutableDictionary *m = [rec mutableCopy];
-                m[@"exTime"] = exTime;
-                [self _saveActivationRecord:m];
+                NSDate *d = [self _parseExTime:exTime];
+                if (d) {
+                    NSMutableDictionary *m = [rec mutableCopy];
+                    m[@"exTime"] = exTime;
+                    [self _saveActivationRecord:m];
+                    // 覆盖写入三份隐藏到期时间文件
+                    [TSExpiryStore writeExpiryTime:d];
+                }
             }
             if (completion) completion(YES, NO, nil);
             return;
         }
         if (networkError) {
-            // 离线放行, 保持激活状态, 下次启动再校验
+            // 验证不了(网络失败): 校验本地三份到期时间文件
+            BOOL tampered = NO;
+            NSDate *localExpiry = [TSExpiryStore readVerifiedExpiry:&tampered];
+            if (tampered) {
+                // 三份时间对不上 → 判定非法设备
+                [TSExpiryStore clearAll];
+                [self deactivate];
+                if (completion) completion(NO, NO, @"设备到期文件校验异常，已锁定");
+                return;
+            }
+            if (localExpiry) {
+                if ([localExpiry timeIntervalSinceNow] > 0) {
+                    // 三份一致且未到期 → 放行
+                    if (completion) completion(NO, YES, nil);
+                    return;
+                }
+                // 三份一致但已到期 → 判定到期
+                [TSExpiryStore clearAll];
+                [self deactivate];
+                if (completion) completion(NO, NO, @"卡密已到期");
+                return;
+            }
+            // 三份文件缺失(从未成功联网写入): 保持激活放行, 不误杀首次使用设备
             if (completion) completion(NO, YES, msg);
             return;
         }
@@ -105,6 +140,20 @@ static NSString *const kKeychainAccountDevice = @"deviceId";         // 设备�
         [self deactivate];
         if (completion) completion(NO, NO, msg ?: @"卡密校验失败");
     }];
+}
+
+// 解析服务端到期时间字符串 -> NSDate; 解析失败返回 nil(调用方不写三份, 保留旧值)
+- (NSDate *)_parseExTime:(NSString *)s {
+    if (!s.length) return nil;
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    NSDate *d = [fmt dateFromString:s];
+    if (!d) {
+        fmt.dateFormat = @"yyyy-MM-dd";
+        d = [fmt dateFromString:s];
+    }
+    return d;
 }
 
 // MARK: - 土豆 API 请求
