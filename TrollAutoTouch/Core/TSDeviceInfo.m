@@ -157,8 +157,7 @@ static NSString *const kAccessibilityPlistPath =
 static const char *const kATCacheChangedNotify1 = "com.apple.accessibility.cache.axsettings";
 static const char *const kATCacheChangedNotify2 = "com.apple.accessibility.cache";
 
-// notify_post 声明 (位于 libSystem.dylib, 无需额外链接)
-extern int notify_post(const char *name);
+// notify_post 由 <notify.h> 声明, 无需 extern
 
 // 通过 sysctl 枚举进程并 SIGKILL 指定名称的进程
 // iOS 上 system() 不可用, 故用纯 POSIX 方式

@@ -70,9 +70,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// @return 唤醒+事件注入成功返回 YES, 失败返回 NO
 - (BOOL)unlockScreen;
 
-/// 设备名 ([UIDevice currentDevice].name)
-- (NSString *)deviceName;
-
 /// 设备类型: "iPhone" / "iPad" / "TV" / "CarPlay" / "Unspecified"
 - (NSString *)deviceType;
 
