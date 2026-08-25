@@ -22,6 +22,7 @@
 #import "../HUD/TSHUDWindow.h"
 #import "../HUD/TSHUDHost.h"
 #import "../Common/TSPaths.h"
+#import "../Common/TSLogStore.h"
 #import "TSLogViewController.h"
 #import "TSAppListViewController.h"
 
