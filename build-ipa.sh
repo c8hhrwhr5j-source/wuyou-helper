@@ -187,6 +187,8 @@ case "$MODE" in
       CODE_SIGNING_ALLOWED=NO \
       CODE_SIGNING_REQUIRED=NO \
       CODE_SIGN_IDENTITY="" \
+      STRIP_INSTALLED_PRODUCT=NO \
+      COPY_PHASE_STRIP=NO \
       -derivedDataPath "$BUILD_DIR/DerivedData" \
       build
     APP="$(find "$BUILD_DIR/DerivedData" -name 'TrollAutoTouch.app' -type d | head -1)"

@@ -21,4 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/// 记录 TAS 音量键监听运行状态 (供崩溃报告展示, 由 TSLuaBridge 开/关时调用)
+void TSCrashSetVolumeMonitorRunning(int running);
+
 NS_ASSUME_NONNULL_END

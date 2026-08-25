@@ -20,6 +20,7 @@
 //    - 日志回调在主线程调用 logHandler。
 
 #import "TSLuaBridge.h"
+#import "TSCrashReporter.h"
 #import "../Common/TSLogStore.h"
 #import "../HUD/TSHUDHost.h"
 #import <UIKit/UIKit.h>
@@ -2944,6 +2945,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
 //   脚本运行中 → _handleVolumeKey → 控制菜单;
 //   空闲未运行 → _handleIdleVolumeKey → 询问运行选中脚本。
 - (void)startGlobalVolumeMonitoring {
+    TSCrashSetVolumeMonitorRunning(1);
     TSVolumeKeyMonitor *vm = [TSVolumeKeyMonitor shared];
     __weak typeof(self) weakSelf = self;
     vm.onVolumeKey = ^{
@@ -2960,6 +2962,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
     [TSVolumeKeyMonitor shared].onVolumeKey = nil;
     [[TSVolumeKeyMonitor shared] stop];
     [[TSAudioKeepAlive shared] stop];
+    TSCrashSetVolumeMonitorRunning(0);
     lua_log(@"[音量键] 常驻监听已停止 (TAS 服务关)");
 }
 
