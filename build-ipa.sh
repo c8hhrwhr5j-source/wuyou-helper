@@ -99,6 +99,17 @@ prepare_icons() {
     sips -z 152 152 "$src" --out "$app/AppIcon76x76@2x~ipad.png" >/dev/null 2>&1
     # App Store 1024
     sips -z 1024 1024 "$src" --out "$app/icon-1024.png"          >/dev/null 2>&1
+    # ── 悬浮球图标 (QQMusicIcon): 同时放到 .app 根目录做 fallback ──
+    # TSHUDWindow 会优先走 imageNamed:@"QQMusicIcon" (Assets.car),
+    # 找不到时 fallback 到 [[NSBundle mainBundle] pathForResource:ofType:]
+    # (从根目录直接读 PNG)。用 QQMusic.png 作为源。
+    local qqm_src="$ROOT/QQMusic.png"
+    if [ -f "$qqm_src" ]; then
+      sips -z  80  80 "$qqm_src" --out "$app/QQMusicIcon.png"        >/dev/null 2>&1
+      sips -z 160 160 "$qqm_src" --out "$app/QQMusicIcon@2x.png"     >/dev/null 2>&1
+      sips -z 240 240 "$qqm_src" --out "$app/QQMusicIcon@3x.png"     >/dev/null 2>&1
+      echo "[*] 悬浮球图标已写入 .app 根目录（QQMusicIcon.png + @2x/@3x）"
+    fi
     echo "[*] 图标生成完成（sips）"
   else
     # 无 sips：回退到 Assets.xcassets 中的占位图标
@@ -106,7 +117,15 @@ prepare_icons() {
       cp "$iconset"/*.png "$app/"
       echo "[*] 图标拷贝完成（Assets.xcassets 占位）"
     else
-      echo "[!] 无可用图标"
+      echo "[!] 无可用 App 图标"
+    fi
+    # 悬浮球图标同样 fallback: 从 QQMusicIcon.imageset 直接拷
+    local qqm_set_fb="$ROOT/TrollAutoTouch/Assets.xcassets/QQMusicIcon.imageset"
+    if ls "$qqm_set_fb"/*.png 1>/dev/null 2>&1; then
+      cp "$qqm_set_fb/QQMusicIcon_1x.png" "$app/QQMusicIcon.png"    2>/dev/null || true
+      cp "$qqm_set_fb/QQMusicIcon_2x.png" "$app/QQMusicIcon@2x.png"  2>/dev/null || true
+      cp "$qqm_set_fb/QQMusicIcon_3x.png" "$app/QQMusicIcon@3x.png"  2>/dev/null || true
+      echo "[*] 悬浮球图标 fallback 拷贝完成"
     fi
   fi
 }
@@ -132,8 +151,21 @@ prepare_assets_xcassets() {
     [ -f "$iconset/AppIcon40x40@3x.png" ] || sips -z 120 120 "$src" --out "$iconset/AppIcon40x40@3x.png" >/dev/null 2>&1
     [ -f "$iconset/AppIcon29x29@2x.png" ] || sips -z  58  58 "$src" --out "$iconset/AppIcon29x29@2x.png" >/dev/null 2>&1
     [ -f "$iconset/AppIcon29x29@3x.png" ] || sips -z  87  87 "$src" --out "$iconset/AppIcon29x29@3x.png" >/dev/null 2>&1
-    echo "[*] Assets.xcassets PNG 补齐完成"
   fi
+  # ── 悬浮球图标: 从 QQMusic.png 生成 QQMusicIcon.imageset 1x/2x/3x ──
+  # 保证即使 git checkout 没带上 PNG，构建出的 Assets.car 也含正确的悬浮球图标
+  local qqm_src="$ROOT/QQMusic.png"
+  local qqm_set="$ROOT/TrollAutoTouch/Assets.xcassets/QQMusicIcon.imageset"
+  if command -v sips >/dev/null 2>&1 && [ -f "$qqm_src" ]; then
+    mkdir -p "$qqm_set"
+    sips -z  80  80 "$qqm_src" --out "$qqm_set/QQMusicIcon_1x.png" >/dev/null 2>&1
+    sips -z 160 160 "$qqm_src" --out "$qqm_set/QQMusicIcon_2x.png" >/dev/null 2>&1
+    sips -z 240 240 "$qqm_src" --out "$qqm_set/QQMusicIcon_3x.png" >/dev/null 2>&1
+    echo "[*] 悬浮球图标 (QQMusicIcon.imageset) 已从 QQMusic.png 重新生成"
+  elif [ ! -f "$qqm_src" ]; then
+    echo "[!] 缺少 QQMusic.png，悬浮球图标无法重新生成 (使用仓库既有文件)"
+  fi
+  echo "[*] Assets.xcassets PNG 补齐完成"
 }
 
 case "$MODE" in

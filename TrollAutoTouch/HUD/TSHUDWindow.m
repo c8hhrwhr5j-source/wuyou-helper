@@ -304,13 +304,65 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 }
 
 // 悬浮球图标: QQ 音乐图标 (替换白色粗体 "T")。
-// 使用 Assets 中的 QQMusicIcon 图片, 保持原始颜色 (黄底绿色音符)。
+// 加载优先级:
+//   1) [UIImage imageNamed:@"QQMusicIcon"] — 从 Assets.car 读取 (QQMusicIcon.imageset)
+//   2) [[NSBundle mainBundle] pathForResource:@"QQMusicIcon" ofType:@"png"]
+//      — 从 .app 根目录直接读取 (build-ipa.sh / CI 会放入 QQMusicIcon.png + @2x/@3x)
+//   3) 兜底: 用绘图生成一个 "♪" 占位 (黄底绿色)
 - (void)_applyQQMusicIconTo:(UIButton *)b {
-    UIImage *icon = [UIImage imageNamed:@"QQMusicIcon"];
+    UIImage *icon = nil;
+
+    // 1) Assets.car (QQMusicIcon.imageset)
+    icon = [UIImage imageNamed:@"QQMusicIcon"];
+
+    // 2) Fallback: .app 根目录的 PNG (支持 @2x/@3x scale 识别)
+    if (!icon) {
+        NSArray<NSString *> *cands = @[
+            // 优先按屏幕 scale 精确匹配
+            [NSString stringWithFormat:@"QQMusicIcon@%@x", @((int)[UIScreen mainScreen].scale)],
+            @"QQMusicIcon@3x",
+            @"QQMusicIcon@2x",
+            @"QQMusicIcon"
+        ];
+        NSBundle *mb = [NSBundle mainBundle];
+        for (NSString *cand in cands) {
+            NSString *p = [mb pathForResource:cand ofType:@"png"];
+            if (p) {
+                icon = [UIImage imageWithContentsOfFile:p];
+                if (icon) break;
+            }
+        }
+    }
+
+    // 3) Fallback: 找不到就用代码画一个 QQ 音乐风格占位 (黄底 + ♪)
+    if (!icon) {
+        CGSize sz = CGSizeMake(80, 80);
+        UIGraphicsBeginImageContextWithOptions(sz, YES, 0);
+        CGContextRef ctx = UIGraphicsGetCurrentContext();
+        // 黄底 (QQ 音乐黄)
+        UIBezierPath *bg = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, sz.width, sz.height)
+                                                      cornerRadius:sz.width * 0.22];
+        [[UIColor colorWithRed:1.0 green:0.82 blue:0.0 alpha:1.0] setFill];
+        [bg fill];
+        // 绿色音符
+        NSDictionary *attrs = @{
+            NSFontAttributeName: [UIFont boldSystemFontOfSize:50],
+            NSForegroundColorAttributeName: [UIColor colorWithRed:0.07 green:0.5 blue:0.17 alpha:1.0]
+        };
+        NSString *glyph = @"♪";
+        CGSize gsz = [glyph sizeWithAttributes:attrs];
+        [glyph drawAtPoint:CGPointMake((sz.width - gsz.width) / 2, (sz.height - gsz.height) / 2 - 2)
+            withAttributes:attrs];
+        icon = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        (void)ctx;
+    }
+
     if (icon) {
         [b setImage:icon forState:UIControlStateNormal];
         b.tintColor = nil;
         b.imageView.contentMode = UIViewContentModeScaleAspectFit;
+        b.imageView.clipsToBounds = YES;
     }
 }
 

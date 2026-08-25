@@ -88,12 +88,26 @@ jobs:
           # 需要 40x40/29x29 尺寸）
           SRC="$PWD/TrollAutoTouch_icon.png"
           ICONSET="$PWD/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
-          echo "[*] 补齐 iconset PNG..."
+          echo "[*] 补齐 AppIcon.appiconset PNG..."
           [ -f "$ICONSET/AppIcon40x40@2x.png" ] || sips -z 80 80 "$SRC" --out "$ICONSET/AppIcon40x40@2x.png" >/dev/null
           [ -f "$ICONSET/AppIcon40x40@3x.png" ] || sips -z 120 120 "$SRC" --out "$ICONSET/AppIcon40x40@3x.png" >/dev/null
           [ -f "$ICONSET/AppIcon29x29@2x.png" ] || sips -z 58 58 "$SRC" --out "$ICONSET/AppIcon29x29@2x.png" >/dev/null
           [ -f "$ICONSET/AppIcon29x29@3x.png" ] || sips -z 87 87 "$SRC" --out "$ICONSET/AppIcon29x29@3x.png" >/dev/null
-          echo "[OK] iconset PNG 就绪"
+          echo "[OK] AppIcon.appiconset PNG 就绪"
+          # ── 悬浮球图标: 从 QQMusic.png 生成 QQMusicIcon.imageset 1x/2x/3x ──
+          # TSHUDWindow 的 _applyQQMusicIconTo: 使用 imageNamed:@"QQMusicIcon"
+          # 从 Assets.car 加载，必须保证构建前 imageset 内 PNG 存在且来源于用户提供的 QQMusic.png
+          QQM_SRC="$PWD/QQMusic.png"
+          QQM_SET="$PWD/TrollAutoTouch/Assets.xcassets/QQMusicIcon.imageset"
+          if [ -f "$QQM_SRC" ]; then
+            mkdir -p "$QQM_SET"
+            sips -z  80  80 "$QQM_SRC" --out "$QQM_SET/QQMusicIcon_1x.png" >/dev/null
+            sips -z 160 160 "$QQM_SRC" --out "$QQM_SET/QQMusicIcon_2x.png" >/dev/null
+            sips -z 240 240 "$QQM_SRC" --out "$QQM_SET/QQMusicIcon_3x.png" >/dev/null
+            echo "[OK] QQMusicIcon.imageset 已从 QQMusic.png 重新生成 (悬浮球图标)"
+          else
+            echo "[!] 缺少 QQMusic.png，悬浮球图标使用仓库既有文件"
+          fi
           # 打印关键构建设置，便于诊断（如 HEADER_SEARCH_PATHS 未生效时快速发现）
           echo "[*] 关键构建设置:"
           xcodebuild -project TrollAutoTouch.xcodeproj -scheme TrollAutoTouch \
@@ -200,7 +214,23 @@ jobs:
           echo "=== 图标 ==="
           rm -f "$APP_DST/AppIcon.png" "$APP_DST/icon-1024.ico"
           ICONSET="$PWD/TrollAutoTouch/Assets.xcassets/AppIcon.appiconset"
-          ls "$ICONSET"/*.png 1>/dev/null 2>&1 && cp "$ICONSET"/*.png "$APP_DST/" && echo "[OK]" || echo "[!] no icons"
+          ls "$ICONSET"/*.png 1>/dev/null 2>&1 && cp "$ICONSET"/*.png "$APP_DST/" && echo "[OK] AppIcon PNG 已写入 .app 根目录" || echo "[!] 无桌面 AppIcon"
+          # ── 悬浮球图标 (QQMusicIcon): 从 QQMusic.png 生成并放入 .app 根目录做 fallback ──
+          QQM_SRC="$PWD/QQMusic.png"
+          QQM_SET="$PWD/TrollAutoTouch/Assets.xcassets/QQMusicIcon.imageset"
+          if [ -f "$QQM_SRC" ]; then
+            sips -z  80  80 "$QQM_SRC" --out "$APP_DST/QQMusicIcon.png"    >/dev/null
+            sips -z 160 160 "$QQM_SRC" --out "$APP_DST/QQMusicIcon@2x.png" >/dev/null
+            sips -z 240 240 "$QQM_SRC" --out "$APP_DST/QQMusicIcon@3x.png" >/dev/null
+            echo "[OK] 悬浮球图标已从 QQMusic.png 写入 .app 根目录"
+          elif ls "$QQM_SET"/*.png 1>/dev/null 2>&1; then
+            cp "$QQM_SET/QQMusicIcon_1x.png" "$APP_DST/QQMusicIcon.png"    2>/dev/null || true
+            cp "$QQM_SET/QQMusicIcon_2x.png" "$APP_DST/QQMusicIcon@2x.png"  2>/dev/null || true
+            cp "$QQM_SET/QQMusicIcon_3x.png" "$APP_DST/QQMusicIcon@3x.png"  2>/dev/null || true
+            echo "[OK] 悬浮球图标 fallback 已从 QQMusicIcon.imageset 拷贝"
+          else
+            echo "[!] 无悬浮球图标 (QQMusicIcon) 可用"
+          fi
 
           echo ""
           echo "=== 注入 entitlements ==="
