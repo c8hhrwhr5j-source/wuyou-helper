@@ -115,7 +115,7 @@ static void TSCrashSignalHandler(int sig) {
 
     // 崩溃线程信息: 主线程还是后台 + 线程 id
     crash_write(fd, "thread: ");
-    crash_write(pthread_main_np() ? "main" : "background");
+    crash_write(fd, pthread_main_np() ? "main" : "background");
     crash_write(fd, " id=");
     crash_write_hex(fd, (uintptr_t)pthread_self());
     crash_write(fd, "\n");
