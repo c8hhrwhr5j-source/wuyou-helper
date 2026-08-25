@@ -75,11 +75,18 @@
     // 裁剪区域（如果需要）
     CGImageRef subImage = cgImage;
     BOOL shouldReleaseSub = NO;
+    // 区域 OCR 时 Vision 的 boundingBox 是相对"子图"的归一化坐标,
+    // 换算回原图坐标必须用子图尺寸 + 裁剪原点偏移, 否则返回坐标整体错位。
+    CGFloat subW = imgW, subH = imgH, offX = 0, offY = 0;
     if (!CGRectEqualToRect(region, CGRectMake(0, 0, imgW, imgH)) &&
         !CGRectIsEmpty(region)) {
         CGRect clamped = CGRectIntersection(region, CGRectMake(0, 0, imgW, imgH));
         if (CGRectIsEmpty(clamped)) return @[];
         subImage = CGImageCreateWithImageInRect(cgImage, clamped);
+        subW = (CGFloat)CGImageGetWidth(subImage);
+        subH = (CGFloat)CGImageGetHeight(subImage);
+        offX = clamped.origin.x;
+        offY = clamped.origin.y;
         shouldReleaseSub = YES;
     }
 
@@ -103,14 +110,14 @@
             r.text = top.string;
             r.confidence = top.confidence;
 
-            // Vision 返回的 boundingBox 是归一化坐标 (左下角原点)
-            // 转换到 UIKit 坐标 (左上角原点)
+            // Vision 返回的 boundingBox 是归一化坐标 (左下角原点, 相对被识别图像)
+            // 转换到 UIKit 坐标 (左上角原点), 并折算回原图坐标系
             CGRect normBox = obs.boundingBox;
             r.rect = CGRectMake(
-                normBox.origin.x * imgW,
-                (1.0 - normBox.origin.y - normBox.size.height) * imgH,
-                normBox.size.width * imgW,
-                normBox.size.height * imgH
+                normBox.origin.x * subW + offX,
+                (1.0 - normBox.origin.y - normBox.size.height) * subH + offY,
+                normBox.size.width * subW,
+                normBox.size.height * subH
             );
             r.boundingBox = normBox;
             r.center = CGPointMake(CGRectGetMidX(r.rect), CGRectGetMidY(r.rect));
