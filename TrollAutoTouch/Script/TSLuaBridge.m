@@ -1605,13 +1605,14 @@ static int l_screen_paddleOcr(lua_State *L) {
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
 
-    // 脚本坐标 -> 截屏物理坐标
+    // 脚本坐标 -> 截屏物理坐标(竖屏 buffer): 用四角旋转外接矩形(与 findColor/findColors 一致)。
+    // 不能用"旋转两个对角点再相减": 横屏(90°)旋转后对角差会变成负宽高,
+    // 导致 CGRectIsEmpty 判定为真, OCR 区域被丢弃, 始终识别不到文字。
     if (!CGRectIsEmpty(region)) {
-        CGPoint tl = tsScriptToActualPoint(region.origin);
-        CGPoint br = tsScriptToActualPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
+        region = tsScriptToActualRect(region);
         CGFloat scale = img.scale;
-        region = CGRectMake(tl.x * scale, tl.y * scale,
-                            (br.x - tl.x) * scale, (br.y - tl.y) * scale);
+        region = CGRectMake(region.origin.x * scale, region.origin.y * scale,
+                            region.size.width * scale, region.size.height * scale);
     }
 
     NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img inRegion:region];
@@ -1646,13 +1647,12 @@ static int l_screen_visionOcr(lua_State *L) {
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
 
-    // 脚本坐标 -> 截屏物理坐标
+    // 脚本坐标 -> 截屏物理坐标(竖屏 buffer): 用四角旋转外接矩形(与 findColor/findColors 一致)。
     if (!CGRectIsEmpty(region)) {
-        CGPoint tl = tsScriptToActualPoint(region.origin);
-        CGPoint br = tsScriptToActualPoint(CGPointMake(CGRectGetMaxX(region), CGRectGetMaxY(region)));
+        region = tsScriptToActualRect(region);
         CGFloat scale = img.scale;
-        region = CGRectMake(tl.x * scale, tl.y * scale,
-                            (br.x - tl.x) * scale, (br.y - tl.y) * scale);
+        region = CGRectMake(region.origin.x * scale, region.origin.y * scale,
+                            region.size.width * scale, region.size.height * scale);
     }
 
     NSArray<NSString *> *languages = lang ? @[lang] : nil;
