@@ -23,7 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly) BOOL running;
 /// 音量键按下回调 (任意线程触发, 已做双通道去重与启动校准)。调用方负责防抖与转主线程。
-@property (nonatomic, copy, nullable) void (^onVolumeKey)(void);
+/// atomic: 回调可能在 HID/KVO/轮询等任意线程读取, 主线程 TAS 关闭时置 nil,
+/// 必须保证 getter 返回对象在局部变量持有期间有效, 避免释放后调用崩溃。
+@property (atomic, copy, nullable) void (^onVolumeKey)(void);
 
 + (instancetype)shared;
 

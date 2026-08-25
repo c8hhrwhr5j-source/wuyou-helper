@@ -213,8 +213,13 @@ enum {
         }
         _bksEventObserver = nil;
     };
+    // ⚠️ 绝不能 dispatch_sync 阻塞主线程等待 BKS 清理:
+    // iOS 15.8 / TrollStore (无 BSServiceDomains 权限) 下 BKS 私有 API 可能挂起等待,
+    // 若后台注册线程卡在 registerForVolumeEventsWithHandler: 内, 主线程同步等待
+    // → 主线程永久阻塞 → 系统 watchdog 杀进程 (用户表现为"闪退")。
+    // 改异步: 清理与注册共用 _bksQueue 串行执行, _stopping 门控保证无并发, 主线程不等待。
     if (_bksQueue) {
-        dispatch_sync(_bksQueue, cleanBKS);
+        dispatch_async(_bksQueue, cleanBKS);
     } else {
         cleanBKS();
     }
@@ -757,8 +762,12 @@ static void TSVolumeKeyHIDCallback(void *target, void *refcon,
     _lastEventAt = now;
     os_unfair_lock_unlock(&_lock);
     NSLog(@"[TSVolumeKeyMonitor] 音量键按下 (%@)", up ? @"+" : @"-");
-    if (self.onVolumeKey) {
-        self.onVolumeKey();
+    // 一次读取并强引用回调: 旧代码在 if 判断与调用之间读取两次属性,
+    // 主线程 (关闭 TAS 时置 nil) 可能插入置 nil → 第二次读到 nil → 调用 nil block
+    // → EXC_BAD_ACCESS 闪退。atomic getter 返回的对象由局部变量持有, 置 nil 不影响本次调用。
+    void (^handler)(void) = self.onVolumeKey;
+    if (handler) {
+        handler();
     }
 }
 

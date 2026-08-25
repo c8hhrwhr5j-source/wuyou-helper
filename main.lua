@@ -1060,6 +1060,11 @@ function main()
             click(610,673,727,707) -- 进入游戏
             sleep(500)
         end
+		if rgbbj("附近下") then
+            local result = screen.paddleOcr(126,2,281,35)
+			print("识别结果", result)
+        end
+
     end
 end
 
