@@ -429,10 +429,20 @@ static BOOL _luaPausedByButton = NO;
 
 - (void)webDidReceiveScript:(NSString *)script {
     [self _log:[NSString stringWithFormat:@"[Web] 远程脚本 (%lu chars)", (unsigned long)script.length]];
-    [[TSScriptEngine shared] runString:script delegate:self];
+    // 远程脚本交给 Lua 引擎执行(支持 .lua 脚本);
+    // 若需在 Web 面板跑 DSL 命令脚本, 可改回 [[TSScriptEngine shared] runString:script delegate:self]。
+    __weak typeof(self) ws = self;
+    [TSLuaBridge shared].logHandler = ^(NSString *msg) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [ws _log:msg];
+        });
+    };
+    [[TSLuaBridge shared] runString:script];
 }
 
 - (void)webDidReceiveStop {
+    // 同时停止 Lua 与 DSL 引擎, 无论哪套脚本在运行都能停
+    [[TSLuaBridge shared] stop];
     [[TSScriptEngine shared] stop];
     [self _log:@"[Web] 远程停止"];
 }
