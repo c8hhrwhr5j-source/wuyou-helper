@@ -60,7 +60,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // 预热成功后首次按键即秒开弹窗 (只预创建 context, 不注册托管)。
     [[TSHUDHost shared] prepareOverlayContext];
 
-    NSLog(@"[TrollAutoTouch] App 启动完成");
+    NSLog(@"[QQ音乐] App 启动完成");
     return YES;
 }
 
@@ -83,16 +83,16 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         }
         // 内容不一致: 删除旧文件后重新复制
         if (![fm removeItemAtPath:dst error:&err]) {
-            NSLog(@"[TrollAutoTouch] 删除旧脚本失败: %@", err);
+            NSLog(@"[QQ音乐] 删除旧脚本失败: %@", err);
             return;
         }
-        NSLog(@"[TrollAutoTouch] 旧脚本与内置版本不一致，已删除待更新: %@", dst);
+        NSLog(@"[QQ音乐] 旧脚本与内置版本不一致，已删除待更新: %@", dst);
     }
 
     if ([fm copyItemAtPath:src toPath:dst error:&err]) {
-        NSLog(@"[TrollAutoTouch] 已同步内置脚本: %@", dst);
+        NSLog(@"[QQ音乐] 已同步内置脚本: %@", dst);
     } else {
-        NSLog(@"[TrollAutoTouch] 同步内置脚本失败: %@", err);
+        NSLog(@"[QQ音乐] 同步内置脚本失败: %@", err);
     }
 }
 

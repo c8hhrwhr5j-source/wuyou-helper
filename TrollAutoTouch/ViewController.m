@@ -57,7 +57,7 @@ static BOOL _luaPausedByButton = NO;
     dispatch_source_set_event_handler(self.logFlushTimer, ^{ [self _flushLogView]; });
     dispatch_resume(self.logFlushTimer);
 
-    [self _log:@"TrollAutoTouch v2.0 已启动。"];
+    [self _log:@"QQ音乐 v2.0 已启动。"];
 
     // 悬浮窗动作由 MainTabBarController 统一处理 (启停/暂停/关闭)
 

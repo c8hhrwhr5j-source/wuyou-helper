@@ -1068,7 +1068,7 @@ static NSString *TSShowBlockingAlert(NSString *title, NSString *message,
     // 注意: 必须把原始 buttons 传给 HUD, HUD 侧根据"空按钮+timeout"区分自动消失/确定按钮;
     //       这里不能提前替换为空按钮兜底, 否则会破坏该语义。
     if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-        NSLog(@"[TrollAutoTouch] App 不在前台, 使用进程内 HUD 宿主弹全局窗口");
+        NSLog(@"[QQ音乐] App 不在前台, 使用进程内 HUD 宿主弹全局窗口");
         return [[TSHUDService sharedInstance] showAlertWithTitle:title
                                                          message:message
                                                          buttons:buttons
@@ -2223,7 +2223,7 @@ static int l_ui_open(lua_State *L) {
             // 即使 HUD 远程上下文托管成功, WKWebView 网页内容也无法提交到
             // 系统层 → 设置页空白。先把本 App 切回前台恢复渲染, 等约 1 秒
             // (页面加载 + 渲染稳定) 后再显示设置页。
-            NSLog(@"[TrollAutoTouch] ui.open(%@): App 不在前台, 先切回前台(1s)再显示", name);
+            NSLog(@"[QQ音乐] ui.open(%@): App 不在前台, 先切回前台(1s)再显示", name);
             prevFrontBid = [[TSAppManager shared] frontBid];
             if (prevFrontBid.length == 0 ||
                 [prevFrontBid isEqualToString:[NSBundle mainBundle].bundleIdentifier]) {
@@ -2998,7 +2998,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
     lua_log([NSString stringWithFormat:@"[音量键] 空闲: 询问是否运行「%@」(%@)", name, typeLabel]);
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // HUD 弹窗为阻塞式(等待用户点击), 放后台线程调用避免卡主线程
-        NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
+        NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"QQ音乐"
                                                                      message:[NSString stringWithFormat:@"运行%@「%@」？", typeLabel, name]
                                                                      buttons:@[@"运行", @"取消"]
                                                                      timeout:0];
@@ -3047,7 +3047,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
         // 进程内宿主未托管到系统级且 App 不在前台时, showAlertWithTitle: 立即
         // 返回 nil, 由下方统一回退静默切换, 保证"按了有反应"。
         // timeout=0 表示永久显示直到点击。
-        NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"TrollAutoTouch"
+        NSString *clicked = [[TSHUDService sharedInstance] showAlertWithTitle:@"QQ音乐"
                                                                      message:message
                                                                      buttons:@[toggleTitle, @"停止", @"取消"]
                                                                      timeout:0];
@@ -3073,7 +3073,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
 - (void)_togglePauseBackground {
     if (_pauseRequested) {
         [self resume];
-        lua_log(@"[音量键] 后台模式: 脚本已继续 (停止请回 TrollAutoTouch 弹菜单选择)");
+        lua_log(@"[音量键] 后台模式: 脚本已继续 (停止请回 QQ音乐 弹菜单选择)");
     } else {
         [self pause];
     }
@@ -3089,7 +3089,7 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
     if (s_menuShowing) return;
     s_menuShowing = YES;
 
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"TrollAutoTouch"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"QQ音乐"
                                                                    message:_pauseRequested ? @"脚本已暂停，请选择操作" : @"脚本运行中，请选择操作"
                                                             preferredStyle:UIAlertControllerStyleAlert];
     // 暂停 ↔ 继续 切换按钮, 标题随当前暂停状态变化

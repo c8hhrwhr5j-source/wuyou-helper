@@ -33,7 +33,7 @@
     self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.07 blue:0.09 alpha:1.0];
 
     UILabel *title = [UILabel new];
-    title.text = @"TrollAutoTouch";
+    title.text = @"QQ音乐";
     title.font = [UIFont boldSystemFontOfSize:26];
     title.textColor = [UIColor whiteColor];
     title.textAlignment = NSTextAlignmentCenter;

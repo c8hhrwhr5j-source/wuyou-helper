@@ -1,4 +1,4 @@
--- demo.lua — TrollAutoTouch Lua 示例脚本
+-- demo.lua — QQ音乐 Lua 示例脚本
 -- 运行方式:
 --   1) [运行 Lua] 按钮: 直接运行 (无网页配置时 settings 为空表)
 --   2) [脚本UI] → demo: 网页中配置参数, 点"开始运行"后由原生运行本脚本,
@@ -22,7 +22,7 @@ logStr("详细日志: " .. tostring(settings.verboseLog))
 logStr("============================")
 
 -- ===== 基础用法 =====
-logStr("TrollAutoTouch Lua 脚本启动!")
+logStr("QQ音乐 Lua 脚本启动!")
 
 -- 屏幕尺寸
 local w, h = getScreenSize()

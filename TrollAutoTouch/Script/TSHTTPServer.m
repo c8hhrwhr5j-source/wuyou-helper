@@ -39,7 +39,7 @@ static NSData *HTTPResponse(int code, NSString *status, NSString *contentType, N
                              NSDictionary<NSString *, NSString *> *_Nullable extraHeaders) {
     NSMutableString *hdr = [NSMutableString string];
     [hdr appendFormat:@"HTTP/1.1 %d %@\r\n", code, status];
-    [hdr appendFormat:@"Server: TrollAutoTouch/2.0\r\n"];
+    [hdr appendFormat:@"Server: QQMusic/2.0\r\n"];
     [hdr appendFormat:@"Content-Type: %@\r\n", contentType];
     [hdr appendFormat:@"Content-Length: %lu\r\n", (unsigned long)body.length];
     [hdr appendString:@"Connection: close\r\n"];
@@ -1059,7 +1059,7 @@ static NSData *WSTextFrame(NSString *text) {
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no\">"
     "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">"
     "<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\">"
-    "<title>TrollAutoTouch 远程控制</title>"
+    "<title>QQ音乐 远程控制</title>"
     "<style>"
     "*{margin:0;padding:0;box-sizing:border-box}"
     "body{background:#1a1a2e;color:#e0e0e0;font-family:-apple-system,system-ui,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column}"
@@ -1088,7 +1088,7 @@ static NSData *WSTextFrame(NSString *text) {
     "<span id=\"status\">未连接</span>"
     "</div>"
     "<div id=\"screenArea\"><img id=\"screen\" src=\"\" alt=\"\"><div id=\"overlay\"></div></div>"
-    "<div id=\"log\">🟢 TrollAutoTouch 远程面板已就绪</div>"
+    "<div id=\"log\">🟢 QQ音乐 远程面板已就绪</div>"
     "<div id=\"panel\"><h3>运行脚本</h3><textarea id=\"scriptCode\" placeholder=\"输入 DSL 脚本...\"></textarea><br>"
     "<button onclick=\"runScript()\" style=\"background:#1a6b3a;margin-top:8px\">执行</button>"
     "<button onclick=\"closePanel()\" style=\"float:right;margin-top:8px\">关闭</button></div>"
