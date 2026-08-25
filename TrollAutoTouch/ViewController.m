@@ -36,7 +36,7 @@
     // 到 _logFull 并刷新 logView, 避免每条日志 O(n) 拼接刷爆主线程。
     NSMutableString *_logBuffer;
     NSMutableString *_logFull;
-    // 冷启动控制接口服务器 (原版兼容端口 8989, 提供 /task 与 /float)
+    // 冷启动控制接口服务器 (独立端口 8686, 提供 /task 与 /float, 避免与原版工具冲突)
     TSHTTPServer *_coldStartServer;
 }
 
@@ -348,14 +348,14 @@ static BOOL _luaPausedByButton = NO;
         [self _log:[NSString stringWithFormat:@"Web 服务器已启动 → http://%@:%d", wifiIP ?: @"localhost", port]];
         [self _log:@"浏览器访问可远程控制设备"];
     }
-    // 冷启动控制接口: 原版兼容端口 8989 (/task?cmd=... 与 /float?x=...&y=...)
+    // 冷启动控制接口: 独立端口 8686 (/task?cmd=... 与 /float?x=...&y=...)
     if (!_coldStartServer) {
-        _coldStartServer = [[TSHTTPServer alloc] initWithPort:8989];
+        _coldStartServer = [[TSHTTPServer alloc] initWithPort:8686];
         _coldStartServer.delegate = self;
     }
     if (![_coldStartServer isRunning]) {
         [_coldStartServer start];
-        [self _log:@"冷启动接口已启动 → http://127.0.0.1:8989 (/task /float)"];
+        [self _log:@"冷启动接口已启动 → http://127.0.0.1:8686 (/task /float)"];
     }
 }
 

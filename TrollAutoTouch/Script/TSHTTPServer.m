@@ -366,7 +366,7 @@ static NSData *WSTextFrame(NSString *text) {
     } else if ([path isEqualToString:@"/api/stop"] && [method isEqualToString:@"POST"]) {
         [self handleStop:clientFd];
     } else if ([path hasPrefix:@"/task"]) {
-        // 冷启动控制接口: /task?cmd=start|stop|pause|resume  (原版 8989 端口兼容)
+        // 冷启动控制接口: /task?cmd=start|stop|pause|resume  (独立端口 8686)
         [self handleTask:clientFd path:path];
     } else if ([path hasPrefix:@"/float"]) {
         // 冷启动悬浮球接口: /float?x=0|1&y=<物理像素>, y<0 隐藏
@@ -831,7 +831,7 @@ static NSData *WSTextFrame(NSString *text) {
     [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
 }
 
-#pragma mark - 冷启动控制接口 (原版 8989 端口兼容)
+#pragma mark - 冷启动控制接口 (独立端口 8686)
 
 // 解析 URL query 字符串 "a=1&b=2" 为字典 (自动 URL 解码)
 - (NSDictionary *)parseQueryParams:(NSString *)query {
