@@ -1061,31 +1061,21 @@ function main()
             sleep(500)
         end
 		if rgbbj("附近下") then
-			log("开始文字识别")
-			local w, h = getScreenSize()
-			print("屏幕尺寸:", w, h)
-            local result = screen.paddleOcr(126,2,281,35)
+			log("找到附近下按钮(找色)")
+			-- 方式1: findText 直接找"附近", 返回中心坐标 (x, y)
+			local fx, fy = screen.findText("附近")
+			print("findText '附近':", fx, fy)
+			-- 方式2: 区域 OCR, 圈住"附近"按钮 (120,89)-(187,115), 留边距
+			local result = screen.paddleOcr(120,85,200,120)
 			print("区域OCR结果数:", type(result) == "table" and #result or "nil")
-            if type(result) == "table" then
-                for i, v in ipairs(result) do
-                    print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
-                end
-            end
-        end
-
-
-		log("=== 全屏 paddleOcr ===")
-		local r1 = screen.paddleOcr()
-		print("全屏结果数:", type(r1) == "table" and #r1 or "nil")
-		if type(r1) == "table" then
-			for i, v in ipairs(r1) do
-				print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
+			if type(result) == "table" then
+				for i, v in ipairs(result) do
+					print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
+				end
 			end
+			-- 验证一次即停, 避免循环里反复全屏OCR
+			break
 		end
-
-		log("=== 全屏 visionOcr ===")
-		local r3 = screen.visionOcr()
-		print("vision全屏结果数:", type(r3) == "table" and #r3 or "nil")
 
     end
 end
