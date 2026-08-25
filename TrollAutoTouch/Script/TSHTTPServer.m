@@ -824,10 +824,12 @@ static NSData *WSTextFrame(NSString *text) {
 
 - (void)handleStop:(int)clientFd {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 无条件同时停 Lua 与 DSL 引擎, 不依赖 delegate 是否存在(避免主界面未加载时 Lua 脚本停不掉)
+        [[TSLuaBridge shared] stop];
+        [[TSScriptEngine shared] stop];
         if ([self.delegate respondsToSelector:@selector(webDidReceiveStop)]) {
             [self.delegate webDidReceiveStop];
         }
-        [[TSScriptEngine shared] stop];
     });
     [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
 }
@@ -881,10 +883,12 @@ static NSData *WSTextFrame(NSString *text) {
                 [self.delegate webDidReceiveScriptPath:targetPath];
             }
         } else if ([cmd isEqualToString:@"stop"]) {
+            // 无条件同时停 Lua 与 DSL 引擎, 不依赖 delegate 是否存在
+            [[TSLuaBridge shared] stop];
+            [[TSScriptEngine shared] stop];
             if ([self.delegate respondsToSelector:@selector(webDidReceiveStop)]) {
                 [self.delegate webDidReceiveStop];
             }
-            [[TSScriptEngine shared] stop];
         } else if ([cmd isEqualToString:@"pause"]) {
             [[TSLuaBridge shared] pause];
         } else if ([cmd isEqualToString:@"resume"]) {
