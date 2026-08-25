@@ -82,6 +82,7 @@ enum {
     dispatch_source_t _watchdogTimer;  // 看门狗: 持续维持最小音量级别
     float _lastVolume;
     BOOL _running;
+    BOOL _stopping;             // 停止标记: 防止后台 BKS 注册线程与主线程 stop 清理竞态
     double _warmupUntil;
     double _lastEventAt;
     id _avSystemController;
@@ -92,7 +93,7 @@ enum {
     // BKS 硬件事件路由 (BackBoardServices)
     id _bksDeliveryManager;    // BKSHIDEventDeliveryManager 实例
     id _bksEventObserver;       // BKS 事件观察者/路由对象
-    dispatch_queue_t _bksQueue; // BKS 事件处理队列
+    dispatch_queue_t _bksQueue; // BKS 事件处理队列 (注册与清理共用, 串行互斥)
 }
 
 + (instancetype)shared {
@@ -119,6 +120,7 @@ enum {
 - (void)start {
     if (_running) return;
     _running = YES;
+    _stopping = NO;
 
     NSError *err = nil;
     AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -141,7 +143,11 @@ enum {
 
     // 通道① BKS 硬件事件路由 — 异步初始化避免阻塞主线程/启动崩溃
     // ⚠️ 任何私有 API 崩溃只影响后台线程, 不会导致 App 闪退
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    // 注册在 _bksQueue 串行队列执行, 与 stop 的清理共用同一队列, 避免竞态
+    if (!_bksQueue) {
+        _bksQueue = dispatch_queue_create("com.trollautotouch.volumekey.bks", DISPATCH_QUEUE_SERIAL);
+    }
+    dispatch_async(_bksQueue, ^{
         @try {
             [self _installBKSListener];
         } @catch (NSException *e) {
@@ -181,6 +187,8 @@ enum {
 - (void)stop {
     if (!_running) return;
     _running = NO;
+    _stopping = YES;   // 通知后台 BKS 注册线程立即退出, 避免与清理并发
+
     @try {
         [[AVAudioSession sharedInstance] removeObserver:self
                                              forKeyPath:@"outputVolume"
@@ -193,41 +201,54 @@ enum {
                                                     name:kAVSystemVolumeChangedNotif
                                                   object:nil];
 
-    // 清理 BKS 硬件事件路由
-    if (_bksDeliveryManager) {
-        [self _unregisterBKSDeliveryManager];
-        _bksDeliveryManager = nil;
-    }
-    if (_bksEventObserver) {
+    // 清理 BKS 硬件事件路由 (与后台注册共用 _bksQueue, 串行互斥, 杜绝并发私有 API 调用)
+    void (^cleanBKS)(void) = ^{
+        if (_bksDeliveryManager) {
+            @try {
+                [self _unregisterBKSDeliveryManager];
+            } @catch (NSException *e) {
+                NSLog(@"[TSVolumeKeyMonitor] BKS 清理异常: %@ %@", e.name, e.reason);
+            }
+            _bksDeliveryManager = nil;
+        }
         _bksEventObserver = nil;
-    }
+    };
     if (_bksQueue) {
-        // dispatch_queue 不需要手动释放 (ARC)
-        _bksQueue = nil;
+        dispatch_sync(_bksQueue, cleanBKS);
+    } else {
+        cleanBKS();
     }
 
     // 清理 CPDM (SpringBoard 硬件按键)
     if (_messagingCenter) {
-        // 取消 delegate
-        SEL setDelSel = NSSelectorFromString(@"setDelegate:");
-        if ([_messagingCenter respondsToSelector:setDelSel]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(_messagingCenter, setDelSel, nil);
-        }
-        // 取消消息注册
-        SEL unregSel = NSSelectorFromString(@"unregisterMessageName:target:");
-        if ([_messagingCenter respondsToSelector:unregSel]) {
-            ((void (*)(id, SEL, id, id))objc_msgSend)(_messagingCenter, unregSel,
-                kHardwareButtonMessageName, self);
+        @try {
+            // 取消 delegate
+            SEL setDelSel = NSSelectorFromString(@"setDelegate:");
+            if ([_messagingCenter respondsToSelector:setDelSel]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(_messagingCenter, setDelSel, nil);
+            }
+            // 取消消息注册
+            SEL unregSel = NSSelectorFromString(@"unregisterMessageName:target:");
+            if ([_messagingCenter respondsToSelector:unregSel]) {
+                ((void (*)(id, SEL, id, id))objc_msgSend)(_messagingCenter, unregSel,
+                    kHardwareButtonMessageName, self);
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[TSVolumeKeyMonitor] CPDM 清理异常: %@ %@", e.name, e.reason);
         }
         _messagingCenter = nil;
     }
 
     // 清理 IOHID
     if (_hidClient) {
-        void (*fnInvalidate)(IOHIDEventSystemClientRef) =
-            (void (*)(IOHIDEventSystemClientRef))dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientInvalidate");
-        if (fnInvalidate) fnInvalidate(_hidClient);
-        CFRelease(_hidClient);
+        @try {
+            void (*fnInvalidate)(IOHIDEventSystemClientRef) =
+                (void (*)(IOHIDEventSystemClientRef))dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientInvalidate");
+            if (fnInvalidate) fnInvalidate(_hidClient);
+            CFRelease(_hidClient);
+        } @catch (NSException *e) {
+            NSLog(@"[TSVolumeKeyMonitor] IOHID 清理异常: %@ %@", e.name, e.reason);
+        }
         _hidClient = NULL;
     }
 
@@ -249,6 +270,7 @@ enum {
 // ⚠️ 安全防护: 整个方法包裹在 @try/@catch 中, 避免任何私有 API 崩溃导致 App 闪退。
 - (void)_installBKSListener {
     @try {
+        if (_stopping) return;   // stop 已执行: 放弃注册, 避免与主线程清理竞态
         // 预处理: 检查 iOS 版本 (BackBoardServices 在 iOS 7+ 存在,
         // 但 BKSHIDEventDeliveryManager 类在 iOS 12+ 才有)
         NSOperatingSystemVersion osVer = [NSProcessInfo processInfo].operatingSystemVersion;
@@ -298,10 +320,13 @@ enum {
             dlclose(bksHandle);
             return;
         }
+        if (_stopping) return;   // stop 已执行: 放弃注册
         _bksDeliveryManager = mgr;
         NSLog(@"[TSVolumeKeyMonitor] BKSHIDEventDeliveryManager 已获取: %@", mgr);
 
-        _bksQueue = dispatch_queue_create("com.trollautotouch.volumekey.bks", DISPATCH_QUEUE_SERIAL);
+        if (!_bksQueue) {
+            _bksQueue = dispatch_queue_create("com.trollautotouch.volumekey.bks", DISPATCH_QUEUE_SERIAL);
+        }
 
         __weak typeof(self) weakSelf = self;
 

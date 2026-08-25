@@ -107,7 +107,16 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     if (tasOn) {
         [[TSDaemonManager shared] startAll];
         [[TSLuaBridge shared] startGlobalVolumeMonitoring];
-        [[TSHTTPServer shared] start];
+        if (![[TSHTTPServer shared] start]) {
+            // 修复安装后"假开启": 首次启动 bind/listen 失败则延迟重试
+            NSLog(@"[TAS] HTTP 服务启动失败, 1 秒后重试");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (![[TSHTTPServer shared] start]) {
+                    NSLog(@"[TAS] HTTP 服务重试仍失败");
+                }
+            });
+        }
     }
 }
 

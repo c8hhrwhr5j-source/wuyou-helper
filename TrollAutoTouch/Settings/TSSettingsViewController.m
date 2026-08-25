@@ -233,18 +233,37 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kTASServiceEnabledKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    if (on) {
-        // 开启: 启动服务 + 常驻音量键监听 + 远程访问端口(默认常开, 随 TAS 联动)
-        [[TSDaemonManager shared] startAll];
-        [[TSLuaBridge shared] startGlobalVolumeMonitoring];
-        [[TSHTTPServer shared] start];
-        [[TSHUDHost shared] showToast:@"TAS 服务已开启" duration:1.2 hidden:NO];
-    } else {
-        // 关闭: 停止音量键监听 + 停止服务 (含后台保活/心跳) + 关闭远程访问端口
-        [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
-        [[TSDaemonManager shared] stopAll];
-        [[TSHTTPServer shared] stop];
-        [[TSHUDHost shared] showToast:@"TAS 服务已关闭" duration:1.2 hidden:NO];
+    @try {
+        if (on) {
+            // 开启: 启动服务 + 常驻音量键监听 + 远程访问端口(默认常开, 随 TAS 联动)
+            [[TSDaemonManager shared] startAll];
+            [[TSLuaBridge shared] startGlobalVolumeMonitoring];
+            if (![[TSHTTPServer shared] start]) {
+                // 启动失败: 延迟重试, 避免设置显示"开"但端口未监听(假开启)
+                NSLog(@"[TAS] HTTP 服务首次启动失败, 1 秒后重试");
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (![[TSHTTPServer shared] start]) {
+                        NSLog(@"[TAS] HTTP 服务重试仍失败");
+                        [[TSHUDHost shared] showToast:@"HTTP 服务启动失败" duration:1.5 hidden:NO];
+                    }
+                });
+            }
+            [[TSHUDHost shared] showToast:@"TAS 服务已开启" duration:1.2 hidden:NO];
+        } else {
+            // 关闭: 停止音量键监听 + 停止服务 (含后台保活/心跳) + 关闭远程访问端口
+            [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
+            [[TSDaemonManager shared] stopAll];
+            [[TSHTTPServer shared] stop];
+            [[TSHUDHost shared] showToast:@"TAS 服务已关闭" duration:1.2 hidden:NO];
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[TAS] 切换 TAS 服务异常: %@ %@", e.name, e.reason);
+        @try {
+            [[TSHUDHost shared] showToast:@"服务切换异常" duration:1.5 hidden:NO];
+        } @catch (NSException *e2) {
+            NSLog(@"[TAS] toast 异常: %@ %@", e2.name, e2.reason);
+        }
     }
     [_tableView reloadData];
 }
