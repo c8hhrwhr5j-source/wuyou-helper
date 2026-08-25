@@ -374,35 +374,67 @@ end
 
 ### 3.2 OCR 找文字 `findText`
 
-对当前屏幕进行 OCR 识别，查找指定文字的位置。
+对当前屏幕进行 OCR 识别，查找**指定文字**的位置，返回该文字框的**中心坐标**。适合"检测屏幕上有没有某段文字"（按钮文字、角色名、系统提示等）。
+
+#### 调用形式
 
 ```lua
-local x, y = findText("开始游戏")
-if x then
-    tap(x, y)
-    logStr(string.format("找到文字 @ (%.0f, %.0f)", x, y))
-end
+findText(text)                        -- 全屏查找指定文字
+findText(text, x1, y1, x2, y2)        -- 区域查找（左上角 + 右下角）
 ```
 
-#### 返回值
+#### 参数与返回值
 
-- 找到：返回文字中心坐标 `x, y`
-- 未找到：返回 `nil`
+| 项 | 类型 | 说明 |
+|---|---|---|
+| `text` | string | 要查找的文字，可长可短（如 `"开始游戏"`、`"附近"`） |
+| `x1, y1, x2, y2` | number | 可选，查找区域左上角 + 右下角，默认全屏 |
+| 返回值 | - | 找到 → `x, y`（文字框中心坐标）；未找到 → `nil` |
 
-> OCR 引擎需要设备支持，部分老旧设备可能识别率较低。
+#### 示例
+
+```lua
+-- 全屏找"开始游戏"并点击
+local x, y = findText("开始游戏")
+if x then
+    tap(x, y)                          -- 中心坐标可直接点击
+    logStr(string.format("找到文字 @ (%.0f, %.0f)", x, y))
+else
+    logStr("未找到: 开始游戏")
+end
+
+-- 区域找字（只在屏幕上部找）
+local x, y = findText("附近", 0, 0, 1334, 400)
+if x then tap(x, y) end
+
+-- 循环等待文字出现（最多等 10 秒）
+local ok = false
+for i = 1, 20 do
+    local fx, fy = findText("加载完成")
+    if fx then ok = true; break end
+    mSleep(500)
+end
+if ok then logStr("加载完成!") end
+```
+
+> `findText` 底层是 `screen.paddleOcr` 的封装：先做一次全屏/区域 OCR，再逐个匹配 `v.string` 是否包含目标文字。返回的是文字框中心坐标，可直接用于 `tap`。
 
 ---
 
 ### 3.3 屏幕 OCR（Paddle 风格）`screen.paddleOcr`
 
-对屏幕全屏或指定区域进行 OCR 识别，返回所有识别到的文本块及坐标。底层基于 Apple Vision Framework，与原版 PaddleOCR 行为一致。
+对屏幕全屏或指定区域做 OCR，返回**所有**识别到的文本块（文字内容 + 位置 + 置信度）。适合"读取屏幕上全部文字"的场景。底层基于 Apple Vision Framework，与原版 PaddleOCR 行为一致。
 
 #### 调用形式
 
 ```lua
-screen.paddleOcr()                      -- 全屏识别
+screen.paddleOcr()                     -- 全屏识别
 screen.paddleOcr(x1, y1, x2, y2)       -- 区域识别
 ```
+
+> ⚠️ **参数是区域左上角 + 右下角（对角点），不是"宽高"！**
+> `screen.paddleOcr(126, 2, 281, 35)` = 区域从 `(126,2)` 到 `(281,35)`，即宽 155、高 33。
+> 如果你习惯写 `x, y, w, h`（宽高），请自行换算：`x2 = x1 + w, y2 = y1 + h`。
 
 #### 参数
 
@@ -413,7 +445,7 @@ screen.paddleOcr(x1, y1, x2, y2)       -- 区域识别
 
 #### 返回值
 
-返回数组，每个元素是包含以下字段的 table：
+返回**数组**，每个元素是一个包含以下字段的 table：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -422,23 +454,86 @@ screen.paddleOcr(x1, y1, x2, y2)       -- 区域识别
 | `y` | number | 文本框左上角纵坐标 |
 | `w` | number | 文本框宽度 |
 | `h` | number | 文本框高度 |
-| `confidence` | number | 置信度 [0,1] |
+| `confidence` | number | 置信度 [0,1]，越接近 1 越可信 |
 
-#### 示例
+#### 怎么打印结果（重要！用 `print`，不要用 `log`）
 
 ```lua
--- 全屏识别
 local result = screen.paddleOcr()
-print("识别结果", result)
-for k, v in pairs(result) do
-    print(k, v.string, v.x, v.y, v.w, v.h, v.confidence)
+print("识别结果数量:", type(result) == "table" and #result or 0)
+for i, v in ipairs(result) do
+    print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f",
+        i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
 end
+```
 
--- 区域识别
-local result = screen.paddleOcr(100, 100, 200, 200)
-print("识别结果", result)
+输出示例（横屏 1334×750 脚本坐标系）：
 
--- 全屏识别并用 screenDraw 框选
+```
+识别结果数量:	32
+[1] "coffe的味道" 框(128,8,143,24) 置信度1.000
+[2] "敌对" 框(339,10,61,24) 置信度1.000
+[3] "比奇" 框(1221,10,52,26) 置信度1.000
+[11] "附近" 框(120,89,67,26) 置信度1.000
+...
+```
+
+> ⚠️ **`log()` 只显示第一个参数**，`log("识别结果", result)` 打印不出 `result` 的内容！
+> 必须用 `print(...)`（自动连接所有参数）或手动 `tostring` 拼接。这是排查 OCR"识别不到"时最常踩的坑。
+
+#### 常见用法
+
+**1. 全屏 OCR，找出某个文字并点击**
+
+```lua
+local result = screen.paddleOcr()
+for _, v in ipairs(result) do
+    if v.string == "附近" then
+        tap(v.x + v.w / 2, v.y + v.h / 2)   -- 点击文字框中心
+        break
+    end
+end
+```
+
+**2. 判断区域里是否含有某文字**
+
+```lua
+-- 圈住"附近"按钮区域，检测其中是否出现"附近"
+local result = screen.paddleOcr(120, 85, 200, 120)
+local found = false
+for _, v in ipairs(result) do
+    if v.string and string.find(v.string, "附近") then
+        found = true
+        break
+    end
+end
+print("区域含'附近':", found)
+```
+
+**3. 只看高置信度结果（过滤误识别）**
+
+```lua
+local result = screen.paddleOcr()
+for _, v in ipairs(result) do
+    if (v.confidence or 0) >= 0.8 then      -- 只信任高置信度
+        print(v.string, v.x, v.y)
+    end
+end
+```
+
+**4. 区域 OCR 读取角色名 / 顶部提示**
+
+```lua
+-- 横屏脚本坐标系下，识别屏幕顶部角色名
+local result = screen.paddleOcr(126, 2, 281, 35)
+if result and #result > 0 then
+    print("顶部文字:", result[1].string)
+end
+```
+
+**5. 全屏识别并用 screenDraw 框选可视化**
+
+```lua
 local result = screen.paddleOcr()
 local tab = {}
 for k, v in pairs(result) do
@@ -454,11 +549,23 @@ sys.msleep(1000 * 10)
 
 > 默认识别语言为简体中文、繁体中文、英文。
 
+#### 横屏脚本（调用 `screen.init` 之后）
+
+调用了 `screen.init(1)`（横屏）后，`paddleOcr` 的**区域参数和返回坐标都自动换算为横屏脚本坐标系**，与 `tap` / `findColor` 完全一致，无需手动换算：
+
+```lua
+screen.init(1)              -- 横屏, home 在右 (脚本坐标系)
+local result = screen.paddleOcr(126, 2, 281, 35)   -- 传入横屏坐标
+for _, v in ipairs(result) do
+    print(v.string, v.x, v.y)                      -- 返回也是横屏坐标
+end
+```
+
 ---
 
 ### 3.4 屏幕 OCR（多语言）`screen.visionOcr`
 
-支持自定义识别语言的屏幕 OCR，可识别英语、法语、中文、日语、韩语、俄语等 13 种语言。
+与 `screen.paddleOcr` 结构完全一致（返回值、遍历、打印方式相同），区别是支持**自定义识别语言**，可识别英语、法语、中文、日语、韩语、俄语等 13 种语言。
 
 #### 调用形式
 
@@ -507,22 +614,56 @@ screen.visionOcr("ko-KR")                         -- 指定语言, 全屏
 ```lua
 -- 全屏识别（默认中文）
 local result = screen.visionOcr()
-print("识别结果", result)
+print("识别结果数量:", type(result) == "table" and #result or 0)
 
 -- 区域识别（中文）
 local result = screen.visionOcr(100, 100, 200, 200)
-print("识别结果", result)
+for _, v in ipairs(result) do
+    print(v.string, v.x, v.y, v.confidence)
+end
 
 -- 区域识别（韩文）
 local result = screen.visionOcr("ko-KR", 100, 100, 200, 200)
-print("识别结果", result)
 
 -- 区域识别（英文）
 local result = screen.visionOcr("en-US", 100, 100, 200, 200)
-print("识别结果", result)
 ```
 
 > 注：`screen.paddleOcr` 与 `screen.visionOcr` 底层均基于 Apple Vision Framework 的 `VNRecognizeTextRequest`，区别在于 `visionOcr` 支持自定义语言，`paddleOcr` 仅用默认中英文。
+
+---
+
+### 3.5 OCR 排错速查（实战经验）
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| 日志显示"识别结果"后一片空白 | `log()` 只显示第一个参数，`result` 根本没被打印 | 改用 `print(...)` 或 `logStr(tostring(...))` 拼接打印 |
+| 区域 OCR 识别不到目标文字 | 区域坐标圈错了位置，或区域太小 | 先跑一次**全屏** `screen.paddleOcr()` 打印所有结果，对照目标文字的实际坐标再圈区域 |
+| 区域写 `x, y, w, h` 结果却不对 | 本接口是**对角点**语义 `(x1,y1,x2,y2)` | 换算 `x2=x1+w, y2=y1+h` 后再传入 |
+| 横屏游戏坐标错乱 / 找不到 | 没调用 `screen.init(1/2)` | 脚本开头调用 `screen.init(1)`（home 右）或 `screen.init(2)`（home 左） |
+| 小字 / 艺术字识别不出 | 文字太小（< 10px 高）、带特效、被阴影干扰 | 圈大一点的区域；用 `findColor`/`findText` 兜底；放宽置信度过滤 |
+| 识别出一堆乱码 | 游戏 UI 特效 / 背景干扰 | 过滤 `(v.confidence or 0) >= 0.8`；用 `string.find` 精确匹配目标文字 |
+| OCR 耗时 2~4 秒 | Vision 引擎本身耗时（全屏约 4 秒，区域约 2 秒） | 优先用**区域** OCR 缩小范围；检测按钮用 `findColor`/`findText` 更快 |
+| 找色能找到但 OCR 认不出 | 找色看颜色、OCR 看字形，两者原理不同 | 按钮检测优先找色；需要"读文字内容"才用 OCR |
+
+---
+
+### 3.6 推荐工作流：先全屏扫描定坐标，再圈区域
+
+新手最容易踩的坑是"凭感觉圈区域"。推荐流程：
+
+1. **先全屏跑一次 OCR**，打印所有文字的真实坐标：
+   ```lua
+   local result = screen.paddleOcr()
+   for i, v in ipairs(result) do
+       print(i, v.string, v.x, v.y, v.w, v.h, v.confidence)
+   end
+   ```
+2. 从输出里找到目标文字（如 `"附近" 框(120,89,67,26)`），就知道它在脚本坐标系的位置。
+3. 把区域圈在该文字周围（留一点边距），如 `screen.paddleOcr(120, 85, 200, 120)`。
+4. 把确认好的区域写进正式脚本。
+
+这样圈出来的区域 100% 对准目标，不会再出现"识别不到"。
 
 ---
 
