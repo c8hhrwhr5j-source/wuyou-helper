@@ -440,6 +440,23 @@ static BOOL _luaPausedByButton = NO;
     [[TSLuaBridge shared] runString:script];
 }
 
+// 原版 TrollAutoScript 的 startScriptWithPath: 机制：按文件路径启动脚本。
+// 远程端先上传 .lua 到 /var/mobile/touch/lua/，再传文件名让设备端从文件路径执行。
+- (void)webDidReceiveScriptPath:(NSString *)path {
+    [self _log:[NSString stringWithFormat:@"[Web] 远程运行脚本: %@", path]];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [self _log:[NSString stringWithFormat:@"[Web] 脚本文件不存在: %@", path]];
+        return;
+    }
+    __weak typeof(self) ws = self;
+    [TSLuaBridge shared].logHandler = ^(NSString *msg) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [ws _log:msg];
+        });
+    };
+    [[TSLuaBridge shared] runFile:path];
+}
+
 - (void)webDidReceiveStop {
     // 同时停止 Lua 与 DSL 引擎, 无论哪套脚本在运行都能停
     [[TSLuaBridge shared] stop];

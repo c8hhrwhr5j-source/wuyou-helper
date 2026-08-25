@@ -16,7 +16,7 @@
 //    GET  /api/stream          → MJPEG 实时屏幕流
 //    POST /api/tap             → {"x":100,"y":200}
 //    POST /api/swipe           → {"x1":100,"y1":200,"x2":300,"y2":400,"ms":500}
-//    POST /api/run             → {"script":"..."}
+//    POST /api/run             → {"script":"..."} 或 {"filename":"main.lua"}（按路径启动，原版 startScriptWithPath: 机制）
 //    POST /api/stop            → 停止脚本
 //    GET  /api/device          → 设备信息
 //    GET  /api/log?file=debug.log&after=N → 增量读取设备日志
@@ -40,6 +40,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)webDidReceiveTap:(CGPoint)point;
 - (void)webDidReceiveSwipe:(CGPoint)from to:(CGPoint)to duration:(NSTimeInterval)ms;
 - (void)webDidReceiveScript:(NSString *)script;
+/// 按文件路径启动脚本（原版 startScriptWithPath: 机制，path 为 /var/mobile/touch/lua/ 下完整路径）
+- (void)webDidReceiveScriptPath:(NSString *)path;
 - (void)webDidReceiveStop;
 - (void)webDidReceiveKeyPress:(uint16_t)keyCode down:(BOOL)isDown;
 - (void)webDidReceiveText:(NSString *)text;

@@ -786,7 +786,22 @@ static NSData *WSTextFrame(NSString *text) {
 - (void)handleRun:(int)clientFd body:(NSData *)body {
     NSDictionary *json = [self parseJSON:body];
     NSString *script = json[@"script"];
-    if (script.length > 0) {
+    NSString *filename = json[@"filename"];
+    if (filename.length > 0) {
+        // 原版 startScriptWithPath: 机制：按文件名启动已上传到 /var/mobile/touch/lua/ 的脚本
+        if ([filename containsString:@"/"] || [filename containsString:@".."]) {
+            [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"filename 无效"]];
+            return;
+        }
+        [TSPaths ensureDirectoriesExist];
+        NSString *targetPath = [TSPaths pathForLua:filename];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if ([self.delegate respondsToSelector:@selector(webDidReceiveScriptPath:)]) {
+                [self.delegate webDidReceiveScriptPath:targetPath];
+            }
+        });
+        [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES, @"message": @"脚本已启动", @"path": targetPath}]];
+    } else if (script.length > 0) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if ([self.delegate respondsToSelector:@selector(webDidReceiveScript:)]) {
                 [self.delegate webDidReceiveScript:script];
@@ -794,7 +809,7 @@ static NSData *WSTextFrame(NSString *text) {
         });
         [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES, @"message": @"脚本已提交"}]];
     } else {
-        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 script 参数"]];
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 script 或 filename 参数"]];
     }
 }
 

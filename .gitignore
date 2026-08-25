@@ -38,6 +38,7 @@ _ipa_unzip/
 _old_tipa_unzip/
 _ipa_extract/
 _extract_tmp/
+_tipa_extract/
 _ci_logs_new_x/
 ci_logs/
 ci_logs.zip
