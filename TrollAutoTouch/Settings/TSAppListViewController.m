@@ -38,7 +38,7 @@
 
 @property (nonatomic, copy)   NSArray<NSDictionary *> *allApps;      // {name, bundleID, bundlePath}
 @property (nonatomic, copy)   NSArray<NSDictionary *> *filteredApps;
-@property (nonatomic, strong) NSCache<NSString *, UIImage> *iconCache;
+@property (nonatomic, strong) NSCache *iconCache;
 @property (nonatomic, assign) BOOL includeSystemApps;   // 是否包含 com.apple.* 系统应用
 
 @end
