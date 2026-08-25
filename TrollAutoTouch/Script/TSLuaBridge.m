@@ -2700,6 +2700,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     self.isPaused = NO;
     self.runningPath = path;
     self.isRunning = YES;
+    // 明确标记脚本真正进入执行阶段, 便于远程启动排查
+    lua_log([NSString stringWithFormat:@"[Lua] 开始运行: %@",
+             path ? path.lastPathComponent : @"(字符串代码)"]);
 
     // 预热 HUD 宿主 (单 App 架构): 提前创建全屏透明窗口并注册 SBS 系统级托管,
     // 使首次音量键弹窗即时可用; 失败不阻塞脚本 (弹窗会回退前台可见/静默切换)。

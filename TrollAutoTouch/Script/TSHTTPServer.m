@@ -14,6 +14,8 @@
 #import "TSScriptEngine.h"
 #import "TSPaths.h"
 #import "TSLogStore.h"
+#import "TSLuaBridge.h"
+#import "TSHUDWindow.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -363,6 +365,12 @@ static NSData *WSTextFrame(NSString *text) {
         [self handleRun:clientFd body:body];
     } else if ([path isEqualToString:@"/api/stop"] && [method isEqualToString:@"POST"]) {
         [self handleStop:clientFd];
+    } else if ([path hasPrefix:@"/task"]) {
+        // 冷启动控制接口: /task?cmd=start|stop|pause|resume  (原版 8989 端口兼容)
+        [self handleTask:clientFd path:path];
+    } else if ([path hasPrefix:@"/float"]) {
+        // 冷启动悬浮球接口: /float?x=0|1&y=<物理像素>, y<0 隐藏
+        [self handleFloat:clientFd path:path];
     } else if ([path isEqualToString:@"/api/upload"] && [method isEqualToString:@"POST"]) {
         [self handleUpload:clientFd body:body];
     } else if ([path isEqualToString:@"/api/key"] && [method isEqualToString:@"POST"]) {
@@ -821,6 +829,74 @@ static NSData *WSTextFrame(NSString *text) {
         [[TSScriptEngine shared] stop];
     });
     [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES}]];
+}
+
+#pragma mark - 冷启动控制接口 (原版 8989 端口兼容)
+
+// 解析 URL query 字符串 "a=1&b=2" 为字典 (自动 URL 解码)
+- (NSDictionary *)parseQueryParams:(NSString *)query {
+    NSMutableDictionary *params = [NSMutableDictionary dictionary];
+    if (query.length == 0) return params;
+    for (NSString *pair in [query componentsSeparatedByString:@"&"]) {
+        NSArray *kv = [pair componentsSeparatedByString:@"="];
+        if (kv.count != 2) continue;
+        NSString *key = [kv[0] stringByRemovingPercentEncoding];
+        NSString *value = [kv[1] stringByRemovingPercentEncoding];
+        if (key.length > 0 && value) params[key] = value;
+    }
+    return params;
+}
+
+// 从完整请求路径中提取 query 参数 ("/task?cmd=start" → {"cmd":"start"})
+- (NSDictionary *)queryParamsFromPath:(NSString *)path {
+    NSRange q = [path rangeOfString:@"?"];
+    if (q.location == NSNotFound) return @{};
+    return [self parseQueryParams:[path substringFromIndex:q.location + 1]];
+}
+
+// GET /task?cmd=start|stop|pause|resume
+// 可选: &file=main.lua 指定启动的脚本文件名 (默认 main.lua)
+- (void)handleTask:(int)clientFd path:(NSString *)path {
+    NSDictionary *params = [self queryParamsFromPath:path];
+    NSString *cmd = params[@"cmd"];
+    if (cmd.length == 0) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 cmd 参数"]];
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([cmd isEqualToString:@"start"]) {
+            NSString *file = params[@"file"];
+            if (file.length == 0) file = @"main.lua";
+            if ([file containsString:@"/"] || [file containsString:@".."]) {
+                return; // 非法文件名: 静默忽略
+            }
+            [TSPaths ensureDirectoriesExist];
+            NSString *targetPath = [TSPaths pathForLua:file];
+            if ([self.delegate respondsToSelector:@selector(webDidReceiveScriptPath:)]) {
+                [self.delegate webDidReceiveScriptPath:targetPath];
+            }
+        } else if ([cmd isEqualToString:@"stop"]) {
+            if ([self.delegate respondsToSelector:@selector(webDidReceiveStop)]) {
+                [self.delegate webDidReceiveStop];
+            }
+            [[TSScriptEngine shared] stop];
+        } else if ([cmd isEqualToString:@"pause"]) {
+            [[TSLuaBridge shared] pause];
+        } else if ([cmd isEqualToString:@"resume"]) {
+            [[TSLuaBridge shared] resume];
+        }
+    });
+    [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES, @"cmd": cmd}]];
+}
+
+// GET /float?x=0|1&y=<物理像素垂直位置>
+// x=0 靠左, x=1 靠右; y<0 表示把悬浮球移到屏幕外隐藏
+- (void)handleFloat:(int)clientFd path:(NSString *)path {
+    NSDictionary *params = [self queryParamsFromPath:path];
+    NSInteger side = [params[@"x"] integerValue];
+    CGFloat yPx = [params[@"y"] doubleValue];
+    [[TSHUDWindow shared] moveBallToSide:side verticalPx:yPx];
+    [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES, @"x": @(side), @"y": @(yPx)}]];
 }
 
 - (void)handleUpload:(int)clientFd body:(NSData *)body {

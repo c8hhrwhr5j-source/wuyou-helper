@@ -18,6 +18,8 @@
 //    POST /api/swipe           → {"x1":100,"y1":200,"x2":300,"y2":400,"ms":500}
 //    POST /api/run             → {"script":"..."} 或 {"filename":"main.lua"}（按路径启动，原版 startScriptWithPath: 机制）
 //    POST /api/stop            → 停止脚本
+//    GET  /task?cmd=start|stop|pause|resume  → 冷启动控制接口 (启动 main.lua, 可加 &file=xxx.lua)
+//    GET  /float?x=0|1&y=<物理像素>           → 移动悬浮球 (x=0 左/1 右, y<0 隐藏)
 //    GET  /api/device          → 设备信息
 //    GET  /api/log?file=debug.log&after=N → 增量读取设备日志
 //    WS   /ws                  → WebSocket 双向控制通道

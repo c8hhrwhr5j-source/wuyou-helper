@@ -856,6 +856,30 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     self.frame = frame;
 }
 
+// 冷启动接口 /float 实现: 移动/隐藏悬浮球
+- (void)moveBallToSide:(NSInteger)side verticalPx:(CGFloat)yPx {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self moveBallToSide:side verticalPx:yPx];
+        });
+        return;
+    }
+    CGSize screen = [self _effectiveScreenSize];
+    if (yPx < 0) {
+        // 移到屏幕外不可见位置实现隐藏 (不销毁窗口状态)
+        CGRect f = self.frame;
+        f.origin.x = screen.width + 500;
+        f.origin.y = screen.height + 500;
+        self.frame = f;
+        return;
+    }
+    [self show];
+    CGFloat scale = [UIScreen mainScreen].scale;
+    CGFloat x = (side == 1) ? screen.width : 0;
+    CGFloat y = yPx / scale;
+    [self setBallPoint:CGPointMake(x, y)];
+}
+
 #pragma mark - 系统级托管 (跨应用显示)
 
 // app 进入后台: 把悬浮球窗口的 layer 通过 SBSAccessibilityWindowHostingController

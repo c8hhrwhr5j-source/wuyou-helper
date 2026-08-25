@@ -32,6 +32,11 @@ typedef NS_ENUM(NSInteger, TSHUDAction) {
 /// 限制在屏内, 横竖屏自适应。线程安全 (内部派发主线程)。
 - (void)setBallPoint:(CGPoint)point;
 
+/// 冷启动控制接口 /float 支持:
+/// side=0 靠屏幕左边缘, 1 靠右边缘; yPx 为悬浮球中心垂直位置(物理像素, 按屏幕 scale 换算);
+/// yPx < 0 表示把悬浮球移到屏幕外隐藏。线程安全 (内部派发主线程)。
+- (void)moveBallToSide:(NSInteger)side verticalPx:(CGFloat)yPx;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -36,6 +36,8 @@
     // 到 _logFull 并刷新 logView, 避免每条日志 O(n) 拼接刷爆主线程。
     NSMutableString *_logBuffer;
     NSMutableString *_logFull;
+    // 冷启动控制接口服务器 (原版兼容端口 8989, 提供 /task 与 /float)
+    TSHTTPServer *_coldStartServer;
 }
 
 // "暂停 Lua"按钮的暂停/继续状态 (音量键面板也会同步更新它)
@@ -339,19 +341,29 @@ static BOOL _luaPausedByButton = NO;
 }
 
 - (void)_startServer {
-    if ([[TSHTTPServer shared] isRunning]) {
-        [self _log:[NSString stringWithFormat:@"服务器已在运行，端口 %d", [[TSHTTPServer shared] port]]];
-        return;
+    if (![[TSHTTPServer shared] isRunning]) {
+        [[TSHTTPServer shared] start];
+        NSString *wifiIP = [[TSToolExecutor shared] wifiIPAddress];
+        int port = [[TSHTTPServer shared] port];
+        [self _log:[NSString stringWithFormat:@"Web 服务器已启动 → http://%@:%d", wifiIP ?: @"localhost", port]];
+        [self _log:@"浏览器访问可远程控制设备"];
     }
-    [[TSHTTPServer shared] start];
-    NSString *wifiIP = [[TSToolExecutor shared] wifiIPAddress];
-    int port = [[TSHTTPServer shared] port];
-    [self _log:[NSString stringWithFormat:@"Web 服务器已启动 → http://%@:%d", wifiIP ?: @"localhost", port]];
-    [self _log:@"浏览器访问可远程控制设备"];
+    // 冷启动控制接口: 原版兼容端口 8989 (/task?cmd=... 与 /float?x=...&y=...)
+    if (!_coldStartServer) {
+        _coldStartServer = [[TSHTTPServer alloc] initWithPort:8989];
+        _coldStartServer.delegate = self;
+    }
+    if (![_coldStartServer isRunning]) {
+        [_coldStartServer start];
+        [self _log:@"冷启动接口已启动 → http://127.0.0.1:8989 (/task /float)"];
+    }
 }
 
 - (void)_stopServer {
     [[TSHTTPServer shared] stop];
+    if ([_coldStartServer isRunning]) {
+        [_coldStartServer stop];
+    }
     [self _log:@"Web 服务器已停止"];
 }
 
