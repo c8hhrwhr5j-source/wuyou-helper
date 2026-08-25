@@ -252,9 +252,14 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
             [[TSHUDHost shared] showToast:@"TAS 服务已开启" duration:1.2 hidden:NO];
         } else {
             // 关闭: 停止音量键监听 + 停止服务 (含后台保活/心跳) + 关闭远程访问端口
+            // 每步写日志: 若仍闪退, "查看系统日志"能显示最后执行到哪一步
+            [[TSLogStore shared] append:@"[TAS] 关闭服务: 步骤1/3 停止音量键监听"];
             [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
+            [[TSLogStore shared] append:@"[TAS] 关闭服务: 步骤2/3 停止后台服务"];
             [[TSDaemonManager shared] stopAll];
+            [[TSLogStore shared] append:@"[TAS] 关闭服务: 步骤3/3 关闭 HTTP 端口"];
             [[TSHTTPServer shared] stop];
+            [[TSLogStore shared] append:@"[TAS] 关闭服务: 全部完成"];
             [[TSHUDHost shared] showToast:@"TAS 服务已关闭" duration:1.2 hidden:NO];
         }
     } @catch (NSException *e) {

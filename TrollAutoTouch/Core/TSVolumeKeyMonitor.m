@@ -20,6 +20,7 @@
 //  ⑤ 200ms 轮询 + AVSystemController 私有通知 (最终兜底)。
 
 #import "TSVolumeKeyMonitor.h"
+#import "TSLogStore.h"
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
@@ -189,6 +190,7 @@ enum {
     _running = NO;
     _stopping = YES;   // 通知后台 BKS 注册线程立即退出, 避免与清理并发
 
+    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 移除 KVO/通知"];
     @try {
         [[AVAudioSession sharedInstance] removeObserver:self
                                              forKeyPath:@"outputVolume"
@@ -223,9 +225,11 @@ enum {
     } else {
         cleanBKS();
     }
+    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: BKS 清理已提交"];
 
     // 清理 CPDM (SpringBoard 硬件按键)
     if (_messagingCenter) {
+        [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 清理 CPDM 中心"];
         @try {
             // 取消 delegate
             SEL setDelSel = NSSelectorFromString(@"setDelegate:");
@@ -243,9 +247,11 @@ enum {
         }
         _messagingCenter = nil;
     }
+    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: CPDM 清理完成"];
 
     // 清理 IOHID
     if (_hidClient) {
+        [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 清理 IOHID"];
         @try {
             void (*fnInvalidate)(IOHIDEventSystemClientRef) =
                 (void (*)(IOHIDEventSystemClientRef))dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientInvalidate");
@@ -256,6 +262,7 @@ enum {
         }
         _hidClient = NULL;
     }
+    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: IOHID 清理完成"];
 
     _avSystemController = nil;
     if (_timer) {
@@ -266,6 +273,7 @@ enum {
         dispatch_source_cancel(_watchdogTimer);
         _watchdogTimer = nil;
     }
+    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 全部完成"];
 }
 
 // ═══════════ 主通道①: BKS 硬件事件路由 (BackBoardServices.framework) ═══════════

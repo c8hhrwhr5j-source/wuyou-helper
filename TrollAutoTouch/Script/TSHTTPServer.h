@@ -19,6 +19,7 @@
 //    POST /api/run             → {"script":"..."}
 //    POST /api/stop            → 停止脚本
 //    GET  /api/device          → 设备信息
+//    GET  /api/log?file=debug.log&after=N → 增量读取设备日志
 //    WS   /ws                  → WebSocket 双向控制通道
 //
 

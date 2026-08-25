@@ -1,0 +1,153 @@
+//
+//  TSCrashReporter.m
+//  TrollAutoTouch
+//
+
+#import "TSCrashReporter.h"
+#import "TSLogStore.h"
+#import "TSPaths.h"
+
+#import <signal.h>
+#import <execinfo.h>
+#import <sys/stat.h>
+#import <sys/types.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <string.h>
+#import <stdint.h>
+
+static char g_crashLogPath[1024];
+
+// ─────────────────────────────────────────────────────────
+// C 级安全写入 —— 仅使用 async-signal-safe 函数, 供信号 handler 使用
+// ─────────────────────────────────────────────────────────
+static void crash_write(int fd, const char *s) {
+    if (!s) s = "(null)";
+    size_t len = strlen(s);
+    const char *p = s;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n <= 0) break;
+        p += n;
+        len -= (size_t)n;
+    }
+}
+
+static void crash_write_int(int fd, long v) {
+    char buf[32], tmp[32];
+    if (v == 0) { write(fd, "0", 1); return; }
+    if (v < 0)  { write(fd, "-", 1); v = -v; }
+    int i = 0;
+    while (v > 0) { tmp[i++] = (char)('0' + (v % 10)); v /= 10; }
+    int j = 0;
+    while (i > 0) buf[j++] = tmp[--i];
+    buf[j] = 0;
+    crash_write(fd, buf);
+}
+
+static void crash_write_hex(int fd, uintptr_t v) {
+    if (v == 0) { crash_write(fd, "0x0"); return; }
+    const char hex[] = "0123456789abcdef";
+    char tmp[32];
+    int i = 0;
+    while (v > 0) { tmp[i++] = hex[v & 0xF]; v >>= 4; }
+    crash_write(fd, "0x");
+    while (i > 0) write(fd, &tmp[--i], 1);
+}
+
+static void TSCrashSignalHandler(int sig) {
+    if (g_crashLogPath[0] == 0) return;
+    int fd = open(g_crashLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+
+    crash_write(fd, "\n========================================\n");
+    crash_write(fd, "[CRASH] signal=");
+    crash_write_int(fd, sig);
+    crash_write(fd, " (");
+    switch (sig) {
+        case SIGABRT: crash_write(fd, "SIGABRT"); break;
+        case SIGSEGV: crash_write(fd, "SIGSEGV"); break;
+        case SIGBUS:  crash_write(fd, "SIGBUS"); break;
+        case SIGILL:  crash_write(fd, "SIGILL"); break;
+        case SIGFPE:  crash_write(fd, "SIGFPE"); break;
+        case SIGTRAP: crash_write(fd, "SIGTRAP"); break;
+        default: break;
+    }
+    crash_write(fd, ")\n");
+
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    crash_write(fd, "backtrace:\n");
+    for (int i = 0; i < n; i++) {
+        crash_write_hex(fd, (uintptr_t)frames[i]);
+        crash_write(fd, "\n");
+    }
+    crash_write(fd, "========================================\n");
+    close(fd);
+
+    // 恢复默认处理并重新触发, 让系统照常生成标准崩溃日志(.ips)并退出
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void TSCatchExceptionHandler(NSException *e) {
+    @autoreleasepool {
+        NSString *report = [NSString stringWithFormat:
+            @"\n========================================\n"
+            @"[CRASH] NSException\n"
+            @"name: %@\n"
+            @"reason: %@\n"
+            @"stack:\n%@\n"
+            @"========================================\n",
+            e.name ?: @"(null)",
+            e.reason ?: @"(null)",
+            [[e callStackSymbols] componentsJoinedByString:@"\n"]];
+        if (g_crashLogPath[0]) {
+            NSString *path = [NSString stringWithUTF8String:g_crashLogPath];
+            @try { [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
+            @catch (id ex) {}
+        }
+        @try {
+            [[TSLogStore shared] append:[NSString stringWithFormat:@"!! %@", report]];
+        } @catch (id ex) {}
+        NSLog(@"[TSCrashReporter] %@", report);
+    }
+}
+
+@implementation TSCrashReporter
+
++ (void)install {
+    [TSPaths ensureDirectoriesExist];
+
+    NSString *logDir = [TSPaths logDir];
+    if (logDir.length == 0) return;
+    NSString *crashPath = [logDir stringByAppendingPathComponent:@"crash.log"];
+    strncpy(g_crashLogPath, crashPath.UTF8String, sizeof(g_crashLogPath) - 1);
+
+    // 把上次的崩溃记录载入内存日志, 用户 app 内"查看系统日志"直接可见
+    NSString *old = [NSString stringWithContentsOfFile:crashPath
+                                              encoding:NSUTF8StringEncoding
+                                                 error:nil];
+    if (old.length > 0) {
+        @try {
+            [[TSLogStore shared] append:[NSString stringWithFormat:@"!! 上次崩溃记录:\n%@", old]];
+        } @catch (id ex) {}
+        // 清空, 避免每次启动重复显示同一条
+        @try {
+            [[NSFileManager defaultManager] removeItemAtPath:crashPath error:nil];
+        } @catch (id ex) {}
+    }
+
+    // 捕获未处理 NSException (SIGABRT 之前先走这里)
+    NSSetUncaughtExceptionHandler(&TSCatchExceptionHandler);
+
+    // 捕获信号级崩溃 (EXC_BAD_ACCESS → SIGSEGV/SIGBUS, 断言 → SIGABRT 等)
+    signal(SIGABRT, TSCrashSignalHandler);
+    signal(SIGSEGV, TSCrashSignalHandler);
+    signal(SIGBUS,  TSCrashSignalHandler);
+    signal(SIGILL,  TSCrashSignalHandler);
+    signal(SIGFPE,  TSCrashSignalHandler);
+    signal(SIGTRAP, TSCrashSignalHandler);
+}
+
+@end

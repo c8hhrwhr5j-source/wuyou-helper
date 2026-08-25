@@ -13,6 +13,7 @@
 #import "TSHIDEventTouch.h"
 #import "TSScriptEngine.h"
 #import "TSPaths.h"
+#import "TSLogStore.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -368,6 +369,16 @@ static NSData *WSTextFrame(NSString *text) {
         [self handleKey:clientFd body:body];
     } else if ([path isEqualToString:@"/api/text"] && [method isEqualToString:@"POST"]) {
         [self handleText:clientFd body:body];
+    } else if ([path hasPrefix:@"/api/log"]) {
+        // /api/log 带 query 参数，需先剥掉 ?xxx 再精确匹配路由
+        NSString *pureLogPath = path;
+        NSRange logQ = [path rangeOfString:@"?"];
+        if (logQ.location != NSNotFound) pureLogPath = [path substringToIndex:logQ.location];
+        if ([pureLogPath isEqualToString:@"/api/log"] && [method isEqualToString:@"GET"]) {
+            [self serveLog:clientFd path:path];
+        } else {
+            [self sendAndClose:clientFd data:[self errorResponse:404 msg:@"Not Found"]];
+        }
     } else if ([path hasPrefix:@"/image/"]) {
         [self serveStaticFile:clientFd path:path];
     } else {
@@ -614,6 +625,47 @@ static NSData *WSTextFrame(NSString *text) {
         }
     }
     return nil;
+}
+
+// API: GET /api/log?file=debug.log&after=<游标>
+// 增量返回设备内存日志（最多保留最近 2000 条，行格式 [HH:mm:ss] 消息）:
+//   file      debug.log = 脚本主动日志(log/logStr/print), touch.log = 程序自身日志
+//   after     上次请求返回的 nextIndex；首次不传或传 0
+// 响应:
+//   lines     本次新增的行（可能为空）
+//   nextIndex 当前日志总行数，下次请求把它作为 after 传回
+//   cleared   内存日志被清空或游标失效(被截断)时为 true，客户端应全量替换显示
+- (void)serveLog:(int)clientFd path:(NSString *)fullPath {
+    NSString *file = [self queryValueForPath:fullPath key:@"file"];
+    if (file.length == 0) file = @"debug.log";
+    // 只允许读取两类日志文件，防止路径注入
+    if (![file isEqualToString:@"debug.log"] && ![file isEqualToString:@"touch.log"]) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+        return;
+    }
+    NSInteger after = [[self queryValueForPath:fullPath key:@"after"] integerValue];
+    if (after < 0) after = 0;
+
+    NSArray<NSString *> *all = [[TSLogStore shared] logsForFile:file];
+    NSInteger count = (NSInteger)all.count;
+    BOOL cleared = NO;
+    NSArray<NSString *> *lines = @[];
+
+    if (count == 0) {
+        cleared = (after > 0);   // 之前有日志，现在被清空
+    } else if (after > count) {
+        lines = all;             // 游标失效（内存被截断/清空过），全量返回
+        cleared = YES;
+    } else if (after < count) {
+        lines = [all subarrayWithRange:NSMakeRange((NSUInteger)after, (NSUInteger)(count - after))];
+    } // after == count → 无新增
+
+    [self sendAndClose:clientFd data:[self jsonResponse:@{
+        @"file": file,
+        @"lines": lines,
+        @"nextIndex": @(count),
+        @"cleared": @(cleared),
+    }]];
 }
 
 - (void)serveScreenshot:(int)clientFd {

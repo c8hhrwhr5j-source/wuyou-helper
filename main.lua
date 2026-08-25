@@ -1061,8 +1061,9 @@ function main()
             sleep(500)
         end
 		if rgbbj("附近下") then
+			log("开始文字识别")
             local result = screen.paddleOcr(126,2,281,35)
-			print("识别结果", result)
+			log("识别结果", result)
         end
 
     end
