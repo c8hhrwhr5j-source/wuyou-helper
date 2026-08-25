@@ -16,6 +16,7 @@
 #import "TSLogStore.h"
 #import "TSLuaBridge.h"
 #import "TSHUDWindow.h"
+#import "TSScriptListViewController.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -866,6 +867,10 @@ static NSData *WSTextFrame(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([cmd isEqualToString:@"start"]) {
             NSString *file = params[@"file"];
+            // 未指定 file → 与悬浮球/音量键行为一致: 运行"当前选中脚本"
+            if (file.length == 0) {
+                file = [TSScriptListViewController selectedScriptName];
+            }
             if (file.length == 0) file = @"main.lua";
             if ([file containsString:@"/"] || [file containsString:@".."]) {
                 return; // 非法文件名: 静默忽略

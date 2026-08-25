@@ -456,7 +456,8 @@ static BOOL _luaPausedByButton = NO;
 // 远程端先上传 .lua 到 /var/mobile/touch/lua/，再传文件名让设备端从文件路径执行。
 - (void)webDidReceiveScriptPath:(NSString *)path {
     [self _log:[NSString stringWithFormat:@"[Web] 远程运行脚本: %@", path]];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir]) {
         [self _log:[NSString stringWithFormat:@"[Web] 脚本文件不存在: %@", path]];
         return;
     }
@@ -466,7 +467,12 @@ static BOOL _luaPausedByButton = NO;
             [ws _log:msg];
         });
     };
-    [[TSLuaBridge shared] runFile:path];
+    // 与悬浮球/音量键行为一致: 目录按项目运行, 文件按脚本运行
+    if (isDir) {
+        [[TSLuaBridge shared] runProject:path];
+    } else {
+        [[TSLuaBridge shared] runFile:path];
+    }
 }
 
 - (void)webDidReceiveStop {
