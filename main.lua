@@ -1062,9 +1062,30 @@ function main()
         end
 		if rgbbj("附近下") then
 			log("开始文字识别")
+			local w, h = getScreenSize()
+			print("屏幕尺寸:", w, h)
             local result = screen.paddleOcr(126,2,281,35)
-			log("识别结果", result)
+			print("区域OCR结果数:", type(result) == "table" and #result or "nil")
+            if type(result) == "table" then
+                for i, v in ipairs(result) do
+                    print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
+                end
+            end
         end
+
+
+		log("=== 全屏 paddleOcr ===")
+		local r1 = screen.paddleOcr()
+		print("全屏结果数:", type(r1) == "table" and #r1 or "nil")
+		if type(r1) == "table" then
+			for i, v in ipairs(r1) do
+				print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
+			end
+		end
+
+		log("=== 全屏 visionOcr ===")
+		local r3 = screen.visionOcr()
+		print("vision全屏结果数:", type(r3) == "table" and #r3 or "nil")
 
     end
 end
@@ -1088,9 +1109,24 @@ function click(x, y, x1, y1)
     sleep(100)
 end
 
--- 打印日志
-function log(txt)
-    logStr(txt)
+-- 打印日志 (支持多参数, 表格自动 JSON 序列化, 与 print 等效)
+function log(...)
+    local n = select("#", ...)
+    if n <= 1 then
+        logStr(tostring(...))
+        return
+    end
+    local parts = {}
+    for i = 1, n do
+        local v = select(i, ...)
+        if type(v) == "table" then
+            local ok, s = pcall(json.encode, v)
+            parts[i] = ok and s or tostring(v)
+        else
+            parts[i] = tostring(v)
+        end
+    end
+    logStr(table.concat(parts, " "))
 end
 
 -- 系统延时 (毫秒)
