@@ -312,6 +312,30 @@ static CGPoint tsActualToScriptPoint(CGPoint p) {
     return tsTransformPoint(p, tsCurrentOrientation(), s_scriptOrientation, tsPortraitPointSize());
 }
 
+// 竖屏 buffer 图像 -> 脚本方向图像(OCR 专用)。
+// 截屏缓冲固定为竖屏物理方向(750x1334), 横屏时 buffer 里文字是旋转 90° 的竖排,
+// Vision(VNRecognizeTextRequest)只识别水平文字, 直接识别必然返回空。
+// 这里把整图旋回脚本方向(旋转后尺寸 = 横屏像素), 之后 region 直接用脚本坐标, 返回坐标也是脚本坐标。
+//   home右(1): buffer 逆时针 90°;  home左(2): buffer 顺时针 90°;  竖屏(0): 恒等。
+static UIImage *tsRotateToScriptOrientation(UIImage *img) {
+    if (s_scriptOrientation == 0 || !img) return img;
+    CGFloat w = img.size.width, h = img.size.height;
+    CGSize newSize = CGSizeMake(h, w);
+    UIGraphicsBeginImageContextWithOptions(newSize, NO, 1.0);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (s_scriptOrientation == 1) {            // home 右: 逆时针 90°
+        CGContextTranslateCTM(ctx, 0, newSize.height);
+        CGContextRotateCTM(ctx, -M_PI_2);
+    } else {                                   // home 左: 顺时针 90°
+        CGContextTranslateCTM(ctx, newSize.width, 0);
+        CGContextRotateCTM(ctx, M_PI_2);
+    }
+    [img drawInRect:CGRectMake(0, 0, w, h)];
+    UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return out;
+}
+
 #pragma mark - Lua 工具
 
 static int l_global_print(lua_State *L) {
@@ -1555,10 +1579,16 @@ static int l_screen_findText(lua_State *L) {
     const char *text = luaL_checkstring(L, 1);
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
+    BOOL scriptSpace = NO;
+    if (s_scriptOrientation != 0) {
+        // 横屏: 竖屏 buffer 里文字是旋转 90° 的竖排, Vision 只识别水平文字, 先旋回脚本方向。
+        img = tsRotateToScriptOrientation(img);
+        scriptSpace = YES;
+    }
     TSOCRResult *res = [[TSOCREngine shared] findText:@(text) inImage:img];
     if (!res) { lua_pushnil(L); return 1; }
-    // 截屏缓冲是竖屏物理方向, OCR 中心是图像像素(物理像素) -> 旋转回脚本坐标系 (与 screen.init 一致)
-    CGPoint c = tsBufferToScriptPoint(res.center);
+    // scriptSpace=YES 时 res.center 已是脚本坐标; 否则是竖屏 buffer 像素, 旋转回脚本坐标系
+    CGPoint c = scriptSpace ? res.center : tsBufferToScriptPoint(res.center);
     lua_pushnumber(L, c.x);
     lua_pushnumber(L, c.y);
     return 2;
@@ -1566,13 +1596,21 @@ static int l_screen_findText(lua_State *L) {
 
 // 把 OCR 结果数组压入 Lua 表
 // 表结构: {{string=, x=, y=, w=, h=, confidence=}, ...}
-// 坐标已转换为脚本坐标系
-static void pushOCRResults(lua_State *L, NSArray<TSOCRResult *> *results) {
+// 坐标已转换为脚本坐标系。
+// scriptSpace=YES: 识别图已是脚本方向(tsRotateToScriptOrientation), rect 直接是脚本坐标, 不再旋转;
+// scriptSpace=NO: 识别图是竖屏 buffer, rect 是 buffer 像素, 需 tsBufferToScriptPoint 转回脚本坐标。
+static void pushOCRResults(lua_State *L, NSArray<TSOCRResult *> *results, BOOL scriptSpace) {
     lua_newtable(L);
     for (NSUInteger i = 0; i < results.count; i++) {
         TSOCRResult *r = results[i];
-        CGPoint tl = tsBufferToScriptPoint(CGPointMake(r.rect.origin.x, r.rect.origin.y));
-        CGPoint br = tsBufferToScriptPoint(CGPointMake(CGRectGetMaxX(r.rect), CGRectGetMaxY(r.rect)));
+        CGPoint tl, br;
+        if (scriptSpace) {
+            tl = CGPointMake(r.rect.origin.x, r.rect.origin.y);
+            br = CGPointMake(CGRectGetMaxX(r.rect), CGRectGetMaxY(r.rect));
+        } else {
+            tl = tsBufferToScriptPoint(CGPointMake(r.rect.origin.x, r.rect.origin.y));
+            br = tsBufferToScriptPoint(CGPointMake(CGRectGetMaxX(r.rect), CGRectGetMaxY(r.rect)));
+        }
         lua_newtable(L);
         lua_pushstring(L, r.text.UTF8String);
         lua_setfield(L, -2, "string");
@@ -1605,18 +1643,19 @@ static int l_screen_paddleOcr(lua_State *L) {
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
 
-    // 脚本坐标 -> 截屏物理坐标(竖屏 buffer): 用四角旋转外接矩形(与 findColor/findColors 一致)。
-    // 不能用"旋转两个对角点再相减": 横屏(90°)旋转后对角差会变成负宽高,
-    // 导致 CGRectIsEmpty 判定为真, OCR 区域被丢弃, 始终识别不到文字。
-    if (!CGRectIsEmpty(region)) {
+    BOOL scriptSpace = NO;
+    if (s_scriptOrientation != 0) {
+        // 横屏: 竖屏 buffer 里文字是旋转 90° 的竖排, Vision 只识别水平文字;
+        // 先把整图旋回脚本方向, 之后 region 直接用脚本坐标(不再旋转), 返回坐标也是脚本坐标。
+        img = tsRotateToScriptOrientation(img);
+        scriptSpace = YES;
+    } else if (!CGRectIsEmpty(region)) {
+        // 竖屏: 脚本坐标 == buffer 坐标, 恒等变换。
         region = tsScriptToActualRect(region);
-        CGFloat scale = img.scale;
-        region = CGRectMake(region.origin.x * scale, region.origin.y * scale,
-                            region.size.width * scale, region.size.height * scale);
     }
 
     NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img inRegion:region];
-    pushOCRResults(L, results);
+    pushOCRResults(L, results, scriptSpace);
     return 1;
 }
 
@@ -1647,19 +1686,22 @@ static int l_screen_visionOcr(lua_State *L) {
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
 
-    // 脚本坐标 -> 截屏物理坐标(竖屏 buffer): 用四角旋转外接矩形(与 findColor/findColors 一致)。
-    if (!CGRectIsEmpty(region)) {
+    BOOL scriptSpace = NO;
+    if (s_scriptOrientation != 0) {
+        // 横屏: 竖屏 buffer 里文字是旋转 90° 的竖排, Vision 只识别水平文字;
+        // 先把整图旋回脚本方向, 之后 region 直接用脚本坐标, 返回坐标也是脚本坐标。
+        img = tsRotateToScriptOrientation(img);
+        scriptSpace = YES;
+    } else if (!CGRectIsEmpty(region)) {
+        // 竖屏: 脚本坐标 == buffer 坐标, 恒等变换。
         region = tsScriptToActualRect(region);
-        CGFloat scale = img.scale;
-        region = CGRectMake(region.origin.x * scale, region.origin.y * scale,
-                            region.size.width * scale, region.size.height * scale);
     }
 
     NSArray<NSString *> *languages = lang ? @[lang] : nil;
     NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img
                                                               inRegion:region
                                                               languages:languages];
-    pushOCRResults(L, results);
+    pushOCRResults(L, results, scriptSpace);
     return 1;
 }
 
