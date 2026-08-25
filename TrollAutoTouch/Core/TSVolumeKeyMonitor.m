@@ -249,30 +249,28 @@ enum {
     }
     [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: CPDM 清理完成"];
 
-    // 清理 IOHID —— ⚠️ 永不 CFRelease / Invalidate:
-    // 崩溃栈已证实: 关闭 TAS 时 CFRelease(_hidClient) 走进 IOKit 内部
-    // IOHIDObjectRetainCount 释放路径, 在 iOS 15.8 / TrollStore (无 platform 身份)
-    // 下触发 IOKit 内部断言 → abort() → 主线程闪退。
+    // 清理 IOHID —— ⚠️ 绝不销毁、绝不解绑:
+    // iOS 15.8 / TrollStore (无 platform 身份) 下已证实的 IOKit 内部崩溃路径:
+    //   ① CFRelease(_hidClient)            → SIGABRT (IOHIDObjectRetainCount 断言)
+    //   ② SetDispatchQueue(client, NULL)   → SIGTRAP (内部 assert, 崩溃栈已证实)
+    //   ③ IOHIDEventSystemClientInvalidate → 走销毁路径, 同①
     // 因此 client 只创建一次、进程生命周期内复用:
-    // 关闭时仅取消回调 + 清空匹配 + 解除 dispatch queue 绑定, 不销毁对象。
+    // 关闭时仅取消回调 + 清空匹配 (两者已证实安全), dispatch queue 绑定保持到进程退出。
     if (_hidClient) {
         [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 取消 IOHID 监听 (保留 client 复用)"];
         @try {
-            // 1) 取消事件回调
+            // 1) 取消事件回调 (安全)
             void (*fnUnregister)(IOHIDEventSystemClientRef, void *, void *, void *) =
                 (void (*)(IOHIDEventSystemClientRef, void *, void *, void *))
                 dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientUnregisterEventCallback");
             if (fnUnregister) fnUnregister(_hidClient, &TSVolumeKeyHIDCallback, NULL, NULL);
-            // 2) 清空事件匹配
+            // 2) 清空事件匹配 (安全)
             void (*fnSetMatching)(IOHIDEventSystemClientRef, CFDictionaryRef) =
                 (void (*)(IOHIDEventSystemClientRef, CFDictionaryRef))
                 dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientSetMatching");
             if (fnSetMatching) fnSetMatching(_hidClient, NULL);
-            // 3) 解除 dispatch queue 绑定 (创建时绑定过, 必须先解绑)
-            void (*fnSetQueue)(IOHIDEventSystemClientRef, dispatch_queue_t) =
-                (void (*)(IOHIDEventSystemClientRef, dispatch_queue_t))
-                dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientSetDispatchQueue");
-            if (fnSetQueue) fnSetQueue(_hidClient, NULL);
+            // ⚠️ 不调用 IOHIDEventSystemClientSetDispatchQueue(client, NULL) 解绑:
+            //    该调用在 TrollStore 下触发 IOKit 内部 trap (SIGTRAP)。绑定保持, 下次 start 复用。
         } @catch (NSException *e) {
             NSLog(@"[TSVolumeKeyMonitor] IOHID 清理异常: %@ %@", e.name, e.reason);
         }
@@ -606,6 +604,8 @@ enum {
     // ⚠️ client 只创建一次、进程生命周期内复用:
     // 销毁路径 (IOHIDEventSystemClientInvalidate / CFRelease) 在 iOS 15.8 /
     // TrollStore 下触发 IOKit 内部断言 abort (见 stop 注释), 因此绝不销毁。
+    // dispatch queue 仅在创建时绑定一次: 重复绑定 / 传 NULL 解绑均可能触发
+    // IOKit 内部 trap (SIGTRAP, 崩溃栈已证实)。
     if (!_hidClient) {
         IOHIDEventSystemClientRef client = fnCreate(kCFAllocatorDefault);
         if (!client) {
@@ -613,11 +613,11 @@ enum {
             return;
         }
         _hidClient = client;
+        if (!_hidQueue) {
+            _hidQueue = dispatch_queue_create("com.wuyou.volumekey.hid", DISPATCH_QUEUE_SERIAL);
+        }
+        fnSetDispatchQueue(_hidClient, _hidQueue);
     }
-    if (!_hidQueue) {
-        _hidQueue = dispatch_queue_create("com.wuyou.volumekey.hid", DISPATCH_QUEUE_SERIAL);
-    }
-    fnSetDispatchQueue(_hidClient, _hidQueue);
     fnRegister(_hidClient, &TSVolumeKeyHIDCallback, NULL, NULL);
     NSLog(@"[TSVolumeKeyMonitor] IOHID 物理事件监听已启动");
 }
