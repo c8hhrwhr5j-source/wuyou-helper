@@ -359,6 +359,8 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     }
 
     if (icon) {
+        // 强制原图渲染，避免 UIButtonTypeSystem 把图标模板化成蓝色
+        icon = [icon imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
         [b setImage:icon forState:UIControlStateNormal];
         b.tintColor = nil;
         b.imageView.contentMode = UIViewContentModeScaleAspectFit;
