@@ -1090,6 +1090,39 @@ function main()
     end
 end
 
+-- 区域找字 OCR：识别 x1,y1-x2,y2 区域内的文字
+--   若识别结果中包含 txt 中的至少 n 个字，返回 true
+--   n 默认 1；txt 为空返回 false
+function ocr(x1,y1,x2,y2,txt,n)
+	-- x1,y1 = 左上角坐标
+	-- x2,y2 = 右下角坐标
+	-- txt = 要识别的文字
+	-- n = 识别出 txt 中至少 n 个字就返回 true（默认 1）
+	if type(txt) ~= "string" or txt == "" then return false end
+	n = n or 1
+	-- 坐标规范化（对角点，允许任意顺序）
+	if x1 > x2 then x1, x2 = x2, x1 end
+	if y1 > y2 then y1, y2 = y2, y1 end
+	local result = screen.paddleOcr(x1, y1, x2, y2)
+	if type(result) ~= "table" or #result == 0 then return false end
+	-- 拼接区域内识别出的所有文本
+	local all = {}
+	for _, v in ipairs(result) do
+		if type(v.string) == "string" then
+			table.insert(all, v.string)
+		end
+	end
+	local combined = table.concat(all, "")
+	-- 统计 txt 中有多少个字出现在识别结果里（按 UTF-8 字符遍历）
+	local hit = 0
+	for ch in txt:gmatch("[\1-\127\194-\244][\128-\191]*") do
+		if ch ~= " " and combined:find(ch, 1, true) then
+			hit = hit + 1
+		end
+	end
+	return hit >= n
+end
+
 --点击：x,y 为左上角，x1,y1 为右下角（可选），在该矩形范围内随机点击
 local _clickSeeded = false
 function click(x, y, x1, y1)
