@@ -387,8 +387,9 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
         self.lastSrcPx = [NSString stringWithFormat:@"center src 8bit R=%u G=%u B=%u",
                           (unsigned)dbgSrc[0], (unsigned)dbgSrc[1], (unsigned)dbgSrc[2]];
     }
+    // 输出内存序为 R,G,B,A(out[0]=R,out[1]=G,out[2]=B)，此前 R/B 标签写反
     self.lastOutPx = [NSString stringWithFormat:@"center out R=%u G=%u B=%u A=%u",
-                      out[(cy*w+cx)*4+2], out[(cy*w+cx)*4+1], out[(cy*w+cx)*4+0], out[(cy*w+cx)*4+3]];
+                      out[(cy*w+cx)*4+0], out[(cy*w+cx)*4+1], out[(cy*w+cx)*4+2], out[(cy*w+cx)*4+3]];
     unlockFn(readSurface, 0, NULL);
     if (dstSurface) { CFRelease(dstSurface); }
     if (accel) { CFRelease(accel); }
