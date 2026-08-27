@@ -119,6 +119,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     uint8_t  *_cachedPixels;
     int       _cachedWidth;
     int       _cachedHeight;
+
     // UIScreen createScreenIOSurface 缓存:
     // surface 绑定主屏渲染管线, 内容由 WindowServer 持续更新, 可长期复用。
     // 后台线程直接读缓存 surface, 避免高频 findColor 每次阻塞/占用主线程。
@@ -172,6 +173,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
 /// 用 IOSurfaceAccelerator 把 source surface 转储到自建 BGRA surface 并读出 RGBA 像素。
 /// 传输在 WindowServer 侧(GPU)执行，不依赖 App 自身渲染状态，后台/其他 App 前台仍可用。
 - (BOOL)_dumpIOSurface:(IOSurfaceRef)sourceSurface
+      skipColorConvert:(BOOL)skipColorConvert
             pixelsOut:(uint8_t **)pixelsOut
                width:(int *)widthOut
               height:(int *)heightOut {
@@ -304,8 +306,10 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
 
     uint32_t fmt = pixelFormatFn ? pixelFormatFn(readSurface) : 0x42475241; // 默认假设 BGRA
     self.lastReadFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)fmt];
-    // P3 广色域屏需要把像素转换到 sRGB（sRGB 屏为 NO，行为与原版一致）
-    BOOL p3ToSrgb = _screenUsesP3();
+    // P3 广色域屏需要把像素转换到 sRGB（sRGB 屏为 NO，行为与原版一致）。
+    // skipColorConvert=YES: CARenderServer 路径的像素已是 sRGB(系统按 surface 色彩空间
+    // 渲染完成), 跳过转换避免二次降饱和发灰。
+    BOOL p3ToSrgb = _screenUsesP3() && !skipColorConvert;
     self.lastP3Applied = p3ToSrgb;
     if (p3ToSrgb) {
         _ensureColorLUTs();
@@ -471,7 +475,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     // IOMFB 帧缓冲在后台/其他 App 前台时可能返回空 surface(IOSurfaceLock 读到全 0),
     // 加全 0 检测, 避免静默返回黑屏让 getColor 误判成 0x000000。
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (![self _dumpIOSurface:surface pixelsOut:&px width:&w height:&h] || !px) {
+    if (![self _dumpIOSurface:surface skipColorConvert:NO pixelsOut:&px width:&w height:&h] || !px) {
         TSSetLastError(@"路径3 IOMFB: 转储帧缓冲 surface 失败");
         return NO;
     }
@@ -624,7 +628,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
 
     // 读取像素(后台线程, 走 _UICreateCGImageFromIOSurface / 加速器转储 / 手动 lock 三级读取)
     uint8_t *px = NULL; int w = 0, h = 0;
-    BOOL ok = [self _dumpIOSurface:surf pixelsOut:&px width:&w height:&h] && px;
+    BOOL ok = [self _dumpIOSurface:surf skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px;
     CFRelease(surf);
     if (!ok) {
         TSSetLastError(@"路径0 UIScreenSurface: surface 读取失败");
@@ -722,7 +726,7 @@ static const char *_gsSurfaceKeys[] = {
         if (!found) { continue; }
 
         uint8_t *px = NULL; int w = 0, h = 0;
-        if ([self _dumpIOSurface:found pixelsOut:&px width:&w height:&h] && px) {
+        if ([self _dumpIOSurface:found skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px) {
             if (![self _isAllZeroPixels:px width:w height:h]) {
                 NSLog(@"[TSScreenCapture] 全局显示截屏成功 %dx%d (%@)", w, h, foundVia);
                 CFRelease(found);
@@ -857,8 +861,10 @@ static const char *_gsSurfaceKeys[] = {
         // 等 WindowServer 完成异步渲染再读
         usleep(100 * 1000);
 
+        // surface 声明为 sRGB, WindowServer 渲染已完成色彩管理,
+        // 像素即 sRGB 编码 —— 跳过 P3→sRGB 二次转换(iOS16+P3 屏发灰修复)
         uint8_t *px = NULL; int rw = 0, rh = 0;
-        if ([self _dumpIOSurface:src pixelsOut:&px width:&rw height:&rh] && px) {
+        if ([self _dumpIOSurface:src skipColorConvert:YES pixelsOut:&px width:&rw height:&rh] && px) {
             if (![self _isAllZeroPixels:px width:rw height:rh]) {
                 NSLog(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
                       rw, rh, displayNames[attempt]);
@@ -1082,7 +1088,7 @@ static const char *_gsSurfaceKeys[] = {
     IOSurfaceRef src = [self _sourceSurfaceFromWindow:remoteWindow];
     if (src) {
         uint8_t *px = NULL; int w = 0, h = 0;
-        if ([self _dumpIOSurface:src pixelsOut:&px width:&w height:&h] && px) {
+        if ([self _dumpIOSurface:src skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px) {
             if (![self _isAllZeroPixels:px width:w height:h]) {
                 NSLog(@"[TSScreenCapture] 系统窗口截屏成功(路径A/IOSurface) %dx%d contextId=%u", w, h, contextId);
                 self.lastError = nil;
@@ -1241,7 +1247,7 @@ static const char *_gsSurfaceKeys[] = {
     IOSurfaceRef cached = [self _getCachedScreenSurface];
     if (cached) {
         uint8_t *px = NULL; int w = 0, h = 0;
-        BOOL ok = [self _dumpIOSurface:cached pixelsOut:&px width:&w height:&h] && px
+        BOOL ok = [self _dumpIOSurface:cached skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px
                   && ![self _isAllZeroPixels:px width:w height:h];
         CFRelease(cached);
         if (ok) {
@@ -1286,7 +1292,7 @@ static const char *_gsSurfaceKeys[] = {
             int sw = (int)(getW ? getW(s) : 0);
             int sh = (int)(getH ? getH(s) : 0);
             uint8_t *px = NULL; int dw = 0, dh = 0;
-            BOOL dumpOk = (sw > 0 && sh > 0) && [self _dumpIOSurface:s pixelsOut:&px width:&dw height:&dh];
+            BOOL dumpOk = (sw > 0 && sh > 0) && [self _dumpIOSurface:s skipColorConvert:NO pixelsOut:&px width:&dw height:&dh];
             BOOL allZero = dumpOk && px && [self _isAllZeroPixels:px width:dw height:dh];
             NSMutableDictionary *res = [@{
                 @"ok": @YES,
@@ -1316,7 +1322,7 @@ static const char *_gsSurfaceKeys[] = {
             size_t (*gW)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
             size_t (*gH)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
             uint8_t *hpx = NULL; int hw = 0, hh = 0;
-            BOOL hdump = (gW && gH && gW(hs) > 0) && [self _dumpIOSurface:hs pixelsOut:&hpx width:&hw height:&hh];
+            BOOL hdump = (gW && gH && gW(hs) > 0) && [self _dumpIOSurface:hs skipColorConvert:NO pixelsOut:&hpx width:&hw height:&hh];
             BOOL hzero = hdump && hpx && [self _isAllZeroPixels:hpx width:hw height:hh];
             diag[@"hiddenWindowsSurfaceResult"] = @{
                 @"ok": @YES,
