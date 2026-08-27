@@ -19,14 +19,17 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     ENABLE_BITCODE: NO
     # CLANG_ENABLE_MODULES=NO 时需显式链接所有使用到的框架
-    # -Wl,-no_fixup_chains: 禁用 chained fixups（与 ENABLE_CHAINED_FIXUPS=NO 配套），
-    # 兼容 Procursus ldid / TrollStore 注入 entitlements。
     # -Wl,-undefined,dynamic_lookup: 进程内 HUD 宿主的私有符号
     # (SBSAccessibilityWindowHostingController 等) 运行时由 dyld 动态解析
     # (不产生私有框架链接依赖)。
+    # 注意: 必须保持 chained fixups 启用（不要加 -Wl,-no_fixup_chains /
+    #       ENABLE_CHAINED_FIXUPS=NO）！iOS 16+ 的 dyld 对 arm64e 架构强制要求
+    #       LC_DYLD_CHAINED_FIXUPS，禁用它会导致 iOS 16 设备启动即闪退
+    #       (dyld: missing chained fixups)。CI 已用 Procursus ldid
+    #       (v2.1.5-procursus7) 签名，支持 chained fixups 重签。
     # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
     #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework Security -framework WebKit -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework Security -framework WebKit -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
 targets:
   TrollAutoTouch:
     type: application

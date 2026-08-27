@@ -114,11 +114,12 @@ jobs:
             -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null \
             | grep -E "HEADER_SEARCH_PATHS|GCC_C_LANGUAGE_STANDARD" || echo "  (未找到设置!)"
           mkdir -p build
-          # ENABLE_CHAINED_FIXUPS=NO + -Wl,-no_fixup_chains(已写入 project.yml):
-          # 禁用 chained fixups，兼容 Procursus ldid / TrollStore。
           # 警告: 不能在这里传 OTHER_LDFLAGS，命令行会整体覆盖 project.yml 中的
           #       框架链接参数（-framework UIKit ...），导致链接失败！
           # ARCHS="arm64 arm64e" + ONLY_ACTIVE_ARCH=NO: app 编译为 universal。
+          # 必须保持 chained fixups 启用（不传 ENABLE_CHAINED_FIXUPS=NO，project.yml
+          # 也不含 -Wl,-no_fixup_chains）：iOS 16+ 的 dyld 对 arm64e 强制要求
+          # LC_DYLD_CHAINED_FIXUPS，禁用会导致 iOS 16 设备启动闪退。
           # 日志写入文件，失败时打印完整日志并立即退出（不再被管道吞掉退出码）。
           if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
@@ -131,7 +132,6 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             STRIP_INSTALLED_PRODUCT=NO \
             DEAD_CODE_STRIPPING=NO \
-            ENABLE_CHAINED_FIXUPS=NO \
             -derivedDataPath build/DerivedData \
             build > /tmp/xcodebuild.log 2>&1; then
             echo "[x] xcodebuild 编译失败，完整日志:"
@@ -249,14 +249,15 @@ jobs:
           echo "[OK] entitlements 已从 git 对象恢复并通过 plutil 校验"
 
           # 2) 诊断: 二进制是否带 chained fixups load command
+          #    (必须出现 LC_DYLD_CHAINED_FIXUPS: iOS 16+ arm64e 依赖它, 缺失会启动闪退)
           echo "[*] 二进制签名结构:"
           otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
 
           # 3) 签名: 优先 Procursus ldid (v2.1.5-procursus7) --platform-apply。
           #    codesign 不支持 --platform-apply (实测报 unrecognized option), 无法用 codesign
           #    打 CS_PLATFORM_BINARY; 而 Procursus ldid 支持该选项且能正确重签 arm64e slice
-          #    (xerub 老版 ldid 才破坏 arm64e → EBADEXEC)。chained fixups 已在 project.yml
-          #    禁用 (-Wl,-no_fixup_chains), ldid 可正常解析。
+          #    (xerub 老版 ldid 才破坏 arm64e → EBADEXEC)。
+          #    产物带 chained fixups (iOS 16+ arm64e 强制), Procursus ldid 可正常重签。
           #    --platform-apply: 给 CodeDirectory 打上 CS_PLATFORM_BINARY。
           if ldid -S/tmp/ent.xml --platform-apply "$BIN" 2>/tmp/ldid_sign.log; then
             echo "[OK] ldid 签名成功 (entitlements + platform-apply)"
