@@ -190,6 +190,8 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     size_t srcW = widthFn(sourceSurface);
     size_t srcH = heightFn(sourceSurface);
     uint32_t srcFmt = pixelFormatFn ? pixelFormatFn(sourceSurface) : 0;
+    self.lastSourceFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)srcFmt];
+    self.lastAccelOK = NO;
     NSLog(@"[TSScreenCapture] _dumpIOSurface source=%zux%zu fmt=0x%08X", srcW, srcH, (unsigned int)srcFmt);
     if (srcW == 0 || srcH == 0) { return NO; }
 
@@ -250,6 +252,8 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
             kern_return_t tr = accelTransferFn(accel, sourceSurface, dstSurface, NULL, NULL, NULL, NULL);
             if (tr == KERN_SUCCESS) {
                 readSurface = dstSurface;
+                self.lastAccelOK = YES;
+                NSLog(@"[TSScreenCapture] 加速器转储成功 src=0x%08X -> dst=BGRA", (unsigned int)srcFmt);
             } else {
                 NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d, 回退直接读", (int)tr);
             }
@@ -293,8 +297,10 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     }
 
     uint32_t fmt = pixelFormatFn ? pixelFormatFn(readSurface) : 0x42475241; // 默认假设 BGRA
+    self.lastReadFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)fmt];
     // P3 广色域屏需要把像素转换到 sRGB（sRGB 屏为 NO，行为与原版一致）
     BOOL p3ToSrgb = _screenUsesP3();
+    self.lastP3Applied = p3ToSrgb;
     if (p3ToSrgb) {
         _ensureColorLUTs();
     }
@@ -1290,6 +1296,14 @@ static const char *_gsSurfaceKeys[] = {
             }
         }
         diag[@"lastError"] = self.lastError ?: @"(无)";
+        // iOS15/16 分离 + 格式诊断
+        diag[@"systemVersion"] = [UIDevice currentDevice].systemVersion;
+        diag[@"lastPathUsed"] = self.lastPathUsed ?: @"(无)";
+        diag[@"lastSourceFormat"] = self.lastSourceFormat ?: @"(无)";
+        diag[@"lastReadFormat"] = self.lastReadFormat ?: @"(无)";
+        diag[@"lastAccelOK"] = @(self.lastAccelOK);
+        diag[@"lastP3Applied"] = @(self.lastP3Applied);
+        diag[@"screenP3"] = @([self _screenUsesP3]);
     } @catch (NSException *e) {
         diag[@"exception"] = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
     }
@@ -1299,50 +1313,76 @@ static const char *_gsSurfaceKeys[] = {
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
-    // 后台状态: 切换到后台专用路径(优先 CARenderServer 等验证过的后台方案)。
-    // 前台路径完全不变, 保持现有截图功能与接口一致。
+    self.lastPathUsed = @"(未截屏)";
+    self.lastSourceFormat = nil;
+    self.lastReadFormat = nil;
+    self.lastAccelOK = NO;
+    self.lastP3Applied = NO;
+
+    // 后台状态: 切换到后台专用路径。
     UIApplicationState bgState = [UIApplication sharedApplication].applicationState;
     if (bgState == UIApplicationStateBackground) {
-        return [self _captureBackgroundToRGBA:pixelsOut width:widthOut height:heightOut];
+        BOOL ok = [self _captureBackgroundToRGBA:pixelsOut width:widthOut height:heightOut];
+        if (ok) { self.lastPathUsed = @"Background(后台)"; }
+        return ok;
     }
-    // 0. CARenderServerRenderDisplay: 主屏渲染到自建 BGRA IOSurface
-    //    iOS 16+ 上 createScreenIOSurface 返回的系统 surface 格式/位深变化,
-    //    加速器转储到 BGRA8 后通道/位深解析错误, 会截出"热成像"伪彩色。
-    //    该路径格式由我们控制, 稳定可靠, 优先使用(TrollVNC 同款方案)。
-    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
-        return YES;
+
+    // iOS 15 / iOS 16 截屏路径分离:
+    //  - iOS 16+: [UIScreen createScreenIOSurface] 返回的系统 surface 格式/位深已变化,
+    //    加速器转储到 BGRA8 后会呈"热成像"伪彩色, 因此优先 CARenderServer 渲染到
+    //    自建 BGRA surface(格式可控, TrollVNC 同款方案)。
+    //  - iOS 15-: 保持原版链路顺序(UIScreen surface 优先), 与原版行为一致,
+    //    避免修好 iOS 16 却破坏 iOS 15。
+    BOOL isIOS16OrLater = ([[UIDevice currentDevice].systemVersion doubleValue] >= 16.0);
+    NSArray<NSString *> *order = isIOS16OrLater
+        ? @[@"CARenderServer", @"UIScreenSurface", @"GlobalDisplay", @"SystemWindow", @"IOMFB", @"AppWindow"]
+        : @[@"UIScreenSurface", @"GlobalDisplay", @"SystemWindow", @"CARenderServer", @"IOMFB", @"AppWindow"];
+
+    NSMutableArray<NSString *> *errs = [NSMutableArray array];
+    for (NSString *path in order) {
+        BOOL ok = [self _tryCapturePath:path pixelsOut:pixelsOut width:widthOut height:heightOut];
+        if (ok) {
+            self.lastPathUsed = path;
+            NSLog(@"[TSScreenCapture] 截屏成功: 路径=%@ (iOS%@)", path, [UIDevice currentDevice].systemVersion);
+            return YES;
+        }
+        [errs addObject:[NSString stringWithFormat:@"%@: %@", path, self.lastError ?: @"失败"]];
     }
-    NSString *err0 = [self.lastError copy];
-    // 1. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 后台/跨 App 可用)
-    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
-        return YES;
-    }
-    NSString *err1 = [self.lastError copy];
-    // 2. 全局显示截取(IORegistry DisplaySurface + IOSurfaceLookup, 拿现成 surface, 跨 App)
-    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
-        return YES;
-    }
-    NSString *err2 = [self.lastError copy];
-    // 3. 系统窗口截屏(windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
-    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
-        return YES;
-    }
-    NSString *err3 = [self.lastError copy];
-    // 4. IOMFB 帧缓冲(前台场景回退)
-    if ([self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut]) {
-        return YES;
-    }
-    NSString *err4 = [self.lastError copy];
-    // 5. 应用内截屏(兜底)
-    UIApplicationState appState = [UIApplication sharedApplication].applicationState;
-    NSLog(@"[TSScreenCapture] 跨应用截屏失败(appState=%ld: 0前台/1后台/2挂起)，回退应用内截屏",
-          (long)appState);
+
+    NSLog(@"[TSScreenCapture] 全部截屏路径失败, 回退应用内截屏");
     BOOL ok = [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
-    if (ok) { return YES; }
-    // 汇总全部路径失败原因, 供 Lua 层展示(NSLog 普通用户看不到)
-    self.lastError = [NSString stringWithFormat:@"CARenderServer: %@; UIScreenSurface: %@; 全局显示: %@; 系统窗口: %@; IOMFB: %@; 应用内: %@",
-                      err0 ?: @"未尝试", err1 ?: @"未尝试", err2 ?: @"未尝试", err3 ?: @"未尝试",
-                      err4 ?: @"未尝试", self.lastError ?: @"未尝试"];
+    if (ok) {
+        self.lastPathUsed = @"AppWindow(兜底)";
+        return YES;
+    }
+    [errs addObject:[NSString stringWithFormat:@"AppWindow: %@", self.lastError ?: @"失败"]];
+    self.lastError = [errs componentsJoinedByString:@"; "];
+    return NO;
+}
+
+/// 按名称尝试对应截屏路径(供 captureScreenToRGBA 的 iOS15/16 分离顺序使用)。
+- (BOOL)_tryCapturePath:(NSString *)path
+              pixelsOut:(uint8_t **)pixelsOut
+                  width:(int *)widthOut
+                 height:(int *)heightOut {
+    if ([path isEqualToString:@"CARenderServer"]) {
+        return [self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
+    if ([path isEqualToString:@"UIScreenSurface"]) {
+        return [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
+    if ([path isEqualToString:@"GlobalDisplay"]) {
+        return [self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
+    if ([path isEqualToString:@"SystemWindow"]) {
+        return [self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
+    if ([path isEqualToString:@"IOMFB"]) {
+        return [self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
+    if ([path isEqualToString:@"AppWindow"]) {
+        return [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
+    }
     return NO;
 }
 

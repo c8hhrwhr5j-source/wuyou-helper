@@ -35,6 +35,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// 最近一次截屏失败原因(逐路径记录, 便于 Lua 层展示); 截屏成功时为 nil。
 @property (nonatomic, strong, nullable) NSString *lastError;
 
+/// 最近一次截屏实际成功的路径名(诊断用, /api/screencap-diag 暴露)
+@property (nonatomic, strong, nullable) NSString *lastPathUsed;
+/// 最近一次 _dumpIOSurface 的 source surface 像素格式(hex 字符串)
+@property (nonatomic, strong, nullable) NSString *lastSourceFormat;
+/// 最近一次读取时使用的像素格式(hex 字符串, 通常为 BGRA=0x42475241)
+@property (nonatomic, strong, nullable) NSString *lastReadFormat;
+/// 最近一次加速器(IOSurfaceAcceleratorTransferSurface)转储是否成功
+@property (nonatomic, assign) BOOL lastAccelOK;
+/// 最近一次是否执行了 P3->sRGB 转换
+@property (nonatomic, assign) BOOL lastP3Applied;
+
 /// 截取整屏，返回 RGBA 像素缓冲(用于找色)。
 /// @param pixelsOut  输出像素数组(调用者用完需 free)。每像素 4 字节 RGBA。
 /// @param widthOut   输出宽度(像素)
