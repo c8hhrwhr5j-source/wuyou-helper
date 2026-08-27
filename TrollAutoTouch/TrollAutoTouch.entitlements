@@ -1029,11 +1029,7 @@
 	<true/>
 	<key>com.apple.private.screen-capture</key>
 	<true/>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
 	<key>com.apple.security.exception.skip-library-validation</key>
-	<true/>
-	<key>dynamic-codesigning</key>
 	<true/>
 	<key>com.apple.frontboard.debugapps</key>
 	<true/>

@@ -1051,6 +1051,7 @@ function main()
         if rgbbj("主页公告") then
             click(946,162,971,187) -- 关闭公告
             sleep(500)
+			log("1")
 		end
         if rgbbj("断线重连") then
             click(826,516,952,552) -- 进入游戏
@@ -1061,32 +1062,22 @@ function main()
             sleep(500)
         end
 		if rgbbj("附近下") then
-			log("开始文字识别")
-			local w, h = getScreenSize()
-			print("屏幕尺寸:", w, h)
-            local result = screen.paddleOcr(126,2,281,35)
-			print("区域OCR结果数:", type(result) == "table" and #result or "nil")
-            if type(result) == "table" then
-                for i, v in ipairs(result) do
-                    print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
-                end
-            end
+			if ocr(126,2,281,35,"我们与你",1) then
+				log("找到咖啡名字")
+			end
         end
-
-
-		log("=== 全屏 paddleOcr ===")
-		local r1 = screen.paddleOcr()
-		print("全屏结果数:", type(r1) == "table" and #r1 or "nil")
-		if type(r1) == "table" then
-			for i, v in ipairs(r1) do
-				print(string.format("[%d] %q 框(%.0f,%.0f,%.0f,%.0f) 置信度%.3f", i, v.string or "", v.x or 0, v.y or 0, v.w or 0, v.h or 0, v.confidence or 0))
+		if rgbbj("我是队长") then
+			log("开始识别等级")
+			local lv = ocrDigits(407, 180, 478, 226,"0123456789") 
+			log(lv)
+		end
+		if rgbbj("地图") then
+			local found, fx, fy = ocrFind(936,167,1171,696,"仓库")
+			if found then
+				log("找到仓库")
+				click(fx-1,fy-1,fx+1,fy+1)
 			end
 		end
-
-		log("=== 全屏 visionOcr ===")
-		local r3 = screen.visionOcr()
-		print("vision全屏结果数:", type(r3) == "table" and #r3 or "nil")
-
     end
 end
 
@@ -1094,10 +1085,6 @@ end
 --   若识别结果中包含 txt 中的至少 n 个字，返回 true
 --   n 默认 1；txt 为空返回 false
 function ocr(x1,y1,x2,y2,txt,n)
-	-- x1,y1 = 左上角坐标
-	-- x2,y2 = 右下角坐标
-	-- txt = 要识别的文字
-	-- n = 识别出 txt 中至少 n 个字就返回 true（默认 1）
 	if type(txt) ~= "string" or txt == "" then return false end
 	n = n or 1
 	-- 坐标规范化（对角点，允许任意顺序）
@@ -1121,6 +1108,86 @@ function ocr(x1,y1,x2,y2,txt,n)
 		end
 	end
 	return hit >= n
+end
+
+-- 数字白名单 OCR：识别 x1,y1-x2,y2 区域，只返回白名单字符（默认 0-9）
+--   误识别字母先按映射表转数字（O->0, S->5, l->1...），无法映射的字符直接丢弃
+--   用法:
+--     local num = ocrDigits(126, 2, 281, 35)               -- 只留 0-9
+--     local s   = ocrDigits(126, 2, 281, 35, "0123456789,") -- 自定义白名单
+--   返回: 拼接后的字符串（可能为空串）；OCR 无结果返回 nil
+function ocrDigits(x1, y1, x2, y2, whitelist)
+	whitelist = whitelist or "0123456789"
+	-- 常见数字误识别映射表（字母 -> 数字），按实际字体可自行调整
+	local map = {
+		["O"]="0", ["o"]="0", ["D"]="0", ["Q"]="0", ["U"]="0",
+		["l"]="1", ["I"]="1", ["i"]="1", ["|"]="1",
+		["Z"]="2", ["z"]="2",
+		["E"]="3",
+		["A"]="4", ["H"]="4",
+		["S"]="5", ["s"]="5",
+		["G"]="6", ["b"]="6",
+		["T"]="7",
+		["B"]="8",
+		["g"]="9", ["q"]="9",
+	}
+	-- 白名单索引
+	local wl = {}
+	for ch in whitelist:gmatch("[\1-\127\194-\244][\128-\191]*") do
+		wl[ch] = true
+	end
+	-- 坐标规范化（对角点，允许任意顺序）
+	if x1 > x2 then x1, x2 = x2, x1 end
+	if y1 > y2 then y1, y2 = y2, y1 end
+	local result = screen.paddleOcr(x1, y1, x2, y2)
+	if type(result) ~= "table" or #result == 0 then return nil end
+	-- 按 (y,x) 排序识别框，保证拼接顺序从左到右、从上到下
+	table.sort(result, function(a, b)
+		local ay = (a.y or 0) + (a.h or 0) / 2
+		local by = (b.y or 0) + (b.h or 0) / 2
+		if math.abs(ay - by) > 10 then return ay < by end
+		return (a.x or 0) < (b.x or 0)
+	end)
+	local out = {}
+	for _, v in ipairs(result) do
+		if type(v.string) == "string" then
+			for ch in v.string:gmatch("[\1-\127\194-\244][\128-\191]*") do
+				local c = map[ch] or ch  -- 先做误识别映射，再查白名单
+				if wl[c] then
+					table.insert(out, c)
+				end
+			end
+		end
+	end
+	return table.concat(out, "")
+end
+
+-- 连续文字 OCR：识别 x1,y1-x2,y2 区域，判断区域内是否存在完整连续字符串 txt
+--   OCR 本身按词组返回（每个框一段文字），直接遍历每个框匹配即可
+--   用法:
+--     local found, x, y = ocrFind(100, 100, 400, 700, "国王")
+--     if found then click(x, y) end
+--   返回: 找到返回 true, 文字中心坐标 x, y；未找到返回 false
+function ocrFind(x1, y1, x2, y2, txt)
+	if type(txt) ~= "string" or txt == "" then return false end
+	-- 坐标规范化
+	if x1 > x2 then x1, x2 = x2, x1 end
+	if y1 > y2 then y1, y2 = y2, y1 end
+	local result = screen.paddleOcr(x1, y1, x2, y2)
+	if type(result) ~= "table" or #result == 0 then return false end
+	-- 直接遍历每个词组框（OCR 本来就是一组一组返回的）
+	for _, v in ipairs(result) do
+		if type(v.string) == "string" then
+			if v.string:gsub("%s+", ""):find(txt, 1, true) then
+				if v.x and v.y and v.w and v.h then
+					return true, v.x + v.w / 2, v.y + v.h / 2
+				end
+				-- 坐标字段缺失时兜底返回区域中心
+				return true, (x1 + x2) / 2, (y1 + y2) / 2
+			end
+		end
+	end
+	return false
 end
 
 --点击：x,y 为左上角，x1,y1 为右下角（可选），在该矩形范围内随机点击
