@@ -1303,7 +1303,7 @@ static const char *_gsSurfaceKeys[] = {
         diag[@"lastReadFormat"] = self.lastReadFormat ?: @"(无)";
         diag[@"lastAccelOK"] = @(self.lastAccelOK);
         diag[@"lastP3Applied"] = @(self.lastP3Applied);
-        diag[@"screenP3"] = @([self _screenUsesP3]);
+        diag[@"screenP3"] = @(_screenUsesP3());
     } @catch (NSException *e) {
         diag[@"exception"] = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
     }
