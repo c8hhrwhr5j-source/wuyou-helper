@@ -22,6 +22,7 @@
     AVAudioPlayerNode *_player;
     NSInteger _refCount;
     NSTimer *_watchdogTimer;
+    dispatch_source_t _recoverySource;   // 中断期间快速恢复 timer (GCD, 后台可靠触发)
     BOOL _notificationsInstalled;
 }
 
@@ -44,6 +45,10 @@
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if (_recoverySource) {
+        dispatch_source_cancel(_recoverySource);
+        _recoverySource = nil;
+    }
     [_watchdogTimer invalidate];
     _watchdogTimer = nil;
 }
@@ -59,16 +64,32 @@
                name:AVAudioSessionMediaServicesWereResetNotification object:nil];
     [nc addObserver:self selector:@selector(onDidBecomeActive:)
                name:UIApplicationDidBecomeActiveNotification object:nil];
+    // iOS 12+: 其他 app(如游戏)的重要音频开始/结束时都会收到, 借此确认保活引擎存活
+    [nc addObserver:self selector:@selector(onSecondaryAudioHint:)
+               name:AVAudioSessionSilenceSecondaryAudioHintNotification object:nil];
     _notificationsInstalled = YES;
 }
 
-// 其他 app 抢占音频(如切到游戏)会触发中断; 结束后必须恢复, 否则保活失效
+// 其他 app 抢占音频(如切到游戏)会触发中断。
+// 关键: 对方持续播放期间系统不会发 Ended, 只发 Began。iOS 16 上不尽快恢复
+// 音频输出, 后台 app 会在几秒内被挂起并遭 Jetsam 回收。所以 Began 即启动
+// GCD 快速恢复(不等 Ended), Ended 时立即重建。
 - (void)onAudioInterruption:(NSNotification *)note {
     NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
-    if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
-        NSLog(@"[TSAudioKeepAlive] 音频中断结束, 恢复保活");
+    if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
+        if (_refCount <= 0) return;   // 无持有者, 无需恢复
+        NSLog(@"[TSAudioKeepAlive] 音频中断开始(被抢占), 启动快速恢复");
+        [self startQuickRecovery];
+    } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
+        NSLog(@"[TSAudioKeepAlive] 音频中断结束, 停止快速恢复并重建");
+        [self stopQuickRecovery];
         [self rebuildIfNeeded];
     }
+}
+
+// 游戏等重要音频开始/结束: 借机检查保活引擎是否仍在运行
+- (void)onSecondaryAudioHint:(NSNotification *)note {
+    [self rebuildIfNeeded];
 }
 
 // 音频服务崩溃后重建, 旧 engine/player 全部失效
@@ -177,6 +198,55 @@
             NSLog(@"[TSAudioKeepAlive] 保活引擎未在运行, 自动重建");
             [self teardownEngine];
             [self buildAndStartEngine];
+        }
+    });
+}
+
+#pragma mark - 快速恢复(GCD, 后台可靠)
+
+// 被抢占后每 0.5s 尝试重建保活引擎, 直到成功或中断结束。
+// 用 dispatch_source 而非 NSTimer: 后台 run loop 不跑时 NSTimer 不触发,
+// 15s 看门狗救不了"几秒内被挂起"的 iOS 16 场景, 必须用 GCD timer。
+- (void)startQuickRecovery {
+    @synchronized (self) {
+        if (_recoverySource) return;
+        dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        _recoverySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+        dispatch_source_set_timer(_recoverySource,
+                                  dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC),
+                                  0.5 * NSEC_PER_SEC,
+                                  0.1 * NSEC_PER_SEC);
+        __weak typeof(self) weakSelf = self;
+        dispatch_source_set_event_handler(_recoverySource, ^{
+            [weakSelf quickRecoverTick];
+        });
+        dispatch_resume(_recoverySource);
+    }
+}
+
+- (void)stopQuickRecovery {
+    @synchronized (self) {
+        if (_recoverySource) {
+            dispatch_source_cancel(_recoverySource);
+            _recoverySource = nil;
+        }
+    }
+}
+
+// 快速恢复节拍
+- (void)quickRecoverTick {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @synchronized (self) {
+            if (self->_refCount <= 0) return;
+            BOOL ok = self->_engine && self->_engine.isRunning
+                   && self->_player && self->_player.isPlaying;
+            if (ok) {
+                NSLog(@"[TSAudioKeepAlive] 快速恢复: 保活引擎已恢复运行");
+                [self stopQuickRecovery];
+                return;
+            }
+            NSLog(@"[TSAudioKeepAlive] 快速恢复: 引擎未运行, 尝试重建");
+            [self rebuildIfNeeded];
         }
     });
 }

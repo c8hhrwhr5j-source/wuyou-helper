@@ -60,6 +60,9 @@
                name:UIApplicationWillEnterForegroundNotification object:nil];
     [nc addObserver:self selector:@selector(appWillTerminate:)
                name:UIApplicationWillTerminateNotification object:nil];
+    // 音频被其他 app(如游戏)抢占时恢复静默保活
+    [nc addObserver:self selector:@selector(onAudioInterruption:)
+               name:AVAudioSessionInterruptionNotification object:nil];
 }
 
 - (void)appDidEnterBackground:(NSNotification *)note {
@@ -180,6 +183,45 @@
         _silentPlayer = nil;
         NSLog(@"[Daemon] 静默音频已停止");
     }
+}
+
+// 音频被游戏等抢占时 AVAudioPlayer 会停止, 必须恢复否则保活失效。
+// 与 TSAudioKeepAlive 同理: 不能只等 Ended(Began 后对方持续播放期间
+// 系统不会发 Ended), Began 后要主动重试。iOS 16 上不恢复会被快速挂起。
+- (void)onAudioInterruption:(NSNotification *)note {
+    NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
+    if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
+        if (!_isInBackground || !_silentPlayer) return;
+        NSLog(@"[Daemon] 音频中断开始, 调度静默音频恢复");
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
+                       dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            [weakSelf tryResumeSilentAudio];
+        });
+    } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
+        [self tryResumeSilentAudio];
+    }
+}
+
+// 若仍在后台且静默播放器已停止, 重新激活 session 并播放; 激活失败则 1s 后重试
+- (void)tryResumeSilentAudio {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self->_isInBackground) return;
+        if (!self->_silentPlayer || self->_silentPlayer.isPlaying) return;
+        NSError *err = nil;
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        if (![session setActive:YES error:&err]) {
+            NSLog(@"[Daemon] 恢复静默音频: 激活 session 失败 %@, 1s 后重试", err);
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
+                           dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                [weakSelf tryResumeSilentAudio];
+            });
+            return;
+        }
+        [self->_silentPlayer play];
+        NSLog(@"[Daemon] 静默音频已恢复播放");
+    });
 }
 
 /// 动态生成 1 秒静默 WAV 文件缓存
