@@ -1305,23 +1305,26 @@ static const char *_gsSurfaceKeys[] = {
     if (bgState == UIApplicationStateBackground) {
         return [self _captureBackgroundToRGBA:pixelsOut width:widthOut height:heightOut];
     }
-    // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 后台/跨 App 可用)
-    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 0. CARenderServerRenderDisplay: 主屏渲染到自建 BGRA IOSurface
+    //    iOS 16+ 上 createScreenIOSurface 返回的系统 surface 格式/位深变化,
+    //    加速器转储到 BGRA8 后通道/位深解析错误, 会截出"热成像"伪彩色。
+    //    该路径格式由我们控制, 稳定可靠, 优先使用(TrollVNC 同款方案)。
+    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err0 = [self.lastError copy];
-    // 1. 全局显示截取(IORegistry DisplaySurface + IOSurfaceLookup, 拿现成 surface, 跨 App)
-    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 1. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 后台/跨 App 可用)
+    if ([self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err1 = [self.lastError copy];
-    // 2. 系统窗口截屏(windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
-    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 2. 全局显示截取(IORegistry DisplaySurface + IOSurfaceLookup, 拿现成 surface, 跨 App)
+    if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err2 = [self.lastError copy];
-    // 3. CARenderServerRenderDisplay: 主屏渲染到 IOSurface(TrollShot 方案, 保留回退)
-    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    // 3. 系统窗口截屏(windowWithContextId:+createScreenIOSurface, 不依赖 IOSurfaceCreate)
+    if ([self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
     NSString *err3 = [self.lastError copy];
@@ -1337,7 +1340,7 @@ static const char *_gsSurfaceKeys[] = {
     BOOL ok = [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
     if (ok) { return YES; }
     // 汇总全部路径失败原因, 供 Lua 层展示(NSLog 普通用户看不到)
-    self.lastError = [NSString stringWithFormat:@"UIScreenSurface: %@; 全局显示: %@; 系统窗口: %@; CARenderServer: %@; IOMFB: %@; 应用内: %@",
+    self.lastError = [NSString stringWithFormat:@"CARenderServer: %@; UIScreenSurface: %@; 全局显示: %@; 系统窗口: %@; IOMFB: %@; 应用内: %@",
                       err0 ?: @"未尝试", err1 ?: @"未尝试", err2 ?: @"未尝试", err3 ?: @"未尝试",
                       err4 ?: @"未尝试", self.lastError ?: @"未尝试"];
     return NO;
