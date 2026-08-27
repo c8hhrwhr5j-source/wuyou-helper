@@ -219,6 +219,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     uint32_t srcFmt = pixelFormatFn ? pixelFormatFn(sourceSurface) : 0;
     self.lastSourceFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)srcFmt];
     self.lastAccelOK = NO;
+    self.lastAccelError = 0;
     NSLog(@"[TSScreenCapture] _dumpIOSurface source=%zux%zu fmt=0x%08X", srcW, srcH, (unsigned int)srcFmt);
     if (srcW == 0 || srcH == 0) { return NO; }
 
@@ -252,6 +253,10 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
             CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
             CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
             CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
+            // 对齐原版 HUDServices: 原版导入符号含 kIOSurfaceMemoryRegion(无 kIOSurfaceColorSpace)。
+            // GPU 内存区让 accelerator 可写目标 surface, 否则 IOSurfaceAcceleratorTransferSurface
+            // 在 iOS 16 上可能失败(实测 lastAccelOK=false 的疑点之一)。
+            CFDictionarySetValue(props, CFSTR("MemoryRegion"), CFSTR("PurpleGFXMemory"));
             // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace
             int bpe = 4;
             CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
@@ -282,22 +287,21 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                 self.lastAccelOK = YES;
                 NSLog(@"[TSScreenCapture] 加速器转储成功 src=0x%08X -> dst=BGRA", (unsigned int)srcFmt);
             } else {
-                NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d, 回退直接读", (int)tr);
+                self.lastAccelError = (int)tr;
+                NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d (0x%x), 回退直接读", (int)tr, (unsigned int)tr);
             }
         }
     }
 
-    // ---- 最优路径: _UICreateCGImageFromIOSurface(原版 AutoTouch 读取端, 系统色彩管理) ----
-    // 历史: 曾用该函数读取"加速器转储后的 BGRA8 dst"出现"热成像"伪彩(加速器仅像素转储,
-    // 格式/位深解释不符), 故当时改用手动读取。现加速器在 iOS 16 TrollStore 下失败
-    // (lastAccelOK=false, 疑缺 IOSurfaceAccelerator 权限), readSurface 即源 surface:
-    // 对源 w30r 用 _UICreateCGImageFromIOSurface 是 UIKit 官方解释(带私有元数据),
-    // 与原版 AutoGoRunner 同机制, 色彩由 CoreGraphics 自动管理, 无"热成像"问题。
-    // iOS 16 后台 w30r(10-bit Display P3) 内容: 手动 P3->sRGB(转换/截断) 两种实测都降饱和
-    // 发灰; 改由 CoreGraphics 按 surface 标称色彩空间自动转换到 sRGB context, 与原版
-    // AutoGoRunner(createScreenIOSurface -> _UICreateCGImageFromIOSurface -> PNG) 同机制。
-    // 对自建 sRGB BGRA8 dstSurface(加速器成功/CARenderServer 路径) 亦安全(sRGB->sRGB 恒等)。
-    if (_uiCreateCGImageFn) {
+    // ---- 系统色彩管理路径: _UICreateCGImageFromIOSurface(原版 AutoTouch 读取端) ----
+    // 仅当加速器失败(lastAccelOK=NO, readSurface=源 w30r)时启用: iOS 16 后台源 surface 是
+    // w30r(10-bit Display P3), 手动 P3->sRGB(转换/截断) 两种实测都降饱和发灰; 改由 CoreGraphics
+    // 按 surface 私有元数据自动色彩管理, 与原版 AutoGoRunner 同机制。
+    // 若加速器成功(readSurface=自建 BGRA8 sRGB, 格式已知), 不启用本路径 - 历史实测 iOS 16 上
+    // _UICreateCGImageFromIOSurface 会把加速器"仅像素转储"的 dst 标称格式当真实属性,
+    // 造成"热成像"伪彩; 该情形走下方手动 BGRA 读取(iOS 15 已验证颜色正确)。
+    // 源为 BGRA(如 CARenderServer 自建 surface)时也走手动读取, 避免本路径在 iOS 16 上误判。
+    if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */ && _uiCreateCGImageFn) {
         CGImageRef cg = _uiCreateCGImageFn(readSurface);
         if (cg) {
             size_t cw = CGImageGetWidth(cg), ch = CGImageGetHeight(cg);
@@ -1474,6 +1478,7 @@ static const char *_gsSurfaceKeys[] = {
         diag[@"lastSourceFormat"] = self.lastSourceFormat ?: @"(无)";
         diag[@"lastReadFormat"] = self.lastReadFormat ?: @"(无)";
         diag[@"lastAccelOK"] = @(self.lastAccelOK);
+        diag[@"lastAccelError"] = @(self.lastAccelError);
         diag[@"lastP3Applied"] = @(self.lastP3Applied);
         diag[@"srcColorSpace"] = self.lastSourceColorSpace ?: @"(无)";
         diag[@"colorDecision"] = self.lastColorDecision ?: @"(无)";
@@ -1493,6 +1498,7 @@ static const char *_gsSurfaceKeys[] = {
     self.lastSourceFormat = nil;
     self.lastReadFormat = nil;
     self.lastAccelOK = NO;
+    self.lastAccelError = 0;
     self.lastP3Applied = NO;
     self.lastSourceColorSpace = nil;
     self.lastColorDecision = nil;
