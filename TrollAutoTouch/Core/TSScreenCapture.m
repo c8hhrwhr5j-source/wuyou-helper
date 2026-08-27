@@ -157,11 +157,32 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
         _iomfbHandle = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
         _iosurfaceHandle = dlopen("/System/Library/PrivateFrameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
         // _UICreateCGImageFromIOSurface 是 UIKit 私有函数(AutoTouch 原版主截屏路径的读取端)
-        _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(RTLD_DEFAULT, "_UICreateCGImageFromIOSurface");
+        // iOS 13+ 该符号在 UIKitCore.framework(iOS 16 实测):
+        //  - dlsym(RTLD_DEFAULT) 失败: iOS 系统库 RTLD_LOCAL, 不在全局符号表
+        //  - dlopen(UIKit.framework) 是 stub, re-export 符号 dlsym 解析不到
+        // 必须直接 dlopen UIKitCore.framework 再 dlsym。
+        _uiCreateCGImageFn = NULL;
+        _uiCreateCGImageSource = @"(未加载)";
+        const char *paths[] = {
+            "/System/Library/Frameworks/UIKitCore.framework/UIKitCore",
+            "/System/Library/Frameworks/UIKit.framework/UIKit",
+        };
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && !_uiCreateCGImageFn; i++) {
+            void *h = dlopen(paths[i], RTLD_LAZY);
+            if (h) {
+                _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(h, "_UICreateCGImageFromIOSurface");
+                if (_uiCreateCGImageFn) {
+                    _uiCreateCGImageSource = [NSString stringWithUTF8String:paths[i]];
+                }
+            }
+        }
         if (!_uiCreateCGImageFn) {
-            void *uiKit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
-            if (uiKit) {
-                _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(uiKit, "_UICreateCGImageFromIOSurface");
+            // 最后兜底: 全局表(仅部分 iOS 版本有效)
+            _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(RTLD_DEFAULT, "_UICreateCGImageFromIOSurface");
+            if (_uiCreateCGImageFn) {
+                _uiCreateCGImageSource = @"RTLD_DEFAULT";
+            } else {
+                NSLog(@"[TSScreenCapture] 警告: _UICreateCGImageFromIOSurface 符号加载失败(UIKitCore/UIKit 均无效)");
             }
         }
     }
@@ -304,6 +325,9 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     // 实测(iOS 16.6)加速器 IOSurfaceAcceleratorCreate 失败(lastAccelError=0, 未到 transfer),
     // 进入本路径后 colorDecision 仍为 format-w30r => _UICreateCGImageFromIOSurface 未出图。
     // 疑因后台线程调用 UIKit 私有函数返回 NULL, 改为主线程调用(原版 AutoGoRunner 主线程)。
+    if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */ && !_uiCreateCGImageFn) {
+        self.lastSystemPath = [NSString stringWithFormat:@"符号未加载(src=%@)", self.uiCreateCGImageSource ?: @"(nil)"];
+    }
     if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */ && _uiCreateCGImageFn) {
         __block CGImageRef cg = NULL;
         if ([NSThread isMainThread]) {
@@ -1499,6 +1523,7 @@ static const char *_gsSurfaceKeys[] = {
         diag[@"lastAccelOK"] = @(self.lastAccelOK);
         diag[@"lastAccelError"] = @(self.lastAccelError);
         diag[@"lastSystemPath"] = self.lastSystemPath ?: @"(未进入)";
+        diag[@"uiCreateCGImageSource"] = self.uiCreateCGImageSource ?: @"(未加载)";
         diag[@"lastP3Applied"] = @(self.lastP3Applied);
         diag[@"srcColorSpace"] = self.lastSourceColorSpace ?: @"(无)";
         diag[@"colorDecision"] = self.lastColorDecision ?: @"(无)";
