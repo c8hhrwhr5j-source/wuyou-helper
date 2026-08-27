@@ -864,15 +864,27 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     BOOL collapsed = !_expanded; // 收起: 只按球本体(44)定位, 不把展开面板尺寸算入
 
     if (_landscape) {
-        // 横屏: 屏幕坐标 point.x 沿屏幕水平 → 对应窗口 y; point.y 沿屏幕竖直 → 对应窗口 x。
+        // 横屏: 窗口坐标系为竖屏基准(窗口 x 范围 screen.height, y 范围 screen.width),
+        // point 为设备显示坐标(px 沿屏幕水平, py 沿屏幕竖直)。显示坐标 -> 竖屏窗口坐标:
+        //   LandscapeLeft(home右,3): px=wy, py=screen.height-wx -> wx=screen.height-py, wy=px
+        //   LandscapeRight(home左,4): px=screen.width-wy, py=wx  -> wx=py, wy=screen.width-px
+        // 与 _snapToEdgeAnimated 的方向判断一致; 缺失时 home右 设备 y 被镜像,
+        // 目标右下角坐标会落到右上角。
+        BOOL ll = ([self _currentGlobalOrientation] == 3);
         if (collapsed) {
             // 收起: 窗口收缩为球本体 44×44, 球居中, point 即球心, 可贴任意边缘
             frame.size = CGSizeMake(kBallSize, kBallSize);
             _mainBtn.frame = CGRectMake((kBallSize - kBallVisSize) / 2.0,
                                         (kBallSize - kBallVisSize) / 2.0,
                                         kBallVisSize, kBallVisSize);
-            frame.origin.x = point.y - kBallSize / 2.0;
-            frame.origin.y = point.x - kBallSize / 2.0;
+            CGFloat half = kBallSize / 2.0;
+            if (ll) {
+                frame.origin.x = (screen.height - point.y) - half;
+                frame.origin.y = point.x - half;
+            } else {
+                frame.origin.x = point.y - half;
+                frame.origin.y = (screen.width - point.x) - half;
+            }
             CGFloat maxX = MAX(0, screen.height - frame.size.width);   // 屏幕竖直
             CGFloat maxY = MAX(0, screen.width  - frame.size.height);  // 屏幕水平
             frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
@@ -880,8 +892,15 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         } else {
             // 展开: 窗口 44×200 竖直条, 球心在窗口内 (kBallSize/2, _ballY + kBallSize/2)
             frame.size = CGSizeMake(kBallSize, kExpandedW);
-            frame.origin.x = point.y - kBallSize / 2.0;
-            frame.origin.y = point.x - ([self _ballY] + kBallSize / 2.0);
+            CGFloat cx = kBallSize / 2.0;
+            CGFloat cy = [self _ballY] + kBallSize / 2.0;
+            if (ll) {
+                frame.origin.x = (screen.height - point.y) - cx;
+                frame.origin.y = point.x - cy;
+            } else {
+                frame.origin.x = point.y - cx;
+                frame.origin.y = (screen.width - point.x) - cy;
+            }
             CGFloat maxX = MAX(0, screen.height - frame.size.width);   // 屏幕竖直
             CGFloat maxY = MAX(0, screen.width  - frame.size.height);  // 屏幕水平
             frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
