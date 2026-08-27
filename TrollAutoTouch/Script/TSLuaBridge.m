@@ -1281,8 +1281,11 @@ static int l_sys_setFloatBallPoint(lua_State *L) {
     dispatch_async(dispatch_get_main_queue(), ^{
         // 脚本坐标(像素) -> 设备当前方向屏幕显示坐标(逻辑点)
         // 与 tap/findColor 路径一致: 脚本坐标先转设备当前方向像素, 再除 scale 得逻辑点
+        // 注意: 目标方向必须是设备实际方向(与悬浮球窗口 _landscape/_effectiveScreenSize
+        // 一致)。tsCurrentOrientation 返回的是 app 窗口方向, 本 app 固定竖屏恒为 0,
+        // 会导致横屏下双重旋转把球移到错误位置(右下角坐标跑到左下角)。
         CGPoint scriptPx = CGPointMake(sx, sy);
-        NSInteger curOri = tsCurrentOrientation();
+        NSInteger curOri = [[TSHUDWindow shared] currentScriptOrientation];
         CGPoint displayPx = tsTransformPixelPoint(scriptPx, s_scriptOrientation, curOri, tsPortraitPixelSize());
         CGFloat scale = [UIScreen mainScreen].scale;
         CGPoint displayPt = CGPointMake(displayPx.x / scale, displayPx.y / scale);

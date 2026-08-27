@@ -28,6 +28,12 @@ typedef NS_ENUM(NSInteger, TSHUDAction) {
 - (void)hide;
 - (void)setScriptRunning:(BOOL)running;
 
+/// 设备当前实际方向对应的脚本方向码 (0=home在下 1=home在右 2=home在左)。
+/// 与 setBallPoint 内部坐标系(_currentGlobalOrientation, FBSOrientationObserver)一致。
+/// 供 Lua 层 setFloatBallPoint 做"脚本坐标 -> 设备实际方向屏幕坐标"转换,
+/// 避免 app 固定竖屏时 tsCurrentOrientation 恒为 0 导致双重旋转位置错乱。
+- (NSInteger)currentScriptOrientation;
+
 /// 把悬浮球本体中心移动到指定屏幕坐标 (物理屏幕坐标, 不触发贴边动画)。
 /// 限制在屏内, 横竖屏自适应。线程安全 (内部派发主线程)。
 - (void)setBallPoint:(CGPoint)point;

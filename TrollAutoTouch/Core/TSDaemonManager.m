@@ -15,6 +15,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <UIKit/UIKit.h>
 #import <UserNotifications/UserNotifications.h>
+#import <math.h>
 
 @interface TSDaemonManager ()
 @property (nonatomic, assign) TSDaemonState state;
@@ -168,7 +169,7 @@
     _silentPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
     if (_silentPlayer) {
         _silentPlayer.numberOfLoops = -1; // 无限循环
-        _silentPlayer.volume = 0.0;       // 静默播放
+        _silentPlayer.volume = 0.5;       // WAV 已含 -50dB 信号, 保持极低音量
         [_silentPlayer prepareToPlay];
         [_silentPlayer play];
         NSLog(@"[Daemon] 静默音频已开始(后台保活)");
@@ -262,10 +263,15 @@
     [wav appendBytes:"data" length:4];
     [wav appendBytes:&dataSize length:4];
 
-    // 静默 PCM 数据
-    uint8_t *silence = calloc(dataSize, 1);
-    [wav appendBytes:silence length:dataSize];
-    free(silence);
+    // 极低电平 1kHz 正弦 PCM 数据(约 -50dB)。
+    // iOS 16 起纯静音(全零)不被认可为实际音频输出, 后台豁免失效会快速被杀。
+    int16_t *pcm = (int16_t *)malloc(dataSize);
+    for (int i = 0; i < sampleRate; i++) {
+        double t = (double)i / sampleRate;
+        pcm[i] = (int16_t)(0.003 * 32767.0 * sin(2.0 * M_PI * 1000.0 * t));
+    }
+    [wav appendBytes:pcm length:dataSize];
+    free(pcm);
 
     NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"silence.wav"];
     [wav writeToFile:tmpPath atomically:YES];

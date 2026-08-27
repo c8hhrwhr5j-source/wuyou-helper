@@ -749,6 +749,18 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     return v;
 }
 
+// 设备当前实际方向 -> 脚本方向码 (0=home在下 1=home在右 2=home在左)。
+// 与 setBallPoint 的坐标系一致: setFloatBallPoint 需要它做转换目标方向。
+- (NSInteger)currentScriptOrientation {
+    long long o = [self _currentGlobalOrientation];
+    // UIInterfaceOrientation: 1=Portrait 2=PortraitUpsideDown 3=LandscapeLeft(home右) 4=LandscapeRight(home左)
+    switch (o) {
+        case 3: return 1;   // home 在右
+        case 4: return 2;   // home 在左
+        default: return 0;  // 竖屏/未知
+    }
+}
+
 // 有效屏幕尺寸: 处理"app 只支持竖屏但设备已横屏"的情况。
 // 此时 app 的 UIScreen.bounds 仍返回竖屏尺寸 (宽<高, app 未随设备旋转),
 // 而悬浮球经 SBS 托管显示在横屏屏幕上 —— 若按竖屏尺寸贴边, 会把悬浮球
@@ -854,6 +866,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
     }
     self.frame = frame;
+    // 后台 SBS 托管时 CA 提交被节流, 显式 flush 确保新位置立即同步到
+    // SpringBoard 远程上下文, 否则"移动悬浮球不生效/延迟生效"
+    TSFlushCATransaction();
 }
 
 // 冷启动接口 /float 实现: 移动/隐藏悬浮球
