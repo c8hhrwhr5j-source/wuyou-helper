@@ -329,8 +329,11 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     // ---- P3→sRGB 转换决策(按可靠度排序) ----
     // 1. skipColorConvert(CARenderServer): 系统已按 surface 声明的 sRGB 渲染完成
     // 2. source surface 的 IOSurfaceColorSpace 属性: 系统标记的内容真实色彩空间
-    // 3. iOS16+ 的 'w30r'(createScreenIOSurface): 实测内容为 sRGB 编码
-    //    (后台快照已做色彩管理), 按 P3 二次转换会整体降饱和发灰(iOS16.6/P3 屏实测)
+    // 3. iOS16+ 的 'w30r'(createScreenIOSurface): 内容编码随渲染管线
+    //    - P3 屏(iOS16 新机): 内容按 Display P3 编码, 需转 sRGB
+    //      (直接截断当 sRGB 会整体降饱和发灰, B.png 实测 243→217)
+    //    - sRGB 屏(iOS15 老机): 内容按 sRGB 编码, 无需转换
+    //    故按屏幕类型判定(_screenUsesP3)
     // 4. 兜底: 按屏幕类型判定(_screenUsesP3)
     NSString *surfaceCS = [self _surfaceColorSpaceName:sourceSurface];
     self.lastSourceColorSpace = surfaceCS ?: @"(无属性)";
@@ -351,7 +354,16 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     } else if (attrP3) {
         p3ToSrgb = YES;   decision = @"attribute-p3";
     } else if (fmt == 0x77333072) {
-        p3ToSrgb = NO;    decision = @"format-w30r(iOS16 内容已 sRGB)";
+        // 'w30r' = kCVPixelFormatType_30RGBLEPackedWideGamut = 10-bit Display P3。
+        // 内容编码随渲染管线:
+        //   - P3 屏(iOS 16 新机): surface 内容按 Display P3 编码, 直接截断当 sRGB
+        //     会整体降饱和发灰(B.png 750x1334 实测: 与 A.png 同界面色相一致,
+        //     但平均亮度 217 vs 243、8 水平带亮度均匀无渐变 = 降饱和灰非遮罩;
+        //     原版走 _UICreateCGImageFromIOSurface 由 CoreGraphics 做 P3→sRGB 正常)。
+        //   - sRGB 屏(iOS 15 老机): 内容按 sRGB 编码, 无需转换。
+        // 故按屏幕类型(_screenUsesP3)决定转换。
+        p3ToSrgb = _screenUsesP3();
+        decision = p3ToSrgb ? @"format-w30r(p3 屏内容 P3→sRGB)" : @"format-w30r(srgb 屏内容已 sRGB)";
     } else {
         p3ToSrgb = _screenUsesP3();
         decision = p3ToSrgb ? @"screen-fallback(p3)" : @"screen-fallback(srgb)";
