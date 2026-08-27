@@ -271,6 +271,15 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 仅重设 frame, 可见性/alpha 仍由展开收起动画管理)。
 // 横屏时窗口为竖直条 44×200, 按钮沿 y 轴排布 (x 轴同竖屏公式, 轴互换)。
 - (void)_relayoutForDock {
+    // 收起状态(setBallPoint 把窗口收缩为球本体 44×44): 球居中。
+    // 依据窗口尺寸判断, 避免 200 宽展开窗口/方向布局走错分支。
+    if (!_expanded && self.frame.size.width <= kBallSize + 0.5
+                  && self.frame.size.height <= kBallSize + 0.5) {
+        _mainBtn.frame = CGRectMake((kBallSize - kBallVisSize) / 2.0,
+                                    (kBallSize - kBallVisSize) / 2.0,
+                                    kBallVisSize, kBallVisSize);
+        return;
+    }
     if (_landscape) {
         CGFloat inset = (kBallSize - kBallVisSize) / 2;
         _mainBtn.frame = CGRectMake(inset, [self _ballY] + inset,
@@ -459,6 +468,16 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 
 - (void)_expandAnimated:(BOOL)animated {
     _expanded = YES;
+    // setBallPoint 在收起状态把窗口收缩为球本体 44×44; 展开前恢复展开尺寸并
+    // 重排, 否则按钮会排布到窗口外(球在 44 窗格内, 按钮需要展开面板宽度)
+    CGSize want = _landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
+    if (!CGSizeEqualToSize(self.frame.size, want)) {
+        CGRect f = self.frame;
+        f.size = want;
+        self.frame = f;
+        [self _relayoutForDock];
+        TSFlushCATransaction();
+    }
     UIButton *buttons[] = {_closeBtn, _toggleBtn, _pauseBtn};
     for (int i = 0; i < kExtCount; i++) {
         UIButton *b = buttons[i];
@@ -635,7 +654,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     // LandscapeRight(4): 屏幕 px=467-wy, py=wx
     CGRect f = self.frame;
     [self _convertFrame:&f toLandscape:landscape orientation:o];
-    f.size = landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
+    // 窗口尺寸跟随展开状态: 收起为球本体 44×44, 展开为面板宽度
+    f.size = !_expanded ? CGSizeMake(kBallSize, kBallSize)
+             : landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
     CGSize base = [self _portraitScreenSize]; // 窗口坐标始终基于竖屏基准
     CGFloat maxX = landscape ? (base.height - f.size.width) : (base.width - f.size.width);
     CGFloat maxY = landscape ? (base.width  - f.size.height) : (base.height - f.size.height);
@@ -840,30 +861,55 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     }
     CGRect frame = self.frame;
     CGSize screen = [self _effectiveScreenSize];
+    BOOL collapsed = !_expanded; // 收起: 只按球本体(44)定位, 不把展开面板尺寸算入
 
     if (_landscape) {
-        // 横屏: 窗口宽 44 沿屏幕竖直, 窗口高 200 沿屏幕水平。
-        // 屏幕坐标 point.x 沿屏幕水平 → 对应窗口 y;
-        //        point.y 沿屏幕竖直 → 对应窗口 x。
-        // 悬浮球本体在窗口内的中心: (kBallSize/2, _ballY + kBallSize/2)
-        CGFloat ballCenterXInWin = kBallSize / 2.0;
-        CGFloat ballCenterYInWin = [self _ballY] + kBallSize / 2.0;
-        frame.origin.x = point.y - ballCenterXInWin;
-        frame.origin.y = point.x - ballCenterYInWin;
-        CGFloat maxX = MAX(0, screen.height - frame.size.width);   // 屏幕竖直
-        CGFloat maxY = MAX(0, screen.width  - frame.size.height);  // 屏幕水平
-        frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
-        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        // 横屏: 屏幕坐标 point.x 沿屏幕水平 → 对应窗口 y; point.y 沿屏幕竖直 → 对应窗口 x。
+        if (collapsed) {
+            // 收起: 窗口收缩为球本体 44×44, 球居中, point 即球心, 可贴任意边缘
+            frame.size = CGSizeMake(kBallSize, kBallSize);
+            _mainBtn.frame = CGRectMake((kBallSize - kBallVisSize) / 2.0,
+                                        (kBallSize - kBallVisSize) / 2.0,
+                                        kBallVisSize, kBallVisSize);
+            frame.origin.x = point.y - kBallSize / 2.0;
+            frame.origin.y = point.x - kBallSize / 2.0;
+            CGFloat maxX = MAX(0, screen.height - frame.size.width);   // 屏幕竖直
+            CGFloat maxY = MAX(0, screen.width  - frame.size.height);  // 屏幕水平
+            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        } else {
+            // 展开: 窗口 44×200 竖直条, 球心在窗口内 (kBallSize/2, _ballY + kBallSize/2)
+            frame.size = CGSizeMake(kBallSize, kExpandedW);
+            frame.origin.x = point.y - kBallSize / 2.0;
+            frame.origin.y = point.x - ([self _ballY] + kBallSize / 2.0);
+            CGFloat maxX = MAX(0, screen.height - frame.size.width);   // 屏幕竖直
+            CGFloat maxY = MAX(0, screen.width  - frame.size.height);  // 屏幕水平
+            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        }
     } else {
-        // 竖屏: 窗口坐标轴与屏幕一致
-        CGFloat ballCenterXInWin = [self _ballX] + kBallSize / 2.0;
-        CGFloat ballCenterYInWin = kBallSize / 2.0;
-        frame.origin.x = point.x - ballCenterXInWin;
-        frame.origin.y = point.y - ballCenterYInWin;
-        CGFloat maxX = MAX(0, screen.width  - frame.size.width);
-        CGFloat maxY = MAX(0, screen.height - frame.size.height);
-        frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
-        frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        if (collapsed) {
+            // 收起: 窗口收缩为球本体 44×44, 球居中, point 即球心, 可贴任意边缘
+            frame.size = CGSizeMake(kBallSize, kBallSize);
+            _mainBtn.frame = CGRectMake((kBallSize - kBallVisSize) / 2.0,
+                                        (kBallSize - kBallVisSize) / 2.0,
+                                        kBallVisSize, kBallVisSize);
+            frame.origin.x = point.x - kBallSize / 2.0;
+            frame.origin.y = point.y - kBallSize / 2.0;
+            CGFloat maxX = MAX(0, screen.width  - frame.size.width);
+            CGFloat maxY = MAX(0, screen.height - frame.size.height);
+            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        } else {
+            // 展开: 窗口 200×44, 球心在窗口内 (_ballX + kBallSize/2, kBallSize/2)
+            frame.size = CGSizeMake(kExpandedW, kBallSize);
+            frame.origin.x = point.x - ([self _ballX] + kBallSize / 2.0);
+            frame.origin.y = point.y - kBallSize / 2.0;
+            CGFloat maxX = MAX(0, screen.width  - frame.size.width);
+            CGFloat maxY = MAX(0, screen.height - frame.size.height);
+            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
+            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
+        }
     }
     self.frame = frame;
     // 后台 SBS 托管时 CA 提交被节流, 显式 flush 确保新位置立即同步到
