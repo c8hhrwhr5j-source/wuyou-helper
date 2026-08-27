@@ -49,6 +49,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) NSString *lastSrcPx;
 /// 最近一次读取的屏幕中心像素转换后输出值(诊断用)
 @property (nonatomic, strong, nullable) NSString *lastOutPx;
+/// 最近一次 source surface 声明的色彩空间(IOSurfaceColorSpace 属性值, 诊断用)
+@property (nonatomic, strong, nullable) NSString *lastSourceColorSpace;
+/// 最近一次 P3->sRGB 转换的决策依据(attribute-srgb/attribute-p3/format-w30r/screen-fallback/car-server/skip, 诊断用)
+@property (nonatomic, strong, nullable) NSString *lastColorDecision;
 
 /// 截取整屏，返回 RGBA 像素缓冲(用于找色)。
 /// @param pixelsOut  输出像素数组(调用者用完需 free)。每像素 4 字节 RGBA。

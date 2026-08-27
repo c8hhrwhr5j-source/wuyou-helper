@@ -170,6 +170,25 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
 
 #pragma mark - IOSurface 转储(对齐原版: 硬件/窗口 surface -> 加速器 -> 自建 BGRA surface)
 
+/// 读取 IOSurface 声明的色彩空间(IOSurfaceColorSpace 属性, 系统标记内容真实色彩空间)。
+/// 返回字符串(如 "sRGB"/"DisplayP3"), 属性缺失/不可解析时返回 nil。
+- (NSString *)_surfaceColorSpaceName:(IOSurfaceRef)surf {
+    if (!surf || !_iosurfaceHandle) { return nil; }
+    CFTypeRef (*copyValueFn)(IOSurfaceRef, CFStringRef) =
+        dlsym(_iosurfaceHandle, "IOSurfaceCopyValue");
+    if (!copyValueFn) { return nil; }
+    CFTypeRef v = copyValueFn(surf, CFSTR("IOSurfaceColorSpace"));
+    if (v) {
+        if (CFGetTypeID(v) == CFStringGetTypeID()) {
+            NSString *s = [NSString stringWithString:(__bridge NSString *)v];
+            CFRelease(v);
+            return s;
+        }
+        CFRelease(v);
+    }
+    return nil;
+}
+
 /// 用 IOSurfaceAccelerator 把 source surface 转储到自建 BGRA surface 并读出 RGBA 像素。
 /// 传输在 WindowServer 侧(GPU)执行，不依赖 App 自身渲染状态，后台/其他 App 前台仍可用。
 - (BOOL)_dumpIOSurface:(IOSurfaceRef)sourceSurface
@@ -306,10 +325,38 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
 
     uint32_t fmt = pixelFormatFn ? pixelFormatFn(readSurface) : 0x42475241; // 默认假设 BGRA
     self.lastReadFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)fmt];
-    // P3 广色域屏需要把像素转换到 sRGB（sRGB 屏为 NO，行为与原版一致）。
-    // skipColorConvert=YES: CARenderServer 路径的像素已是 sRGB(系统按 surface 色彩空间
-    // 渲染完成), 跳过转换避免二次降饱和发灰。
-    BOOL p3ToSrgb = _screenUsesP3() && !skipColorConvert;
+
+    // ---- P3→sRGB 转换决策(按可靠度排序) ----
+    // 1. skipColorConvert(CARenderServer): 系统已按 surface 声明的 sRGB 渲染完成
+    // 2. source surface 的 IOSurfaceColorSpace 属性: 系统标记的内容真实色彩空间
+    // 3. iOS16+ 的 'w30r'(createScreenIOSurface): 实测内容为 sRGB 编码
+    //    (后台快照已做色彩管理), 按 P3 二次转换会整体降饱和发灰(iOS16.6/P3 屏实测)
+    // 4. 兜底: 按屏幕类型判定(_screenUsesP3)
+    NSString *surfaceCS = [self _surfaceColorSpaceName:sourceSurface];
+    self.lastSourceColorSpace = surfaceCS ?: @"(无属性)";
+    BOOL attrSrgb = NO, attrP3 = NO;
+    if (surfaceCS.length) {
+        attrSrgb = ([surfaceCS rangeOfString:@"sRGB" options:NSCaseInsensitiveSearch].location != NSNotFound);
+        if (!attrSrgb) {
+            attrP3 = ([surfaceCS rangeOfString:@"P3" options:NSCaseInsensitiveSearch].location != NSNotFound
+                      || [surfaceCS rangeOfString:@"WideGamut" options:NSCaseInsensitiveSearch].location != NSNotFound);
+        }
+    }
+    NSString *decision = nil;
+    BOOL p3ToSrgb;
+    if (skipColorConvert) {
+        p3ToSrgb = NO;    decision = @"car-server(sRGB 已就绪)";
+    } else if (attrSrgb) {
+        p3ToSrgb = NO;    decision = @"attribute-srgb";
+    } else if (attrP3) {
+        p3ToSrgb = YES;   decision = @"attribute-p3";
+    } else if (fmt == 0x77333072) {
+        p3ToSrgb = NO;    decision = @"format-w30r(iOS16 内容已 sRGB)";
+    } else {
+        p3ToSrgb = _screenUsesP3();
+        decision = p3ToSrgb ? @"screen-fallback(p3)" : @"screen-fallback(srgb)";
+    }
+    self.lastColorDecision = decision;
     self.lastP3Applied = p3ToSrgb;
     if (p3ToSrgb) {
         _ensureColorLUTs();
@@ -345,14 +392,18 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                     dst[x*4+3] = 255;
                 }
             } else if (fmt == 0x77333072 /* 'w30r': kCVPixelFormatType_30RGBLEPackedWideGamut */) {
-                // iOS 16+ createScreenIOSurface 返回 10-bit 广色域 surface(Display P3):
-                // 32-bit little-endian 打包: [31:30]=未用, [29:20]=R(10b), [19:10]=G(10b), [9:0]=B(10b)。
+                // iOS 16+ createScreenIOSurface 返回 10-bit 广色域 surface(Display P3)。
+                // 官方定义: 'w30r' = little-endian RGB101010, 2 MSB 为 0。
+                // 32-bit little-endian 打包(32-bit 值 = 内存 4 字节按小端组合):
+                //   bits [9:0]=R(10b), [19:10]=G(10b), [29:20]=B(10b), [31:30]=未用。
+                //   ★R 在最低位, B 在最高位(此前注释/变量把 R/B 写反,
+                //   导致 P3→sRGB 转换分支 R/B 错乱, 截图颜色严重异常)。
                 // Display P3 传递函数 = sRGB OETF, 10-bit 线性化后走同一 P3→sRGB 矩阵。
                 // 注: 此格式无 alpha, 剩余 2 bit 未定义。
                 uint32_t px = *(const uint32_t *)(src + x * 4);
-                uint16_t r10 = (px >> 20) & 0x3FF;
+                uint16_t r10 = (px >>  0) & 0x3FF;
                 uint16_t g10 = (px >> 10) & 0x3FF;
-                uint16_t b10 = (px >>  0) & 0x3FF;
+                uint16_t b10 = (px >> 20) & 0x3FF;
                 if (x == cx && y == cy) {
                     dbgSrc[0] = r10; dbgSrc[1] = g10; dbgSrc[2] = b10; dbgSrcIs10bit = YES;
                 }
@@ -365,9 +416,9 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                     dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
                     dst[x*4+3] = 255;
                 } else {
-                    dst[x*4+0] = (uint8_t)(b10 >> 2);
+                    dst[x*4+0] = (uint8_t)(r10 >> 2);
                     dst[x*4+1] = (uint8_t)(g10 >> 2);
-                    dst[x*4+2] = (uint8_t)(r10 >> 2);
+                    dst[x*4+2] = (uint8_t)(b10 >> 2);
                     dst[x*4+3] = 255;
                 }
             } else {
@@ -1364,6 +1415,8 @@ static const char *_gsSurfaceKeys[] = {
         diag[@"lastReadFormat"] = self.lastReadFormat ?: @"(无)";
         diag[@"lastAccelOK"] = @(self.lastAccelOK);
         diag[@"lastP3Applied"] = @(self.lastP3Applied);
+        diag[@"srcColorSpace"] = self.lastSourceColorSpace ?: @"(无)";
+        diag[@"colorDecision"] = self.lastColorDecision ?: @"(无)";
         diag[@"lastSrcPx"] = self.lastSrcPx ?: @"(无)";
         diag[@"lastOutPx"] = self.lastOutPx ?: @"(无)";
         diag[@"screenP3"] = @(_screenUsesP3());
@@ -1381,6 +1434,8 @@ static const char *_gsSurfaceKeys[] = {
     self.lastReadFormat = nil;
     self.lastAccelOK = NO;
     self.lastP3Applied = NO;
+    self.lastSourceColorSpace = nil;
+    self.lastColorDecision = nil;
     self.lastSrcPx = nil;
     self.lastOutPx = nil;
 
