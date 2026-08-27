@@ -464,14 +464,13 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
         //     原版走 _UICreateCGImageFromIOSurface 由 CoreGraphics 做 P3→sRGB 正常)。
         //   - sRGB 屏(iOS 15 老机): 内容按 sRGB 编码, 无需转换。
         // 故按屏幕类型(_screenUsesP3)决定转换。
-        // [iOS 16.6 + P3 屏 实测决定性修正] createScreenIOSurface 返回的 w30r 源
-        // 是 ERSRGB(Extended Range sRGB) 编码: SDR 白点 = 0.874(10-bit 894=0x37E),
-        // 不是 P3 满量程 1023。A.png(原版, 中心白=255) vs 我们的旧转换(中心=223)
-        // 差异恰好是 0.874 压缩 => 旧转换把"屏幕白"894 当"P3 灰 0.874"解码,
-        // 导致所有颜色整体变暗发灰。修复: 10-bit 值先按 ERSRGB 白点 894 放大到
-        // 满量程(×1023/894, 超白/EDR 高光 clamp 到白), 再做 P3→sRGB。
+        // [iOS 16.6 + P3 屏 决定性修正] createScreenIOSurface 返回的 w30r 源是
+        // ERSRGB(Extended Range sRGB): SDR 白点 = 0.874(10-bit 894=0x37E)。
+        //   c56004c 实测: 白点归一化(894→255)后中心白正确, 但保留 P3→sRGB 矩阵
+        //   让彩色降饱和, P3 屏上对比屏幕仍有"一层灰色遮盖"(sRGB 色域<P3 色域)。
+        //   改: 白点归一化 + 8-bit 直出(屏幕观感值), 不再做色域矩阵。
         p3ToSrgb = _screenUsesP3();
-        decision = p3ToSrgb ? @"format-w30r(edr-w30r ERSRGB白点894→P3→sRGB)" : @"format-w30r(srgb 屏内容已 sRGB)";
+        decision = p3ToSrgb ? @"format-w30r(edr-w30r 白点894归一化→8bit直出)" : @"format-w30r(srgb 屏内容已 sRGB)";
     } else {
         p3ToSrgb = _screenUsesP3();
         decision = p3ToSrgb ? @"screen-fallback(p3)" : @"screen-fallback(srgb)";
@@ -528,26 +527,20 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
                 if (x == cx && y == cy) {
                     dbgSrc[0] = r10; dbgSrc[1] = g10; dbgSrc[2] = b10; dbgSrcIs10bit = YES;
                 }
-                if (p3ToSrgb) {
-                    // ERSRGB 白点归一化: 源 10-bit 白点=894(SDR 白), 放大到 P3 满量程 1023。
-                    // 894→1023(线性1.0)→sRGB 255; EDR 高光(>894)clamp 到白。
-                    const float kEdrWhite = 894.0f; // 10-bit ERSRGB 白点(0x37E)
-                    int r10n = (int)(r10 * (1023.0f / kEdrWhite)); if (r10n > 1023) r10n = 1023;
-                    int g10n = (int)(g10 * (1023.0f / kEdrWhite)); if (g10n > 1023) g10n = 1023;
-                    int b10n = (int)(b10 * (1023.0f / kEdrWhite)); if (b10n > 1023) b10n = 1023;
-                    float rl = _p3ToLinearLUT10[r10n];
-                    float gl = _p3ToLinearLUT10[g10n];
-                    float bl = _p3ToLinearLUT10[b10n];
-                    dst[x*4+0] = _srgbEncode( 1.224940f*rl - 0.224940f*gl);
-                    dst[x*4+1] = _srgbEncode(-0.042057f*rl + 1.042057f*gl);
-                    dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
-                    dst[x*4+3] = 255;
-                } else {
-                    dst[x*4+0] = (uint8_t)(r10 >> 2);
-                    dst[x*4+1] = (uint8_t)(g10 >> 2);
-                    dst[x*4+2] = (uint8_t)(b10 >> 2);
-                    dst[x*4+3] = 255;
-                }
+                // ERSRGB 白点归一化 + 8-bit 直出(屏幕观感值, 不做 P3→sRGB 矩阵):
+                // iOS 16 的 w30r 源是 ERSRGB(白点 0.874 = 10-bit 894), 894 即屏幕白。
+                // 白点归一化: v10 * 255/894, 894→255(屏幕白), 0→0, EDR 高光 clamp 白。
+                // 旧矩阵路径把彩色按 P3→sRGB 降饱和, 在 P3 屏上对比屏幕物理发灰;
+                // 直出保持屏幕观感值, Lua 脚本在 P3 屏取色/比对自洽。
+                // sRGB 屏(iOS 15 老机走 8-bit BGRA 满量程, 不经此分支)不受影响。
+                const float kEdrWhite = 894.0f; // 10-bit ERSRGB 白点(0x37E)
+                int r8 = (int)(r10 * (255.0f / kEdrWhite)); if (r8 > 255) r8 = 255;
+                int g8 = (int)(g10 * (255.0f / kEdrWhite)); if (g8 > 255) g8 = 255;
+                int b8 = (int)(b10 * (255.0f / kEdrWhite)); if (b8 > 255) b8 = 255;
+                dst[x*4+0] = (uint8_t)r8;
+                dst[x*4+1] = (uint8_t)g8;
+                dst[x*4+2] = (uint8_t)b8;
+                dst[x*4+3] = 255;
             } else {
                 dst[x*4+0] = src[x*4+0];
                 dst[x*4+1] = src[x*4+1];
