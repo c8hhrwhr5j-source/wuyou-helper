@@ -32,6 +32,7 @@
 #import <unistd.h>
 #import <IOKit/IOKitLib.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreImage/CoreImage.h>
 
 // MARK: - Display P3 广色域 → sRGB 转换
 // iPhone 7 及之后的屏幕为 Display P3 广色域，IOSurface 像素是 P3 值。
@@ -111,6 +112,11 @@ typedef void (*CARenderServerRenderDisplayFunc)(kern_return_t a, CFStringRef dis
 // AutoTouch(HUDServices) 主截屏链路 = createScreenIOSurface -> IOSurfaceAcceleratorTransferSurface
 //   -> _UICreateCGImageFromIOSurface(dst) 生成图像(0x100057378 反汇编确认)。
 typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
+// 直接链接绑定(对齐原版 AutoTouch): iOS 16 的 dyld(chained fixups)运行时 bind 用
+// dyld shared cache 符号表(含 local symbol)解析, 而 dlsym 只查 exported symbols,
+// 所以 _UICreateCGImageFromIOSurface 用 dlsym(UIKitCore/UIKit/RTLD_DEFAULT) 全失败。
+// project.yml 已设 -Wl,-undefined,dynamic_lookup, weak 声明保证符号缺失时置 NULL 不崩溃。
+CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((weak));
 
 @interface TSScreenCapture () {
     void *_iomfbHandle;
@@ -156,34 +162,15 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
         // 预加载私有框架
         _iomfbHandle = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
         _iosurfaceHandle = dlopen("/System/Library/PrivateFrameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
-        // _UICreateCGImageFromIOSurface 是 UIKit 私有函数(AutoTouch 原版主截屏路径的读取端)
-        // iOS 13+ 该符号在 UIKitCore.framework(iOS 16 实测):
-        //  - dlsym(RTLD_DEFAULT) 失败: iOS 系统库 RTLD_LOCAL, 不在全局符号表
-        //  - dlopen(UIKit.framework) 是 stub, re-export 符号 dlsym 解析不到
-        // 必须直接 dlopen UIKitCore.framework 再 dlsym。
-        _uiCreateCGImageFn = NULL;
-        _uiCreateCGImageSource = @"(未加载)";
-        const char *paths[] = {
-            "/System/Library/Frameworks/UIKitCore.framework/UIKitCore",
-            "/System/Library/Frameworks/UIKit.framework/UIKit",
-        };
-        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && !_uiCreateCGImageFn; i++) {
-            void *h = dlopen(paths[i], RTLD_LAZY);
-            if (h) {
-                _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(h, "_UICreateCGImageFromIOSurface");
-                if (_uiCreateCGImageFn) {
-                    _uiCreateCGImageSource = [NSString stringWithUTF8String:paths[i]];
-                }
-            }
-        }
+        // _UICreateCGImageFromIOSurface 直接链接绑定(对齐原版):
+        // dlsym(RTLD_DEFAULT/UIKitCore/UIKit) 在 iOS 16 全失败 —— dyld bind 用
+        // cache 符号表(含 local symbol)解析, dlsym 只查 exported symbols。
+        // extern weak + project.yml 的 -Wl,-undefined,dynamic_lookup:
+        // 运行时由 dyld 在已加载 image 中解析, 缺失自动置 NULL。
+        _uiCreateCGImageFn = _UICreateCGImageFromIOSurface;
+        _uiCreateCGImageSource = _uiCreateCGImageFn ? @"direct-link(weak)" : @"(未加载)";
         if (!_uiCreateCGImageFn) {
-            // 最后兜底: 全局表(仅部分 iOS 版本有效)
-            _uiCreateCGImageFn = (UICreateCGImageFromIOSurfaceFunc)dlsym(RTLD_DEFAULT, "_UICreateCGImageFromIOSurface");
-            if (_uiCreateCGImageFn) {
-                _uiCreateCGImageSource = @"RTLD_DEFAULT";
-            } else {
-                NSLog(@"[TSScreenCapture] 警告: _UICreateCGImageFromIOSurface 符号加载失败(UIKitCore/UIKit 均无效)");
-            }
+            NSLog(@"[TSScreenCapture] 警告: _UICreateCGImageFromIOSurface 链接解析失败(dynamic_lookup 未找到)");
         }
     }
     return self;
@@ -325,21 +312,42 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     // 实测(iOS 16.6)加速器 IOSurfaceAcceleratorCreate 失败(lastAccelError=0, 未到 transfer),
     // 进入本路径后 colorDecision 仍为 format-w30r => _UICreateCGImageFromIOSurface 未出图。
     // 疑因后台线程调用 UIKit 私有函数返回 NULL, 改为主线程调用(原版 AutoGoRunner 主线程)。
-    if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */ && !_uiCreateCGImageFn) {
-        self.lastSystemPath = [NSString stringWithFormat:@"符号未加载(src=%@)", self.uiCreateCGImageSource ?: @"(nil)"];
-    }
-    if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */ && _uiCreateCGImageFn) {
+    // 统一系统路径: 符号加载成功则主线程调用, 无论成败都尝试 CIImage 兜底
+    if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */) {
         __block CGImageRef cg = NULL;
-        if ([NSThread isMainThread]) {
-            cg = _uiCreateCGImageFn(readSurface);
-        } else {
-            dispatch_sync(dispatch_get_main_queue(), ^{
+        if (_uiCreateCGImageFn) {
+            if ([NSThread isMainThread]) {
                 cg = _uiCreateCGImageFn(readSurface);
-            });
+            } else {
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    cg = _uiCreateCGImageFn(readSurface);
+                });
+            }
+        } else {
+            self.lastSystemPath = [NSString stringWithFormat:@"符号未加载(src=%@)", self.uiCreateCGImageSource ?: @"(nil)"];
         }
         if (!cg) {
-            self.lastSystemPath = @"_UICreateCGImageFromIOSurface 返回 NULL(主线程调用后仍失败)";
-            NSLog(@"[TSScreenCapture] _UICreateCGImageFromIOSurface 返回 NULL");
+            // 兜底: CIImage imageWithIOSurface(公开 API, CIContext 线程安全) + sRGB 渲染
+            CIImage *ci = [CIImage imageWithIOSurface:readSurface options:nil];
+            if (ci) {
+                static CIContext *s_ciCtx = nil;
+                static dispatch_once_t onceToken;
+                dispatch_once(&onceToken, ^{
+                    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                    s_ciCtx = [CIContext contextWithOptions:@{
+                        (id)kCIContextWorkingColorSpace: (__bridge id)srgb,
+                        (id)kCIContextOutputColorSpace: (__bridge id)srgb,
+                        (id)kCIContextUseSoftwareRenderer: @NO,
+                    }];
+                    CGColorSpaceRelease(srgb);
+                });
+                CGRect ext = ci.extent;
+                cg = [s_ciCtx createCGImage:ci fromRect:ext];
+                self.lastSystemPath = cg ? @"CIImage(imageWithIOSurface)->sRGB fallback" : @"CIImage 渲染也失败";
+            } else {
+                self.lastSystemPath = @"_UICreateCGImageFromIOSurface 与 CIImage(imageWithIOSurface) 均失败";
+            }
+            NSLog(@"[TSScreenCapture] _UICreateCGImageFromIOSurface 返回 NULL, CIImage fallback: %@", self.lastSystemPath);
         } else {
             size_t cw = CGImageGetWidth(cg), ch = CGImageGetHeight(cg);
             // 诊断: 记录 CoreGraphics 解析出的 CGImage 色彩空间(判断是否需手动补 P3)
@@ -456,8 +464,14 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
         //     原版走 _UICreateCGImageFromIOSurface 由 CoreGraphics 做 P3→sRGB 正常)。
         //   - sRGB 屏(iOS 15 老机): 内容按 sRGB 编码, 无需转换。
         // 故按屏幕类型(_screenUsesP3)决定转换。
+        // [iOS 16.6 + P3 屏 实测决定性修正] createScreenIOSurface 返回的 w30r 源
+        // 是 ERSRGB(Extended Range sRGB) 编码: SDR 白点 = 0.874(10-bit 894=0x37E),
+        // 不是 P3 满量程 1023。A.png(原版, 中心白=255) vs 我们的旧转换(中心=223)
+        // 差异恰好是 0.874 压缩 => 旧转换把"屏幕白"894 当"P3 灰 0.874"解码,
+        // 导致所有颜色整体变暗发灰。修复: 10-bit 值先按 ERSRGB 白点 894 放大到
+        // 满量程(×1023/894, 超白/EDR 高光 clamp 到白), 再做 P3→sRGB。
         p3ToSrgb = _screenUsesP3();
-        decision = p3ToSrgb ? @"format-w30r(p3 屏内容 P3→sRGB)" : @"format-w30r(srgb 屏内容已 sRGB)";
+        decision = p3ToSrgb ? @"format-w30r(edr-w30r ERSRGB白点894→P3→sRGB)" : @"format-w30r(srgb 屏内容已 sRGB)";
     } else {
         p3ToSrgb = _screenUsesP3();
         decision = p3ToSrgb ? @"screen-fallback(p3)" : @"screen-fallback(srgb)";
@@ -515,9 +529,15 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                     dbgSrc[0] = r10; dbgSrc[1] = g10; dbgSrc[2] = b10; dbgSrcIs10bit = YES;
                 }
                 if (p3ToSrgb) {
-                    float rl = _p3ToLinearLUT10[r10];
-                    float gl = _p3ToLinearLUT10[g10];
-                    float bl = _p3ToLinearLUT10[b10];
+                    // ERSRGB 白点归一化: 源 10-bit 白点=894(SDR 白), 放大到 P3 满量程 1023。
+                    // 894→1023(线性1.0)→sRGB 255; EDR 高光(>894)clamp 到白。
+                    const float kEdrWhite = 894.0f; // 10-bit ERSRGB 白点(0x37E)
+                    int r10n = (int)(r10 * (1023.0f / kEdrWhite)); if (r10n > 1023) r10n = 1023;
+                    int g10n = (int)(g10 * (1023.0f / kEdrWhite)); if (g10n > 1023) g10n = 1023;
+                    int b10n = (int)(b10 * (1023.0f / kEdrWhite)); if (b10n > 1023) b10n = 1023;
+                    float rl = _p3ToLinearLUT10[r10n];
+                    float gl = _p3ToLinearLUT10[g10n];
+                    float bl = _p3ToLinearLUT10[b10n];
                     dst[x*4+0] = _srgbEncode( 1.224940f*rl - 0.224940f*gl);
                     dst[x*4+1] = _srgbEncode(-0.042057f*rl + 1.042057f*gl);
                     dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
