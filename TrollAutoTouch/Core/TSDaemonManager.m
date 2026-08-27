@@ -11,6 +11,9 @@
 #import "TSHTTPServer.h"
 #import "TSScreenCapture.h"
 #import "TSDeviceInfo.h"
+#import "TSLogStore.h"
+#import "TSLuaBridge.h"
+#import "TSAudioKeepAlive.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <UIKit/UIKit.h>
@@ -22,7 +25,7 @@
 @property (nonatomic, assign) BOOL isInBackground;
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTaskId;
 @property (nonatomic, strong) AVAudioPlayer *silentPlayer;
-@property (nonatomic, strong) NSTimer *heartbeatTimer;
+@property (nonatomic, strong) dispatch_source_t probeSource;   // GCD 探针 timer (后台可靠)
 @property (nonatomic, assign) BOOL hudVisible;
 @end
 
@@ -72,10 +75,12 @@
     BOOL tasOn = [ud objectForKey:@"TASServiceEnabled"] ? [ud boolForKey:@"TASServiceEnabled"] : YES;
     if (!tasOn) {
         NSLog(@"[Daemon] TAS 服务已关闭, 跳过后台保活");
+        [self log:@"TAS 服务已关闭, 跳过后台保活"];
         return;
     }
 
     NSLog(@"[Daemon] 应用进入后台");
+    [self log:@"应用进入后台"];
     _isInBackground = YES;
     _state = TSDaemonStateBackground;
 
@@ -87,6 +92,7 @@
 
 - (void)appWillEnterForeground:(NSNotification *)note {
     NSLog(@"[Daemon] 应用回到前台");
+    [self log:@"应用回到前台"];
     _isInBackground = NO;
     _state = TSDaemonStateRunning;
     [self endBackgroundTask];
@@ -118,13 +124,13 @@
 }
 
 - (void)stopAll {
-    [_heartbeatTimer invalidate];
-    _heartbeatTimer = nil;
+    [self stopHeartbeat];
     [self stopSilentAudio];
     [self endBackgroundTask];
     [self hideHUD];
     _state = TSDaemonStateStopped;
     NSLog(@"[Daemon] 所有服务已停止");
+    [self log:@"所有服务已停止"];
 }
 
 #pragma mark - 后台保活
@@ -135,11 +141,13 @@
     _bgTaskId = [[UIApplication sharedApplication] beginBackgroundTaskWithName:@"TrollAutoTouch.Daemon"
                                                               expirationHandler:^{
         NSLog(@"[Daemon] 后台任务即将到期，重新申请...");
+        [[TSDaemonManager shared] log:@"后台任务即将到期, 重新申请"];
         [[TSDaemonManager shared] endBackgroundTask];
         [[TSDaemonManager shared] beginBackgroundTask];
     }];
 
     NSLog(@"[Daemon] 后台任务已开始: %lu", (unsigned long)_bgTaskId);
+    [self log:[NSString stringWithFormat:@"后台任务已开始: %lu", (unsigned long)_bgTaskId]];
 }
 
 - (void)endBackgroundTask {
@@ -147,6 +155,7 @@
 
     [[UIApplication sharedApplication] endBackgroundTask:_bgTaskId];
     NSLog(@"[Daemon] 后台任务已结束: %lu", (unsigned long)_bgTaskId);
+    [self log:[NSString stringWithFormat:@"后台任务已结束: %lu", (unsigned long)_bgTaskId]];
     _bgTaskId = UIBackgroundTaskInvalid;
 }
 
@@ -173,8 +182,10 @@
         [_silentPlayer prepareToPlay];
         [_silentPlayer play];
         NSLog(@"[Daemon] 静默音频已开始(后台保活)");
+        [self log:@"静默音频(AVAudioPlayer)已开始"];
     } else {
         NSLog(@"[Daemon] 静默音频启动失败: %@", error);
+        [self log:[NSString stringWithFormat:@"静默音频(AVAudioPlayer)启动失败: %@", error]];
     }
 }
 
@@ -194,6 +205,7 @@
     if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
         if (!_isInBackground || !_silentPlayer) return;
         NSLog(@"[Daemon] 音频中断开始, 调度静默音频恢复");
+        [self log:@"音频中断开始, 调度静默音频恢复"];
         __weak typeof(self) weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
                        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -213,6 +225,7 @@
         AVAudioSession *session = [AVAudioSession sharedInstance];
         if (![session setActive:YES error:&err]) {
             NSLog(@"[Daemon] 恢复静默音频: 激活 session 失败 %@, 1s 后重试", err);
+            [self log:[NSString stringWithFormat:@"恢复静默音频失败: %@, 1s 后重试", err]];
             __weak typeof(self) weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
                            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -222,6 +235,7 @@
         }
         [self->_silentPlayer play];
         NSLog(@"[Daemon] 静默音频已恢复播放");
+        [self log:@"静默音频(AVAudioPlayer)已恢复播放"];
     });
 }
 
@@ -278,17 +292,59 @@
     return tmpPath;
 }
 
+// GCD 探针 timer: 后台 run loop 不跑时 NSTimer 不触发(iOS 16 上几秒内被挂起),
+// 必须用 GCD timer。每 5s 在主线程写一条保活状态到 touch.log。
+// 脚本停止后看最后几条探针:
+//   - 探针一直写到停止前一刻 → 进程仍在跑, 是脚本 Lua 报错或 app 崩溃;
+//   - 探针提前中断(进入后台后很快没新行) → 进程已被挂起/回收, 后台保活失效。
 - (void)startHeartbeat {
-    [_heartbeatTimer invalidate];
-    _heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:10.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // 发送心跳日志，保持 app 活跃
-            NSLog(@"[Daemon] ♥ 心跳 —— 后台剩余 %.1fs",
-                  [[UIApplication sharedApplication] backgroundTimeRemaining]);
-        });
-    }];
-    // 允许在后台模式下运行 timer
-    [[NSRunLoop mainRunLoop] addTimer:_heartbeatTimer forMode:NSRunLoopCommonModes];
+    [self stopHeartbeat];
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    _probeSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(_probeSource,
+                              dispatch_time(DISPATCH_TIME_NOW, 5.0 * NSEC_PER_SEC),
+                              5.0 * NSEC_PER_SEC,
+                              1.0 * NSEC_PER_SEC);
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_probeSource, ^{
+        [weakSelf probeTick];
+    });
+    dispatch_resume(_probeSource);
+    NSLog(@"[Daemon] 保活探针已启动(5s)");
+    [self log:@"保活探针已启动(每5s一条)"];
+}
+
+- (void)stopHeartbeat {
+    if (_probeSource) {
+        dispatch_source_cancel(_probeSource);
+        _probeSource = nil;
+    }
+}
+
+- (void)probeTick {
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [weakSelf writeProbe];
+    });
+}
+
+// 主线程写探针: backgroundTimeRemaining 必须主线程读
+- (void)writeProbe {
+    @autoreleasepool {
+        NSInteger remain = (NSInteger)MAX(0.0,
+            [[UIApplication sharedApplication] backgroundTimeRemaining]);
+        BOOL silent = _silentPlayer.isPlaying;
+        BOOL engine = [TSAudioKeepAlive engineRunning];
+        BOOL script = [TSLuaBridge shared].isRunning;
+        [[TSLogStore shared] append:[NSString stringWithFormat:
+            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d",
+            _isInBackground ? @"后台" : @"前台",
+            (int)remain, silent, engine, script]];
+    }
+}
+
+- (void)log:(NSString *)msg {
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[守护] %@", msg]];
 }
 
 #pragma mark - HUD 控制

@@ -14,6 +14,7 @@
 //
 
 #import "TSAudioKeepAlive.h"
+#import "TSLogStore.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <math.h>
@@ -80,9 +81,11 @@
     if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
         if (_refCount <= 0) return;   // 无持有者, 无需恢复
         NSLog(@"[TSAudioKeepAlive] 音频中断开始(被抢占), 启动快速恢复");
+        [self log:@"音频中断开始(被抢占), 启动快速恢复"];
         [self startQuickRecovery];
     } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
         NSLog(@"[TSAudioKeepAlive] 音频中断结束, 停止快速恢复并重建");
+        [self log:@"音频中断结束, 停止快速恢复并重建"];
         [self stopQuickRecovery];
         [self rebuildIfNeeded];
     }
@@ -96,6 +99,7 @@
 // 音频服务崩溃后重建, 旧 engine/player 全部失效
 - (void)onMediaServicesReset:(NSNotification *)note {
     NSLog(@"[TSAudioKeepAlive] 音频服务重置, 重建保活引擎");
+    [self log:@"音频服务重置, 重建保活引擎"];
     @synchronized (self) {
         [self teardownEngine];
     }
@@ -144,10 +148,12 @@
                      withOptions:AVAudioSessionCategoryOptionMixWithOthers
                            error:&err]) {
             NSLog(@"[TSAudioKeepAlive] 设置 audio session 失败: %@", err);
+            [self log:[NSString stringWithFormat:@"设置 audio session 失败: %@", err]];
             return;
         }
         if (![session setActive:YES error:&err]) {
             NSLog(@"[TSAudioKeepAlive] 激活 audio session 失败: %@", err);
+            [self log:[NSString stringWithFormat:@"激活 audio session 失败: %@", err]];
             return;
         }
 
@@ -203,6 +209,7 @@
                    && self->_player && self->_player.isPlaying;
             if (ok) return;
             NSLog(@"[TSAudioKeepAlive] 保活引擎未在运行, 自动重建");
+            [self log:@"保活引擎未在运行, 自动重建"];
             [self teardownEngine];
             [self buildAndStartEngine];
         }
@@ -281,6 +288,20 @@
             self->_watchdogTimer = nil;
         }
     });
+}
+
+#pragma mark - 日志 / 状态查询
+
+- (void)log:(NSString *)msg {
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[保活] %@", msg]];
+}
+
++ (BOOL)engineRunning {
+    TSAudioKeepAlive *ka = [TSAudioKeepAlive shared];
+    @synchronized (ka) {
+        return ka->_engine && ka->_engine.isRunning
+            && ka->_player && ka->_player.isPlaying;
+    }
 }
 
 @end

@@ -28,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 停止静音保活 (脚本结束时调用; 幂等)
 - (void)stop;
 
+/// 保活引擎当前是否在运行(供后台保活探针日志查询)
++ (BOOL)engineRunning;
+
 @end
 
 NS_ASSUME_NONNULL_END

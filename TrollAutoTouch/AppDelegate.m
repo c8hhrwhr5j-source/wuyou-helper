@@ -16,6 +16,7 @@
 #import "Script/TSLuaBridge.h"
 #import "Script/TSHTTPServer.h"
 #import "Common/TSPaths.h"
+#import "Common/TSLogStore.h"
 
 // TAS 服务开关 key (与 TSSettingsViewController 一致, 默认开)
 static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
@@ -121,17 +122,31 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
+    [[TSLogStore shared] append:@"[App] willResignActive 即将失活"];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
+    [[TSLogStore shared] append:@"[App] didEnterBackground 进入后台"];
     [[TSDaemonManager shared] beginBackgroundTask];
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
+    [[TSLogStore shared] append:@"[App] willEnterForeground 回到前台"];
     [[TSDaemonManager shared] endBackgroundTask];
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
+    [[TSLogStore shared] append:@"[App] didBecomeActive 激活完成"];
+}
+
+// iOS 16 上后台 app 被回收前系统常先发内存警告, 若日志停在内存警告之后
+// 基本可判定进程是被 Jetsam 回收(后台保活失效), 而非脚本报错。
+- (void)applicationDidReceiveMemoryWarning:(UIApplication *)application {
+    [[TSLogStore shared] append:@"[App] didReceiveMemoryWarning 收到内存警告!"];
+}
+
+- (void)applicationWillTerminate:(UIApplication *)application {
+    [[TSLogStore shared] append:@"[App] willTerminate 即将终止"];
 }
 
 @end
