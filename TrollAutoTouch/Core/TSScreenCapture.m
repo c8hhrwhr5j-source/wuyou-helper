@@ -395,15 +395,16 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                 // iOS 16+ createScreenIOSurface 返回 10-bit 广色域 surface(Display P3)。
                 // 官方定义: 'w30r' = little-endian RGB101010, 2 MSB 为 0。
                 // 32-bit little-endian 打包(32-bit 值 = 内存 4 字节按小端组合):
-                //   bits [9:0]=R(10b), [19:10]=G(10b), [29:20]=B(10b), [31:30]=未用。
-                //   ★R 在最低位, B 在最高位(此前注释/变量把 R/B 写反,
-                //   导致 P3→sRGB 转换分支 R/B 错乱, 截图颜色严重异常)。
+                //   bits [31:30]=未用, [29:20]=R(10b), [19:10]=G(10b), [9:0]=B(10b)。
+                // ★R 在最高 10 位(bit 29:20), B 在最低 10 位(bit 9:0)。
+                //   真机实测验证(iOS 16.6 截屏): 曾一度按"R 在最低位"解析, 结果截图
+                //   R/B 互换(红蓝颠倒); 还原为 R 高位后颜色通道正确。
                 // Display P3 传递函数 = sRGB OETF, 10-bit 线性化后走同一 P3→sRGB 矩阵。
                 // 注: 此格式无 alpha, 剩余 2 bit 未定义。
                 uint32_t px = *(const uint32_t *)(src + x * 4);
-                uint16_t r10 = (px >>  0) & 0x3FF;
+                uint16_t r10 = (px >> 20) & 0x3FF;
                 uint16_t g10 = (px >> 10) & 0x3FF;
-                uint16_t b10 = (px >> 20) & 0x3FF;
+                uint16_t b10 = (px >>  0) & 0x3FF;
                 if (x == cx && y == cy) {
                     dbgSrc[0] = r10; dbgSrc[1] = g10; dbgSrc[2] = b10; dbgSrcIs10bit = YES;
                 }
