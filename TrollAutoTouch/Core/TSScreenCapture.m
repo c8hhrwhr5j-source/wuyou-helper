@@ -287,14 +287,61 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
         }
     }
 
-    // ---- 读取 ----
-    // iOS 16+ 上 _UICreateCGImageFromIOSurface 会把 dstSurface 标称的格式/色彩空间
-    // 当成真实属性处理, 而 IOSurfaceAcceleratorTransferSurface 仅做像素转储,
-    // 该函数对源格式/位深的解释可能与实际不符, 导致像素通道严重错乱
-    // (用户反馈截图呈"热成像"伪彩色, 找色完全失败)。
-    // 因此强制改用 IOSurfaceLock 直接读取我们自建的 BGRA8 dstSurface:
-    // 格式已知、可按 BGRA 稳定解析, 并在下方统一做 P3->sRGB 转换。
-    (void)_uiCreateCGImageFn; // 保留初始化, 不再调用
+    // ---- 最优路径: _UICreateCGImageFromIOSurface(原版 AutoTouch 读取端, 系统色彩管理) ----
+    // 历史: 曾用该函数读取"加速器转储后的 BGRA8 dst"出现"热成像"伪彩(加速器仅像素转储,
+    // 格式/位深解释不符), 故当时改用手动读取。现加速器在 iOS 16 TrollStore 下失败
+    // (lastAccelOK=false, 疑缺 IOSurfaceAccelerator 权限), readSurface 即源 surface:
+    // 对源 w30r 用 _UICreateCGImageFromIOSurface 是 UIKit 官方解释(带私有元数据),
+    // 与原版 AutoGoRunner 同机制, 色彩由 CoreGraphics 自动管理, 无"热成像"问题。
+    // iOS 16 后台 w30r(10-bit Display P3) 内容: 手动 P3->sRGB(转换/截断) 两种实测都降饱和
+    // 发灰; 改由 CoreGraphics 按 surface 标称色彩空间自动转换到 sRGB context, 与原版
+    // AutoGoRunner(createScreenIOSurface -> _UICreateCGImageFromIOSurface -> PNG) 同机制。
+    // 对自建 sRGB BGRA8 dstSurface(加速器成功/CARenderServer 路径) 亦安全(sRGB->sRGB 恒等)。
+    if (_uiCreateCGImageFn) {
+        CGImageRef cg = _uiCreateCGImageFn(readSurface);
+        if (cg) {
+            size_t cw = CGImageGetWidth(cg), ch = CGImageGetHeight(cg);
+            // 诊断: 记录 CoreGraphics 解析出的 CGImage 色彩空间(判断是否需手动补 P3)
+            NSString *imgCSDesc = @"null";
+            CGColorSpaceRef imgCS = CGImageGetColorSpace(cg);
+            if (imgCS) {
+                CFStringRef nm = CGColorSpaceCopyName(imgCS);
+                if (nm) {
+                    imgCSDesc = [NSString stringWithFormat:@"%@", nm];
+                    CFRelease(nm);
+                } else {
+                    imgCSDesc = @"(unnamed)";
+                }
+            }
+            if (cw > 0 && ch > 0) {
+                uint8_t *cgOut = malloc(cw * ch * 4);
+                if (cgOut) {
+                    // 参数与已验证的 _extractRGBAFromImage 一致(DeviceRGB + RGBA 内存序)
+                    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                    CGContextRef ctx = CGBitmapContextCreate(cgOut, cw, ch, 8, cw * 4, cs,
+                        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                    if (ctx) {
+                        CGContextDrawImage(ctx, CGRectMake(0, 0, cw, ch), cg);
+                        CGContextRelease(ctx);
+                        CGColorSpaceRelease(cs);
+                        CGImageRelease(cg);
+                        if (dstSurface) { CFRelease(dstSurface); }
+                        if (accel) { CFRelease(accel); }
+                        *pixelsOut = cgOut;
+                        *widthOut = (int)cw;
+                        *heightOut = (int)ch;
+                        self.lastColorDecision = [NSString stringWithFormat:@"system(_UICreateCGImageFromIOSurface->sRGB, imgCS=%@)", imgCSDesc];
+                        self.lastP3Applied = NO; // 色彩转换由 CoreGraphics 自动完成
+                        return YES;
+                    }
+                    CGColorSpaceRelease(cs);
+                    free(cgOut);
+                }
+            }
+            CGImageRelease(cg);
+        }
+        // 创建/绘制失败则回退手动读取
+    }
 
     // ---- 读取: 加锁读取 readSurface(加速器成功时即 dstSurface; 否则为源 surface) ----
     kern_return_t lk = lockFn(readSurface, 0 /*对齐原版 mov w1,#0*/, NULL);
