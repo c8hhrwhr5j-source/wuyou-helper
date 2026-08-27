@@ -257,64 +257,15 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     }
 
     // ---- 读取 ----
-    // 首选(AutoTouch 原版主路径): 加速器转储到自建 BGRA surface 后, 用 UIKit 私有函数
-    // _UICreateCGImageFromIOSurface(dstSurface) 直接生成 CGImage(反汇编 0x100057378 确认)。
-    // 该函数内部走系统 IO 路径, 比手动 IOSurfaceLock 更可靠(后台/跨 App 场景)。
-    if (readSurface == dstSurface && dstSurface && _uiCreateCGImageFn) {
-        CGImageRef cg = _uiCreateCGImageFn(dstSurface);
-        if (cg) {
-            size_t cw = CGImageGetWidth(cg);
-            size_t ch = CGImageGetHeight(cg);
-            if (cw > 0 && ch > 0 && cw == srcW && ch == srcH) {
-                uint8_t *out = malloc(cw * ch * 4);
-                if (out) {
-                    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-                    CGContextRef ctx = CGBitmapContextCreate(out, cw, ch, 8, cw * 4, cs,
-                                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-                    CGColorSpaceRelease(cs);
-                    if (ctx) {
-                        CGContextDrawImage(ctx, CGRectMake(0, 0, cw, ch), cg);
-                        CGContextRelease(ctx);
-                        CGImageRelease(cg);
-                        // P3 屏: 加速器转储路径输出的是未转换的 P3 原始像素
-                        // (IOSurfaceAcceleratorTransferSurface 只做像素拷贝不做色彩转换,
-                        //  而 dstSurface 的 ColorSpace 属性被标成 sRGB, _UICreateCGImageFromIOSurface
-                        //  会把它当 sRGB 包装, 再画到 DeviceRGB context 时不触发色彩管理),
-                        // 必须与下方手动读取路径一致地转换到 sRGB, 否则取色/找色颜色偏差。
-                        if (_screenUsesP3()) {
-                            _ensureColorLUTs();
-                            for (size_t y = 0; y < ch; y++) {
-                                uint8_t *dst = out + y * cw * 4;
-                                for (size_t x = 0; x < cw; x++) {
-                                    uint8_t R = dst[x*4+0];
-                                    uint8_t G = dst[x*4+1];
-                                    uint8_t B = dst[x*4+2];
-                                    float rl = _srgbToLinearLUT[R];
-                                    float gl = _srgbToLinearLUT[G];
-                                    float bl = _srgbToLinearLUT[B];
-                                    dst[x*4+0] = _srgbEncode( 1.224940f*rl - 0.224940f*gl);
-                                    dst[x*4+1] = _srgbEncode(-0.042057f*rl + 1.042057f*gl);
-                                    dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
-                                    dst[x*4+3] = 255;
-                                }
-                            }
-                        }
-                        if (dstSurface) { CFRelease(dstSurface); }
-                        if (accel) { CFRelease(accel); }
-                        *pixelsOut = out;
-                        *widthOut = (int)cw;
-                        *heightOut = (int)ch;
-                        return YES;
-                    }
-                    free(out);
-                }
-            }
-            CGImageRelease(cg);
-        }
-        NSLog(@"[TSScreenCapture] _UICreateCGImageFromIOSurface 不可用/失败, 回退手动读取");
-    }
+    // iOS 16+ 上 _UICreateCGImageFromIOSurface 会把 dstSurface 标称的格式/色彩空间
+    // 当成真实属性处理, 而 IOSurfaceAcceleratorTransferSurface 仅做像素转储,
+    // 该函数对源格式/位深的解释可能与实际不符, 导致像素通道严重错乱
+    // (用户反馈截图呈"热成像"伪彩色, 找色完全失败)。
+    // 因此强制改用 IOSurfaceLock 直接读取我们自建的 BGRA8 dstSurface:
+    // 格式已知、可按 BGRA 稳定解析, 并在下方统一做 P3->sRGB 转换。
+    (void)_uiCreateCGImageFn; // 保留初始化, 不再调用
 
-    // ---- 回退: 加锁读取(对齐 AutoTouch: IOSurfaceLock 第三参数 options 用 0 而非只读 1) ----
+    // ---- 读取: 加锁读取 readSurface(加速器成功时即 dstSurface; 否则为源 surface) ----
     kern_return_t lk = lockFn(readSurface, 0 /*对齐原版 mov w1,#0*/, NULL);
     if (lk != KERN_SUCCESS) {
         NSLog(@"[TSScreenCapture] IOSurfaceLock 失败 kr=%d", (int)lk);
