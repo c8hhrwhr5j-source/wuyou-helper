@@ -39,12 +39,18 @@
 // 此转换把所有像素统一到标准 sRGB，保证截图、取色、Lua 脚本比对颜色完全一致。
 // sRGB 屏（如 iPhone 6s）检测为 NO，行为与原版完全一致，无任何性能损失。
 static float _srgbToLinearLUT[256];
+static float _p3ToLinearLUT10[1024]; // 10-bit Display P3(30RGBLE, 'w30r') 线性化
 static uint8_t _linearToSrgbLUT[4096];
 
 static void _initColorLUTs(void) {
     for (int i = 0; i < 256; i++) {
         double v = i / 255.0;
         _srgbToLinearLUT[i] = (float)(v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
+    }
+    for (int i = 0; i < 1024; i++) {
+        // Display P3 传递函数 = sRGB OETF, 10-bit 域 [0,1023]
+        double v = i / 1023.0;
+        _p3ToLinearLUT10[i] = (float)(v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
     }
     for (int i = 0; i < 4096; i++) {
         double v = i / 4095.0;
@@ -325,6 +331,29 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                     dst[x*4+0] = R;
                     dst[x*4+1] = G;
                     dst[x*4+2] = B;
+                    dst[x*4+3] = 255;
+                }
+            } else if (fmt == 0x77333072 /* 'w30r': kCVPixelFormatType_30RGBLEPackedWideGamut */) {
+                // iOS 16+ createScreenIOSurface 返回 10-bit 广色域 surface(Display P3):
+                // 32-bit little-endian 打包: [31:30]=未用, [29:20]=R(10b), [19:10]=G(10b), [9:0]=B(10b)。
+                // Display P3 传递函数 = sRGB OETF, 10-bit 线性化后走同一 P3→sRGB 矩阵。
+                // 注: 此格式无 alpha, 剩余 2 bit 未定义。
+                uint32_t px = *(const uint32_t *)(src + x * 4);
+                uint16_t r10 = (px >> 20) & 0x3FF;
+                uint16_t g10 = (px >> 10) & 0x3FF;
+                uint16_t b10 = (px >>  0) & 0x3FF;
+                if (p3ToSrgb) {
+                    float rl = _p3ToLinearLUT10[r10];
+                    float gl = _p3ToLinearLUT10[g10];
+                    float bl = _p3ToLinearLUT10[b10];
+                    dst[x*4+0] = _srgbEncode( 1.224940f*rl - 0.224940f*gl);
+                    dst[x*4+1] = _srgbEncode(-0.042057f*rl + 1.042057f*gl);
+                    dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
+                    dst[x*4+3] = 255;
+                } else {
+                    dst[x*4+0] = (uint8_t)(b10 >> 2);
+                    dst[x*4+1] = (uint8_t)(g10 >> 2);
+                    dst[x*4+2] = (uint8_t)(r10 >> 2);
                     dst[x*4+3] = 255;
                 }
             } else {
