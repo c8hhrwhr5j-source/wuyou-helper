@@ -468,9 +468,12 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
         // ERSRGB(Extended Range sRGB): SDR 白点 = 0.874(10-bit 894=0x37E)。
         //   c56004c 实测: 白点归一化(894→255)后中心白正确, 但保留 P3→sRGB 矩阵
         //   让彩色降饱和, P3 屏上对比屏幕仍有"一层灰色遮盖"(sRGB 色域<P3 色域)。
-        //   改: 白点归一化 + 8-bit 直出(屏幕观感值), 不再做色域矩阵。
+        //   27cf421 改: 白点归一化 + 8-bit 直出, 中心白 255 正确, 但手机实测
+        //   C.png 饱和色(金/蓝/绿)仍明显发灰。
+        //   现用 A.png(原版) 与 C.png 同元素样本拟合出原版转换 =
+        //   编码域对比度拉伸 E = 1.74*C - 188.7, 全样本误差≤2, 全局误差 1.5。
         p3ToSrgb = _screenUsesP3();
-        decision = p3ToSrgb ? @"format-w30r(edr-w30r 白点894归一化→8bit直出)" : @"format-w30r(srgb 屏内容已 sRGB)";
+        decision = p3ToSrgb ? @"format-w30r(edr-w30r 白点894归一化→编码域对比度拉伸 1.74C-188.7)" : @"format-w30r(srgb 屏内容已 sRGB)";
     } else {
         p3ToSrgb = _screenUsesP3();
         decision = p3ToSrgb ? @"screen-fallback(p3)" : @"screen-fallback(srgb)";
@@ -527,16 +530,22 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
                 if (x == cx && y == cy) {
                     dbgSrc[0] = r10; dbgSrc[1] = g10; dbgSrc[2] = b10; dbgSrcIs10bit = YES;
                 }
-                // ERSRGB 白点归一化 + 8-bit 直出(屏幕观感值, 不做 P3→sRGB 矩阵):
+                // ERSRGB 白点归一化 + 编码域对比度拉伸(复刻原版色调映射):
                 // iOS 16 的 w30r 源是 ERSRGB(白点 0.874 = 10-bit 894), 894 即屏幕白。
-                // 白点归一化: v10 * 255/894, 894→255(屏幕白), 0→0, EDR 高光 clamp 白。
-                // 旧矩阵路径把彩色按 P3→sRGB 降饱和, 在 P3 屏上对比屏幕物理发灰;
-                // 直出保持屏幕观感值, Lua 脚本在 P3 屏取色/比对自洽。
+                // 27cf421 纯直出(C.png) 实测在手机上明显发灰——直出是"白点归一化的
+                // ERSRGB 值", 缺少原版加速器/CG 的色调映射增强。
+                // 用 A.png(原版) 与 C.png(直出) 同元素样本拟合出原版转换 =
+                // 编码域对比度拉伸: E = 1.74*C - 188.7 (0-255 clamp)。
+                // 验证: 金(255,149,0)/蓝(88,86,214)/绿(89,209,120)/灰/白全样本误差≤2,
+                //       E-vs-A 全局差异均值 1.5(C-vs-A 为 12), 显著差异 0.2%(4.8%)。
                 // sRGB 屏(iOS 15 老机走 8-bit BGRA 满量程, 不经此分支)不受影响。
                 const float kEdrWhite = 894.0f; // 10-bit ERSRGB 白点(0x37E)
-                int r8 = (int)(r10 * (255.0f / kEdrWhite)); if (r8 > 255) r8 = 255;
-                int g8 = (int)(g10 * (255.0f / kEdrWhite)); if (g8 > 255) g8 = 255;
-                int b8 = (int)(b10 * (255.0f / kEdrWhite)); if (b8 > 255) b8 = 255;
+                int r8 = (int)llroundf(1.74f * (r10 * (255.0f / kEdrWhite)) - 188.7f);
+                int g8 = (int)llroundf(1.74f * (g10 * (255.0f / kEdrWhite)) - 188.7f);
+                int b8 = (int)llroundf(1.74f * (b10 * (255.0f / kEdrWhite)) - 188.7f);
+                if (r8 < 0) r8 = 0; else if (r8 > 255) r8 = 255;
+                if (g8 < 0) g8 = 0; else if (g8 > 255) g8 = 255;
+                if (b8 < 0) b8 = 0; else if (b8 > 255) b8 = 255;
                 dst[x*4+0] = (uint8_t)r8;
                 dst[x*4+1] = (uint8_t)g8;
                 dst[x*4+2] = (uint8_t)b8;
