@@ -332,6 +332,14 @@ static NSData *WSTextFrame(NSString *text) {
     NSString *method = reqParts[0];
     NSString *path = reqParts[1];
 
+    // 剥离查询串(?a=b), 路由用纯路径, query 供个别端点使用(如 ?path=CARenderServer)
+    NSString *query = @"";
+    NSRange qRange = [path rangeOfString:@"?"];
+    if (qRange.location != NSNotFound) {
+        query = [path substringFromIndex:qRange.location + 1];
+        path = [path substringToIndex:qRange.location];
+    }
+
     // 解析请求体
     NSRange hEnd = [raw rangeOfString:@"\r\n\r\n"];
     NSData *body = nil;
@@ -351,7 +359,7 @@ static NSData *WSTextFrame(NSString *text) {
     } else if ([path hasPrefix:@"/ui/"]) {
         [self serveUIFile:clientFd path:[path substringFromIndex:4]];
     } else if ([path isEqualToString:@"/api/screenshot"]) {
-        [self serveScreenshot:clientFd];
+        [self serveScreenshot:clientFd query:query];
     } else if ([path isEqualToString:@"/api/stream"]) {
         [self serveMJPEG:clientFd];
     } else if ([path isEqualToString:@"/api/device"]) {
@@ -677,9 +685,19 @@ static NSData *WSTextFrame(NSString *text) {
     }]];
 }
 
-- (void)serveScreenshot:(int)clientFd {
+- (void)serveScreenshot:(int)clientFd query:(NSString *)query {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIImage *img = [[TSScreenCapture shared] captureImage];
+        // 调试开关: ?path=CARenderServer 等可强制指定截屏路径, 用于对比各路径颜色
+        NSString *pathArg = nil;
+        if (query.length) {
+            for (NSString *kv in [query componentsSeparatedByString:@"&"]) {
+                NSArray *parts = [kv componentsSeparatedByString:@"="];
+                if (parts.count == 2 && [parts[0] isEqualToString:@"path"]) {
+                    pathArg = [parts[1] stringByRemovingPercentEncoding];
+                }
+            }
+        }
+        UIImage *img = [[TSScreenCapture shared] captureImageWithPath:pathArg];
         dispatch_async(self->_serverQueue, ^{
             if (!img) {
                 NSString *reason = [TSScreenCapture shared].lastError ?: @"未知原因";

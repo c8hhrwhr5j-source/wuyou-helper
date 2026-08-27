@@ -1446,9 +1446,19 @@ static const char *_gsSurfaceKeys[] = {
 }
 
 - (UIImage *)captureImage {
+    return [self captureImageWithPath:nil];
+}
+
+- (UIImage *)captureImageWithPath:(NSString *)path {
     uint8_t *pixels = NULL;
     int w = 0, h = 0;
-    if (![self captureScreenToRGBA:&pixels width:&w height:&h] || !pixels) { return nil; }
+    BOOL ok;
+    if (path.length > 0) {
+        ok = [self _tryCapturePath:path pixelsOut:&pixels width:&w height:&h];
+    } else {
+        ok = [self captureScreenToRGBA:&pixels width:&w height:&h];
+    }
+    if (!ok || !pixels) { return nil; }
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(pixels, w, h, 8, w * 4, cs,
         kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);

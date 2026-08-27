@@ -62,6 +62,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 截屏并返回 UIImage(便于调试/预览)。
 - (nullable UIImage *)captureImage;
 
+/// 指定截屏路径并返回 UIImage(调试用, 例如 @"CARenderServer"/@"UIScreenSurface"/@"GlobalDisplay"; nil=默认链路)
+- (nullable UIImage *)captureImageWithPath:(nullable NSString *)path;
+
 /// 截图链路诊断信息(供 HTTP /api/screencap-diag 使用, 便于排查各路径失败原因)
 - (NSDictionary *)diagnostics;
 
