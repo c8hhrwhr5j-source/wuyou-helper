@@ -310,6 +310,10 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     if (p3ToSrgb) {
         _ensureColorLUTs();
     }
+    // 诊断: 记录屏幕中心像素的源值(10-bit 原始/8-bit)与转换后输出值
+    __block uint32_t dbgSrc[3] = {0, 0, 0};
+    __block BOOL dbgSrcIs10bit = NO;
+    const size_t cx = w / 2, cy = h / 2;
     for (size_t y = 0; y < h; y++) {
         uint8_t *src = (uint8_t *)base + y * bpr;
         uint8_t *dst = out + y * w * 4;
@@ -318,6 +322,9 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                 uint8_t R = src[x*4+2];
                 uint8_t G = src[x*4+1];
                 uint8_t B = src[x*4+0];
+                if (x == cx && y == cy) {
+                    dbgSrc[0] = R; dbgSrc[1] = G; dbgSrc[2] = B; dbgSrcIs10bit = NO;
+                }
                 if (p3ToSrgb) {
                     // Display P3 → sRGB（线性域 3x3 矩阵，D65 白点）
                     float rl = _srgbToLinearLUT[R];
@@ -342,6 +349,9 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                 uint16_t r10 = (px >> 20) & 0x3FF;
                 uint16_t g10 = (px >> 10) & 0x3FF;
                 uint16_t b10 = (px >>  0) & 0x3FF;
+                if (x == cx && y == cy) {
+                    dbgSrc[0] = r10; dbgSrc[1] = g10; dbgSrc[2] = b10; dbgSrcIs10bit = YES;
+                }
                 if (p3ToSrgb) {
                     float rl = _p3ToLinearLUT10[r10];
                     float gl = _p3ToLinearLUT10[g10];
@@ -361,9 +371,24 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                 dst[x*4+1] = src[x*4+1];
                 dst[x*4+2] = src[x*4+2];
                 dst[x*4+3] = src[x*4+3];
+                if (x == cx && y == cy) {
+                    dbgSrc[0] = src[x*4+2]; dbgSrc[1] = src[x*4+1]; dbgSrc[2] = src[x*4+0]; dbgSrcIs10bit = NO;
+                }
             }
         }
     }
+    // 诊断: 中心像素源值/输出值
+    if (dbgSrcIs10bit) {
+        self.lastSrcPx = [NSString stringWithFormat:@"center src 10bit R=0x%03X(%u) G=0x%03X(%u) B=0x%03X(%u)",
+                          (unsigned)dbgSrc[0], (unsigned)dbgSrc[0],
+                          (unsigned)dbgSrc[1], (unsigned)dbgSrc[1],
+                          (unsigned)dbgSrc[2], (unsigned)dbgSrc[2]];
+    } else {
+        self.lastSrcPx = [NSString stringWithFormat:@"center src 8bit R=%u G=%u B=%u",
+                          (unsigned)dbgSrc[0], (unsigned)dbgSrc[1], (unsigned)dbgSrc[2]];
+    }
+    self.lastOutPx = [NSString stringWithFormat:@"center out R=%u G=%u B=%u A=%u",
+                      out[(cy*w+cx)*4+2], out[(cy*w+cx)*4+1], out[(cy*w+cx)*4+0], out[(cy*w+cx)*4+3]];
     unlockFn(readSurface, 0, NULL);
     if (dstSurface) { CFRelease(dstSurface); }
     if (accel) { CFRelease(accel); }
@@ -1332,6 +1357,8 @@ static const char *_gsSurfaceKeys[] = {
         diag[@"lastReadFormat"] = self.lastReadFormat ?: @"(无)";
         diag[@"lastAccelOK"] = @(self.lastAccelOK);
         diag[@"lastP3Applied"] = @(self.lastP3Applied);
+        diag[@"lastSrcPx"] = self.lastSrcPx ?: @"(无)";
+        diag[@"lastOutPx"] = self.lastOutPx ?: @"(无)";
         diag[@"screenP3"] = @(_screenUsesP3());
     } @catch (NSException *e) {
         diag[@"exception"] = [NSString stringWithFormat:@"%@: %@", e.name, e.reason];
@@ -1347,6 +1374,8 @@ static const char *_gsSurfaceKeys[] = {
     self.lastReadFormat = nil;
     self.lastAccelOK = NO;
     self.lastP3Applied = NO;
+    self.lastSrcPx = nil;
+    self.lastOutPx = nil;
 
     // 后台状态: 切换到后台专用路径。
     UIApplicationState bgState = [UIApplication sharedApplication].applicationState;

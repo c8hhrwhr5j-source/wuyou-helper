@@ -45,6 +45,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL lastAccelOK;
 /// 最近一次是否执行了 P3->sRGB 转换
 @property (nonatomic, assign) BOOL lastP3Applied;
+/// 最近一次读取的屏幕中心像素源值(10-bit 原始值或 8-bit 通道值, 诊断用)
+@property (nonatomic, strong, nullable) NSString *lastSrcPx;
+/// 最近一次读取的屏幕中心像素转换后输出值(诊断用)
+@property (nonatomic, strong, nullable) NSString *lastOutPx;
 
 /// 截取整屏，返回 RGBA 像素缓冲(用于找色)。
 /// @param pixelsOut  输出像素数组(调用者用完需 free)。每像素 4 字节 RGBA。
