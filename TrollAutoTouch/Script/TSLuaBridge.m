@@ -1279,20 +1279,16 @@ static int l_sys_setFloatBallPoint(lua_State *L) {
     CGFloat sy = (CGFloat)luaL_checknumber(L, 2);
     lua_log([NSString stringWithFormat:@"[setFloatBallPoint] script(%.0f, %.0f)", sx, sy]);
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 脚本坐标(像素) -> 设备当前方向屏幕显示坐标(逻辑点)
-        // 与 tap/findColor 路径一致: 脚本坐标先转设备当前方向像素, 再除 scale 得逻辑点
-        // 注意: 目标方向必须是设备实际方向(与悬浮球窗口 _landscape/_effectiveScreenSize
-        // 一致)。tsCurrentOrientation 返回的是 app 窗口方向, 本 app 固定竖屏恒为 0,
-        // 会导致横屏下双重旋转把球移到错误位置(右下角坐标跑到左下角)。
-        CGPoint scriptPx = CGPointMake(sx, sy);
-        NSInteger curOri = [[TSHUDWindow shared] currentScriptOrientation];
-        CGPoint displayPx = tsTransformPixelPoint(scriptPx, s_scriptOrientation, curOri, tsPortraitPixelSize());
+        // 悬浮球移动固定按竖屏原始坐标系 (0 旋转): 不做脚本方向/设备方向旋转换算。
+        // 脚本传入的物理像素直接除以 scale 作为竖屏窗口逻辑点坐标,
+        // 横屏时位置随窗口显示旋转(严格竖屏语义), 由脚本自己调坐标。
+        // 显示布局(展开/收起/按钮朝向)走 setBallPointPortrait 内部, 与旧逻辑一致。
         CGFloat scale = [UIScreen mainScreen].scale;
-        CGPoint displayPt = CGPointMake(displayPx.x / scale, displayPx.y / scale);
+        CGPoint displayPt = CGPointMake(sx / scale, sy / scale);
 
         TSHUDWindow *win = [TSHUDWindow shared];
         if (win.hidden) [win show];
-        [win setBallPoint:displayPt];
+        [win setBallPointPortrait:displayPt];
     });
     return 0;
 }

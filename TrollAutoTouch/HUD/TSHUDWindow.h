@@ -38,6 +38,12 @@ typedef NS_ENUM(NSInteger, TSHUDAction) {
 /// 限制在屏内, 横竖屏自适应。线程安全 (内部派发主线程)。
 - (void)setBallPoint:(CGPoint)point;
 
+/// 脚本 setFloatBallPoint 移动专用: 严格按竖屏窗口坐标系放置悬浮球 (0 旋转)。
+/// 坐标 x/y 永远按竖屏坐标系解释, 不做脚本方向/设备方向旋转换算,
+/// 横屏时位置随窗口显示旋转。显示布局(展开/收起/按钮朝向)与 setBallPoint 一致。
+/// 线程安全 (内部派发主线程)。
+- (void)setBallPointPortrait:(CGPoint)point;
+
 /// 冷启动控制接口 /float 支持:
 /// side=0 靠屏幕左边缘, 1 靠右边缘; yPx 为悬浮球中心垂直位置(物理像素, 按屏幕 scale 换算);
 /// yPx < 0 表示把悬浮球移到屏幕外隐藏。线程安全 (内部派发主线程)。

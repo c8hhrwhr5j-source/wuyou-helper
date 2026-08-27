@@ -859,11 +859,29 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         });
         return;
     }
+    [self applyBallFrame:point collapsed:!_expanded portraitOnly:NO];
+}
+
+// 脚本 setFloatBallPoint 移动专用: 严格按竖屏窗口坐标系放置 (0 旋转)。
+// 坐标 x/y 永远按竖屏坐标系解释, 不做脚本方向/设备方向旋转换算,
+// 横屏时位置随窗口显示旋转。显示布局与 setBallPoint 完全一致。
+- (void)setBallPointPortrait:(CGPoint)point {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setBallPointPortrait:point];
+        });
+        return;
+    }
+    [self applyBallFrame:point collapsed:!_expanded portraitOnly:YES];
+}
+
+// 统一的球体布局: portraitOnly=YES 表示 point 已是竖屏窗口坐标(竖屏分支放置),
+// 否则按 setBallPoint 原有语义(横屏时 point 为设备显示坐标, 需旋转换算)。
+- (void)applyBallFrame:(CGPoint)point collapsed:(BOOL)collapsed portraitOnly:(BOOL)portraitOnly {
     CGRect frame = self.frame;
     CGSize screen = [self _effectiveScreenSize];
-    BOOL collapsed = !_expanded; // 收起: 只按球本体(44)定位, 不把展开面板尺寸算入
 
-    if (_landscape) {
+    if (_landscape && !portraitOnly) {
         // 横屏: 窗口坐标系为竖屏基准(窗口 x 范围 screen.height, y 范围 screen.width),
         // point 为设备显示坐标(px 沿屏幕水平, py 沿屏幕竖直)。显示坐标 -> 竖屏窗口坐标:
         //   LandscapeLeft(home右,3): px=wy, py=screen.height-wx -> wx=screen.height-py, wy=px
