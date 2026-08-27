@@ -116,16 +116,16 @@ jobs:
           mkdir -p build
           # 警告: 不能在这里传 OTHER_LDFLAGS，命令行会整体覆盖 project.yml 中的
           #       框架链接参数（-framework UIKit ...），导致链接失败！
-          # ARCHS="arm64 arm64e" + ONLY_ACTIVE_ARCH=NO: app 编译为 universal。
-          # 必须保持 chained fixups 启用（不传 ENABLE_CHAINED_FIXUPS=NO，project.yml
-          # 也不含 -Wl,-no_fixup_chains）：iOS 16+ 的 dyld 对 arm64e 强制要求
-          # LC_DYLD_CHAINED_FIXUPS，禁用会导致 iOS 16 设备启动闪退。
+          # ARCHS="arm64": 只编 arm64。iOS 16+ 的 dyld 对 arm64e 强制要求
+          # LC_DYLD_CHAINED_FIXUPS，且 Procursus ldid 重签 arm64e 的 ptrauth
+          # 指针链易出问题，iOS 16 上实测仍闪退。纯 arm64 slice 在 iOS 15/16
+          # 的 arm64e 设备上均可直接运行（arm64 是 arm64e 子集），不受此限制。
           # 日志写入文件，失败时打印完整日志并立即退出（不再被管道吞掉退出码）。
           if ! xcodebuild -project TrollAutoTouch.xcodeproj \
             -scheme TrollAutoTouch \
             -configuration Release \
             -sdk iphoneos \
-            ARCHS="arm64 arm64e" \
+            ARCHS="arm64" \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -202,8 +202,8 @@ jobs:
 
           echo ""
           echo "=== 架构 ==="
-          lipo -info "$BIN"
-          file "$BIN"
+          lipo -info "$BIN" | tee /tmp/ci-binary-info.txt
+          file "$BIN" | tee -a /tmp/ci-binary-info.txt
 
           echo ""
           echo "=== 清理旧签名 ==="
@@ -249,9 +249,14 @@ jobs:
           echo "[OK] entitlements 已从 git 对象恢复并通过 plutil 校验"
 
           # 2) 诊断: 二进制是否带 chained fixups load command
-          #    (必须出现 LC_DYLD_CHAINED_FIXUPS: iOS 16+ arm64e 依赖它, 缺失会启动闪退)
+          #    (iOS 16+ arm64e 依赖 LC_DYLD_CHAINED_FIXUPS; arm64 不受强制)
           echo "[*] 二进制签名结构:"
-          otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
+          {
+            echo "--- load commands ---"
+            otool -l "$BIN" 2>/dev/null | grep -E "LC_CODE_SIGNATURE|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO" || echo "    (无相关 load command)"
+            echo "--- entitlements (ldid -e) ---"
+            ldid -e "$BIN" 2>/dev/null | head -40 || true
+          } | tee -a /tmp/ci-binary-info.txt
 
           # 3) 签名: 优先 Procursus ldid (v2.1.5-procursus7) --platform-apply。
           #    codesign 不支持 --platform-apply (实测报 unrecognized option), 无法用 codesign
@@ -385,9 +390,10 @@ jobs:
             git config user.name "ci-bot"
             git config user.email "ci-bot@users.noreply.github.com"
             cp /tmp/ipa_contents.txt ./ci-ipa-contents.txt
+            [ -f /tmp/ci-binary-info.txt ] && cp /tmp/ci-binary-info.txt ./ci-binary-info.txt
             git checkout -b ci-debug 2>/dev/null || git checkout ci-debug
-            git add -f ci-ipa-contents.txt
-            git commit -m "ci: save ipa contents (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
+            git add -f ci-ipa-contents.txt ci-binary-info.txt
+            git commit -m "ci: save ipa contents + binary info (run $GITHUB_RUN_ID)" --allow-empty >/dev/null 2>&1
             git push origin ci-debug --force
           } >/dev/null 2>&1 && echo "[i] IPA 清单已推送到 ci-debug 分支" || echo "[i] IPA 清单推送失败(忽略)"
 
