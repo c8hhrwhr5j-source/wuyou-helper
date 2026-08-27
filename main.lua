@@ -1047,19 +1047,22 @@ function main()
         if rgbbj("腾讯LOGO") or rgbbj("盛大LOGO") then
             click(355,270,960,487) -- 关闭视频动画
             sleep(500)
+			log("腾讯LOGO")
 		end
         if rgbbj("主页公告") then
             click(946,162,971,187) -- 关闭公告
             sleep(500)
-			log("1")
+			log("主页公告")
 		end
         if rgbbj("断线重连") then
             click(826,516,952,552) -- 进入游戏
             sleep(500)
+			log("断线重连")
         end
 		if rgbbj("选择角色") then
             click(610,673,727,707) -- 进入游戏
             sleep(500)
+			log("选择角色")
         end
 		if rgbbj("附近下") then
 			if ocr(126,2,281,35,"我们与你",1) then

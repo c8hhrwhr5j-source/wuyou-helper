@@ -276,6 +276,29 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                         CGContextDrawImage(ctx, CGRectMake(0, 0, cw, ch), cg);
                         CGContextRelease(ctx);
                         CGImageRelease(cg);
+                        // P3 屏: 加速器转储路径输出的是未转换的 P3 原始像素
+                        // (IOSurfaceAcceleratorTransferSurface 只做像素拷贝不做色彩转换,
+                        //  而 dstSurface 的 ColorSpace 属性被标成 sRGB, _UICreateCGImageFromIOSurface
+                        //  会把它当 sRGB 包装, 再画到 DeviceRGB context 时不触发色彩管理),
+                        // 必须与下方手动读取路径一致地转换到 sRGB, 否则取色/找色颜色偏差。
+                        if (_screenUsesP3()) {
+                            _ensureColorLUTs();
+                            for (size_t y = 0; y < ch; y++) {
+                                uint8_t *dst = out + y * cw * 4;
+                                for (size_t x = 0; x < cw; x++) {
+                                    uint8_t R = dst[x*4+0];
+                                    uint8_t G = dst[x*4+1];
+                                    uint8_t B = dst[x*4+2];
+                                    float rl = _srgbToLinearLUT[R];
+                                    float gl = _srgbToLinearLUT[G];
+                                    float bl = _srgbToLinearLUT[B];
+                                    dst[x*4+0] = _srgbEncode( 1.224940f*rl - 0.224940f*gl);
+                                    dst[x*4+1] = _srgbEncode(-0.042057f*rl + 1.042057f*gl);
+                                    dst[x*4+2] = _srgbEncode(-0.019644f*rl - 0.078644f*gl + 1.098289f*bl);
+                                    dst[x*4+3] = 255;
+                                }
+                            }
+                        }
                         if (dstSurface) { CFRelease(dstSurface); }
                         if (accel) { CFRelease(accel); }
                         *pixelsOut = out;
