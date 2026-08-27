@@ -301,9 +301,22 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
     // _UICreateCGImageFromIOSurface 会把加速器"仅像素转储"的 dst 标称格式当真实属性,
     // 造成"热成像"伪彩; 该情形走下方手动 BGRA 读取(iOS 15 已验证颜色正确)。
     // 源为 BGRA(如 CARenderServer 自建 surface)时也走手动读取, 避免本路径在 iOS 16 上误判。
+    // 实测(iOS 16.6)加速器 IOSurfaceAcceleratorCreate 失败(lastAccelError=0, 未到 transfer),
+    // 进入本路径后 colorDecision 仍为 format-w30r => _UICreateCGImageFromIOSurface 未出图。
+    // 疑因后台线程调用 UIKit 私有函数返回 NULL, 改为主线程调用(原版 AutoGoRunner 主线程)。
     if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */ && _uiCreateCGImageFn) {
-        CGImageRef cg = _uiCreateCGImageFn(readSurface);
-        if (cg) {
+        __block CGImageRef cg = NULL;
+        if ([NSThread isMainThread]) {
+            cg = _uiCreateCGImageFn(readSurface);
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                cg = _uiCreateCGImageFn(readSurface);
+            });
+        }
+        if (!cg) {
+            self.lastSystemPath = @"_UICreateCGImageFromIOSurface 返回 NULL(主线程调用后仍失败)";
+            NSLog(@"[TSScreenCapture] _UICreateCGImageFromIOSurface 返回 NULL");
+        } else {
             size_t cw = CGImageGetWidth(cg), ch = CGImageGetHeight(cg);
             // 诊断: 记录 CoreGraphics 解析出的 CGImage 色彩空间(判断是否需手动补 P3)
             NSString *imgCSDesc = @"null";
@@ -320,8 +333,12 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
             if (cw > 0 && ch > 0) {
                 uint8_t *cgOut = malloc(cw * ch * 4);
                 if (cgOut) {
-                    // 参数与已验证的 _extractRGBAFromImage 一致(DeviceRGB + RGBA 内存序)
-                    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                    // 用 sRGB context(原版 UIGraphicsBeginImageContextWithOptions 即 sRGB):
+                    // P3 屏上 kCGColorSpaceDeviceRGB 映射设备 P3 profile, P3 CGImage 绘制进去
+                    // 恒等不转换, 输出仍是 P3 编码值 -> 脚本按 sRGB 找色发灰;
+                    // sRGB context 让 CoreGraphics 把 DisplayP3 CGImage 自动转换到 sRGB。
+                    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                    if (!cs) { cs = CGColorSpaceCreateDeviceRGB(); }
                     CGContextRef ctx = CGBitmapContextCreate(cgOut, cw, ch, 8, cw * 4, cs,
                         kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
                     if (ctx) {
@@ -335,6 +352,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                         *widthOut = (int)cw;
                         *heightOut = (int)ch;
                         self.lastColorDecision = [NSString stringWithFormat:@"system(_UICreateCGImageFromIOSurface->sRGB, imgCS=%@)", imgCSDesc];
+                        self.lastSystemPath = [NSString stringWithFormat:@"ok(imgCS=%@, %zux%zu)", imgCSDesc, cw, ch];
                         self.lastP3Applied = NO; // 色彩转换由 CoreGraphics 自动完成
                         return YES;
                     }
@@ -342,6 +360,7 @@ typedef CGImageRef (*UICreateCGImageFromIOSurfaceFunc)(IOSurfaceRef surface);
                     free(cgOut);
                 }
             }
+            self.lastSystemPath = [NSString stringWithFormat:@"CGImage 有效(imgCS=%@)但绘制失败", imgCSDesc];
             CGImageRelease(cg);
         }
         // 创建/绘制失败则回退手动读取
@@ -1479,6 +1498,7 @@ static const char *_gsSurfaceKeys[] = {
         diag[@"lastReadFormat"] = self.lastReadFormat ?: @"(无)";
         diag[@"lastAccelOK"] = @(self.lastAccelOK);
         diag[@"lastAccelError"] = @(self.lastAccelError);
+        diag[@"lastSystemPath"] = self.lastSystemPath ?: @"(未进入)";
         diag[@"lastP3Applied"] = @(self.lastP3Applied);
         diag[@"srcColorSpace"] = self.lastSourceColorSpace ?: @"(无)";
         diag[@"colorDecision"] = self.lastColorDecision ?: @"(无)";
@@ -1499,6 +1519,7 @@ static const char *_gsSurfaceKeys[] = {
     self.lastReadFormat = nil;
     self.lastAccelOK = NO;
     self.lastAccelError = 0;
+    self.lastSystemPath = nil;
     self.lastP3Applied = NO;
     self.lastSourceColorSpace = nil;
     self.lastColorDecision = nil;

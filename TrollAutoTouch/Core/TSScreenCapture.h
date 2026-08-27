@@ -45,6 +45,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL lastAccelOK;
 /// 最近一次加速器转储失败的 kern_return_t 错误码(0=未失败, 诊断用)
 @property (nonatomic, assign) int lastAccelError;
+/// 最近一次系统色彩管理路径(_UICreateCGImageFromIOSurface)的结果描述(诊断用)
+@property (nonatomic, strong, nullable) NSString *lastSystemPath;
 /// 最近一次是否执行了 P3->sRGB 转换
 @property (nonatomic, assign) BOOL lastP3Applied;
 /// 最近一次读取的屏幕中心像素源值(10-bit 原始值或 8-bit 通道值, 诊断用)
