@@ -258,14 +258,19 @@ jobs:
             ldid -e "$BIN" 2>/dev/null | head -40 || true
           } | tee -a /tmp/ci-binary-info.txt
 
-          # 3) 签名: 优先 Procursus ldid (v2.1.5-procursus7) --platform-apply。
+          # 3) 签名: 优先 Procursus ldid (v2.1.5-procursus7)。
           #    codesign 不支持 --platform-apply (实测报 unrecognized option), 无法用 codesign
           #    打 CS_PLATFORM_BINARY; 而 Procursus ldid 支持该选项且能正确重签 arm64e slice
           #    (xerub 老版 ldid 才破坏 arm64e → EBADEXEC)。
           #    产物带 chained fixups (iOS 16+ arm64e 强制), Procursus ldid 可正常重签。
-          #    --platform-apply: 给 CodeDirectory 打上 CS_PLATFORM_BINARY。
-          if ldid -S/tmp/ent.xml --platform-apply "$BIN" 2>/tmp/ldid_sign.log; then
-            echo "[OK] ldid 签名成功 (entitlements + platform-apply)"
+          #    注意: 刻意【不加】--platform-apply (即不设 CS_PLATFORM_BINARY) —— 逆向
+          #    原版 TrollAutoScript 2.3.6 签名 flags=0x1b70 (CS_HARD|CS_KILL|CS_RESTRICT,
+          #    无 CS_PLATFORM_BINARY)。实测(2026-08-28): 带 CS_PLATFORM_BINARY 的产物在
+          #    iOS 16.6 后台约 30s 被杀 (backgroundTimeRemaining 倒数到 0, 特权 entitlement
+          #    豁免不生效), 而原版不带该标志保活正常。对齐原版签名避免 AMFI 对
+          #    platform-application + CS_PLATFORM_BINARY 的额外平台校验分支。
+          if ldid -S/tmp/ent.xml "$BIN" 2>/tmp/ldid_sign.log; then
+            echo "[OK] ldid 签名成功 (entitlements, 无 CS_PLATFORM_BINARY, 对齐原版)"
             SIGN_TOOL=ldid
           else
             echo "[!] ldid 失败, 回退 codesign (无 platform-apply):"
