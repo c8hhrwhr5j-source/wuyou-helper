@@ -81,19 +81,22 @@ targets:
         CFBundleDisplayName: QQ音乐
         CFBundleVersion: "1"
         CFBundleShortVersionString: "1.0.0"
-        # 后台保活: 静音音频播放(audio) + 后台模式豁免组合阻止 App 被挂起,
-        # 保证切到游戏/其他 app 后 8080 HTTP 服务器与截图服务持续响应。
-        # voip: iOS 最强的后台豁免模式(不要求实际 VoIP 功能, TrollStore 不审核);
-        # processing/fetch/bluetooth/external-accessory: 额外后台豁免声明,
-        # 与 AutoGoRunner(8820 端口参考实现)的 UIBackgroundModes 对齐。
+        # 后台保活: 对齐原版 TrollAutoScript 2.3.6 —— 只声明 network-authentication,
+        # 不声明 audio/voip/processing 等后台模式。
+        # 原因(逆向原版 iOS 16.6 保活机制的结论):
+        #   - iOS 16 起系统对后台模式审计严格: 声明 audio 却播放"无意义音频"
+        #     (静音/极低电平)会被判定滥用, 撤销豁免并快速挂起(实测 10s 内被杀);
+        #   - 声明 voip 但 PushKit 注册失败(iOS 16 强制检查, TrollStore 下
+        #     aps-environment 无有效凭证必然失败)启动即闪退 —— 已删除全部 PushKit。
+        #   - 原版在 iOS 16 上保活完全靠签名内嵌特权 entitlements
+        #     (platform-application / no-sandbox / multitasking.termination /
+        #     systemappassertions / private.kernel.jetsam), 系统将其视为特权应用,
+        #     进后台后不挂起、不被 Jetsam 清理。
+        # 因此 iOS 16+ 上禁用音频保活(TSAudioKeepAlive / TSDaemonManager 内判断),
+        # iOS 15 保留音频保活(系统不审计, 音频豁免仍有效)。
         UIBackgroundModes:
-          - audio
-          - voip
-          - processing
-          - fetch
-          - bluetooth-central
-          - external-accessory
-        # 进入后台后不挂起(配合上述后台模式, 防止被 SpringBoard 立即冻结)
+          - network-authentication
+        # 进入后台后不挂起(防止被 SpringBoard 立即冻结)
         UIApplicationExitsOnSuspend: false
         # 脚本网页设置 UI (WKWebView) 通过 http://127.0.0.1 访问内嵌 HTTP 服务器,
         # 需要 ATS 本地网络豁免 (NSAllowsLocalNetworking, iOS 10+)

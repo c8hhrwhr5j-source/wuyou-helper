@@ -2759,8 +2759,11 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     });
 
     // 后台保活: 用户切到游戏/其他 app 时 App 处于后台, iOS 会挂起后台进程,
-    // 导致音量键监听与 IOHID 直发触摸停摆。用静音音频播放阻止挂起
-    // (需 Info.plist UIBackgroundModes=audio, 见 project.yml)。
+    // 导致音量键监听与 IOHID 直发触摸停摆。
+    // iOS 15: 静音音频播放阻止挂起(需 UIBackgroundModes=audio);
+    // iOS 16+: TSAudioKeepAlive 内部已禁用(系统审计"无意义音频"会加速挂起),
+    //   保活靠签名内嵌特权 entitlements(platform-application/multitasking.termination
+    //   /systemappassertions/jetsam) 豁免, 对齐原版 TrollAutoScript 2.3.6。
     [[TSAudioKeepAlive shared] start];
     // 音量键识别: App 进程内监听私有音量通知 + 轮询 AVAudioSession.outputVolume
     // (物理按键事件广播, 静音/音量到 0 时也响应, 对齐 TrollAutoScript)。
@@ -2995,8 +2998,9 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
     vm.onVolumeKey = ^{
         [weakSelf _handleVolumeKey];
     };
-    // TAS 服务开启期间常驻静音保活: 音频会话始终激活, outputVolume 读值
-    // 实时可用, 空闲时按音量键也能被检测到; 引用计数与脚本运行互不干扰。
+    // TAS 服务开启期间常驻静音保活: iOS 15 音频会话始终激活, outputVolume 读值
+    // 实时可用, 空闲时按音量键也能被检测到; iOS 16+ 已禁用(见 TSAudioKeepAlive,
+    // 保活靠特权 entitlements 豁免, 对齐原版)。引用计数与脚本运行互不干扰。
     [[TSAudioKeepAlive shared] start];
     [vm start];
     lua_log(@"[音量键] 常驻监听已启动 (TAS 服务开)");

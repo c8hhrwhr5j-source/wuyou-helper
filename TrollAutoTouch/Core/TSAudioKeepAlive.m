@@ -12,6 +12,15 @@
 //   - 回前台时兜底重启。
 //  防止保活引擎被系统打断后失效 → App 被挂起 → 8080 服务器随之不可达。
 //
+//  ⚠️ iOS 16+ 禁用(对齐原版 TrollAutoScript 2.3.6 保活机制):
+//     逆向原版确认: 原版在 iOS 16.6 上不依赖 audio 后台模式/音频保活,
+//     UIBackgroundModes 只声明 network-authentication, 保活完全靠签名内嵌的
+//     特权 entitlements(platform-application / no-sandbox / multitasking.termination /
+//     systemappassertions / private.kernel.jetsam)。iOS 16 起系统对后台音频
+//     app 审计严格, 声明 audio 却播放"无意义音频"(静音/极低电平)会被判定滥用,
+//     撤销豁免并快速挂起(实测 10s 内被杀)。因此 iOS 16+ 直接跳过音频引擎,
+//     靠 entitlement 豁免保活; iOS 15 保留音频保活(系统不审计, 豁免仍有效)。
+//
 
 #import "TSAudioKeepAlive.h"
 #import "TSLogStore.h"
@@ -142,6 +151,17 @@
 
 - (void)buildAndStartEngine {
     @synchronized (self) {
+        // iOS 16+: 系统对后台音频 app 审计严格, "无意义音频"会被判定滥用并快速挂起。
+        // 对齐原版 TrollAutoScript 2.3.6: 不依赖音频保活, 靠特权 entitlements 豁免。
+        // 仅记录一次日志, 后续恢复/看门狗走同路径直接返回, 不反复构建引擎。
+        if (@available(iOS 16.0, *)) {
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                NSLog(@"[TSAudioKeepAlive] iOS 16+ 已禁用音频保活 (对齐原版, 靠 entitlement 豁免)");
+                [[TSLogStore shared] append:@"[保活] iOS 16+ 已禁用音频保活 (对齐原版, 靠 entitlement 豁免)"];
+            });
+            return;
+        }
         NSError *err = nil;
         AVAudioSession *session = [AVAudioSession sharedInstance];
         if (![session setCategory:AVAudioSessionCategoryPlayback
@@ -204,6 +224,8 @@
 - (void)rebuildIfNeeded {
     dispatch_async(dispatch_get_main_queue(), ^{
         @synchronized (self) {
+            // iOS 16+ 已禁用音频保活: 不重建(见 buildAndStartEngine)
+            if (@available(iOS 16.0, *)) return;
             if (self->_refCount <= 0) return;
             BOOL ok = self->_engine && self->_engine.isRunning
                    && self->_player && self->_player.isPlaying;

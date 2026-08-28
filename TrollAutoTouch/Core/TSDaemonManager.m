@@ -162,6 +162,19 @@
 }
 
 - (void)startSilentAudio {
+    // iOS 16+: 对齐原版 TrollAutoScript 2.3.6 —— 系统对后台音频 app 审计严格,
+    // "无意义音频"会被判定滥用并快速挂起, 音频保活失效且有害。
+    // 保活改靠签名内嵌特权 entitlements(platform-application / no-sandbox /
+    // multitasking.termination / systemappassertions / private.kernel.jetsam) 豁免。
+    // iOS 15 保留音频保活(系统不审计, 豁免仍有效)。
+    if (@available(iOS 16.0, *)) {
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            NSLog(@"[Daemon] iOS 16+ 已禁用静默音频保活 (对齐原版, 靠 entitlement 豁免)");
+            [self log:@"iOS 16+ 已禁用静默音频保活 (对齐原版, 靠 entitlement 豁免)"];
+        });
+        return;
+    }
     if (_silentPlayer && _silentPlayer.isPlaying) return;
 
     // 使用静默 WAV 文件(1 秒静默循环)
@@ -332,7 +345,7 @@
 }
 
 // 主线程写探针: backgroundTimeRemaining 必须主线程读。
-// raw < 0 = 前台或已获无限后台豁免(音频/VoIP), 此时显示 -1 属正常。
+// raw < 0 = 前台或已获无限后台豁免(iOS 15 音频 / 特权 entitlements), 此时显示 -1 属正常。
 - (void)writeProbe {
     @autoreleasepool {
         NSTimeInterval raw = [[UIApplication sharedApplication] backgroundTimeRemaining];
