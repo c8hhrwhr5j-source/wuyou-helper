@@ -17,8 +17,9 @@
 
 #import "TSNetworkAuth.h"
 #import "TSLogStore.h"
-// iOS 18 SDK 起 NEHotspotHelper 头文件拒绝直接 #import, 必须用 module import
-@import NetworkExtension;
+// 必须用 umbrella 头文件: NEHotspotHelper.h 拒绝被直接 #import,
+// 且构建禁用了 Clang modules(@import 不可用)。
+#import <NetworkExtension/NetworkExtension.h>
 
 static BOOL gRegistered = NO;
 
