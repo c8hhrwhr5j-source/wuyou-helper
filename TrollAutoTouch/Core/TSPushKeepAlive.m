@@ -45,7 +45,7 @@
 }
 
 - (BOOL)isRegistered {
-    NSData *token = _registry.pushTokenForType[PKPushTypeVoIP];
+    NSData *token = [_registry pushTokenForType:PKPushTypeVoIP];
     return token.length > 0;
 }
 
