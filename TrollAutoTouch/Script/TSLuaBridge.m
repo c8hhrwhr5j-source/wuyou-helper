@@ -518,11 +518,21 @@ static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
     }
     // 截屏偶尔会失败(帧缓冲 surface 未就绪/主线程忙/动画中)，重试最多 3 次
     for (int attempt = 0; attempt < 3; attempt++) {
-        if ([[TSScreenCapture shared] captureScreenToRGBA:pxOut width:wOut height:hOut] && *pxOut) {
+        uint8_t *px = NULL; int w = 0, h = 0;
+        if ([[TSScreenCapture shared] captureScreenToRGBA:&px width:&w height:&h] && px) {
             if (lastPx) { free(lastPx); }
-            lastPx = *pxOut; lastW = *wOut; lastH = *hOut;
+            lastPx = px; lastW = w; lastH = h;
             lastGrabAt = now;
-            return YES;
+            // 返回副本而不是 lastPx 本身：调用方统一 free(pxOut)，
+            // 否则 lastPx 会被调用方提前释放 → 下次进入本函数时对悬空指针
+            // memcpy(use-after-free) / free(double-free) 导致进程崩溃或堆损坏。
+            uint8_t *copy = malloc((size_t)w * (size_t)h * 4);
+            if (copy) {
+                memcpy(copy, px, (size_t)w * (size_t)h * 4);
+                *pxOut = copy; *wOut = w; *hOut = h;
+                return YES;
+            }
+            break; // malloc 失败，返回 NO
         }
         if (attempt < 2) {
             usleep(50 * 1000);
@@ -844,9 +854,23 @@ static int l_screen_getColor(lua_State *L) {
 static int l_screen_getColorRGB(lua_State *L) {
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
+    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));
+    CGSize ss = screenPixelSize();
+
+    TSScreenCapture *cap = [TSScreenCapture shared];
+    // 优先零分配直读 keep 缓存单点 —— 修复: 原实现每次取色都复制整帧 4MB 副本,
+    // 死循环脚本每秒数百次 getColorRGB 产生几百 MB/轮 的 malloc 流量, 内存暴涨被杀。
+    int cr = 0, cg = 0, cb = 0;
+    if ([cap getCachedColorAtPoint:sp screenSize:ss r:&cr g:&cg b:&cb]) {
+        lua_pushinteger(L, cr);
+        lua_pushinteger(L, cg);
+        lua_pushinteger(L, cb);
+        return 3;
+    }
+
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) {
-        NSString *err = [TSScreenCapture shared].lastError;
+        NSString *err = cap.lastError;
         if (err.length) {
             lua_log([NSString stringWithFormat:@"getColorRGB 截屏失败: %@", err]);
         }
@@ -855,8 +879,6 @@ static int l_screen_getColorRGB(lua_State *L) {
         lua_pushinteger(L, 0);
         return 3;
     }
-    CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));
-    CGSize ss = screenPixelSize();
     int color = [TSColorFinder getColorAtPoint:sp pixels:px width:w height:h screenSize:ss];
     free(px);
     // 0xRRGGBB → R, G, B

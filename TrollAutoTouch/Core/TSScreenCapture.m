@@ -27,6 +27,7 @@
 //   5. 应用内截屏(兜底): 仅本 App 窗口
 
 #import "TSScreenCapture.h"
+#import "TSColorFinder.h"
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <unistd.h>
@@ -1694,6 +1695,22 @@ static const char *_gsSurfaceKeys[] = {
     }
     // 无缓存则执行一次新截屏
     return [self captureScreenToRGBA:pixelsOut width:widthOut height:heightOut];
+}
+
+- (BOOL)getCachedColorAtPoint:(CGPoint)point
+                   screenSize:(CGSize)screenSize
+                            r:(int *)r g:(int *)g b:(int *)b {
+    // 仅当 keep 缓存存在时零分配读单点（避免每帧 4MB 副本 malloc/memcpy/free 的
+    // 内存流量把死循环脚本压垮）；无缓存时返回 NO，由调用方回退到 grabScreen。
+    if (!_cachedPixels || _cachedWidth <= 0 || _cachedHeight <= 0) { return NO; }
+    int color = [TSColorFinder getColorAtPoint:point
+                                        pixels:_cachedPixels
+                                         width:_cachedWidth height:_cachedHeight
+                                    screenSize:screenSize];
+    if (r) { *r = (color >> 16) & 0xFF; }
+    if (g) { *g = (color >> 8) & 0xFF; }
+    if (b) { *b = color & 0xFF; }
+    return YES;
 }
 
 - (void)dealloc {

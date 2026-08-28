@@ -85,6 +85,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 获取缓存的像素(不新截屏)。若无缓存则执行一次截屏。
 - (BOOL)getCachedPixels:(uint8_t *_Nullable *_Nullable)pixelsOut
                   width:(int *)widthOut height:(int *)heightOut;
+/// keep 缓存存在时读取单点颜色，拆成 R/G/B 分量(0~255)。无缓存返回 NO。
+/// 零分配 —— 不复制整帧像素，供 getColorRGB 在 keepScreen 期间高频取色用
+/// (修复: 原实现每次取色都复制整帧 4MB 副本, 死循环脚本每秒数百次取色导致内存暴涨被杀)。
+- (BOOL)getCachedColorAtPoint:(CGPoint)point
+                   screenSize:(CGSize)screenSize
+                            r:(int *)r g:(int *)g b:(int *)b;
 
 @end
 
