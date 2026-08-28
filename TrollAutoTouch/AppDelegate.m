@@ -12,6 +12,7 @@
 #import "HUD/TSHUDHost.h"
 #import "Core/TSDaemonManager.h"
 #import "Core/TSAuthKeepAlive.h"
+#import "Core/TSNetworkAuth.h"
 #import "Core/TSLicense.h"
 #import "Core/TSTrialManager.h"
 #import "Script/TSLuaBridge.h"
@@ -66,6 +67,9 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // background session 标识符固定: 若上次运行有未完成任务, 系统冷启动时会恢复,
     // 必须在启动阶段用同一标识符创建 session 并设置 delegate, 否则系统丢弃事件。
     [TSAuthKeepAlive shared];
+    // 注册为系统 Wi-Fi 热点认证助手(NEHotspotHelper),
+    // 这是 network-authentication 后台豁免的判定依据(对齐原版)。
+    [TSNetworkAuth registerHotspotHelper];
 
     NSLog(@"[QQ音乐] App 启动完成");
     return YES;

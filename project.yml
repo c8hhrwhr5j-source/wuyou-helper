@@ -29,7 +29,7 @@ settings:
     #       (v2.1.5-procursus7) 签名，支持 chained fixups 重签。
     # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
     #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreImage -framework Security -framework WebKit -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreImage -framework Security -framework WebKit -framework NetworkExtension -framework SystemConfiguration -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
 targets:
   TrollAutoTouch:
     type: application
@@ -92,10 +92,15 @@ targets:
         #     termination / systemappassertions / private.kernel.jetsam) 在 iOS 16.6
         #     TrollStore 下不授予 platform 身份, 后台豁免实测不生效
         #     (backgroundTimeRemaining 仍正常倒数后被 Jetsam 清理)。
-        #   - 原版保活机制: network-authentication 后台模式 + 保持未决的 URLSession
-        #     认证挑战(didReceiveChallenge 中不调用 completionHandler), 系统网络栈
-        #     据此认为 app 正在网络身份验证, 授予后台持续执行时间。
-        #     由 TSAuthKeepAlive 实现(依赖网络, 无网络时降级为后台任务兜底)。
+        #   - 原版保活机制(逆向 2.3.6 二进制确认):
+        #     (1) NEHotspotHelper 注册(registerWithOptions:queue:handler:) —— 注册为
+        #         系统 Wi-Fi 热点认证助手, 系统将 app 视为 network-authentication 应用
+        #         (对应 com.apple.developer.networking.HotspotHelper +
+        #          com.apple.wifi.manager-access entitlement); 由 TSNetworkAuth 实现。
+        #     (2) background URLSession + downloadTask 认证挑战挂起 ——
+        #         didReceiveChallenge 中不调用 completionHandler, 保持未决认证,
+        #         由 background session(nsurlsessiond 托管)延续后台执行;
+        #         由 TSAuthKeepAlive 实现(依赖网络, 无网络时降级为后台任务兜底)。
         # 因此 iOS 16+ 上禁用音频保活(TSAudioKeepAlive / TSDaemonManager 内判断),
         # iOS 15 保留音频保活(系统不审计, 音频豁免仍有效)。
         UIBackgroundModes:
