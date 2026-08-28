@@ -158,6 +158,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_orientationTimer invalidate];
     _orientationTimer = nil;
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
     if (_fbOrientationObserver) {
         SEL sel = NSSelectorFromString(@"invalidate");
         if ([_fbOrientationObserver respondsToSelector:sel]) {
@@ -647,7 +648,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_applyOrientationLayout {
     long long o = [self _currentGlobalOrientation];
     BOOL landscape = (o == 3 || o == 4);
-    if (landscape == _landscape && o == _curOrientation) return;
+    // _curOrientation==0 表示方向布局尚未初始化: 若横竖屏类型一致则无需任何
+    // 换算 (避免竖屏初始化时对竖屏 frame 做"竖屏→竖屏"的误换算)。
+    if (landscape == _landscape && (o == _curOrientation || _curOrientation == 0)) return;
 
     // 换算窗口位置: 竖屏 1:1; 横屏时窗口 x(宽44)→屏幕竖直, y(高200)→屏幕水平。
     // LandscapeLeft(3):  屏幕 px=wy,   py=331-wx
@@ -736,6 +739,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // app 后台 SBS 托管悬浮球时收不到 UIApplication 方向通知, 必须用这个。
 // 框架不保证一直存在, 动态 dlopen + 轮询 activeInterfaceOrientation。
 - (void)_startGlobalOrientationObserver {
+    // UIDevice 物理方向是 _currentGlobalOrientation 的主来源 (后台也实时有效),
+    // 必须先开启方向监测, 否则 orientation 恒为 Unknown(0)。
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
     if (_fbOrientationObserver) return;
     Class cls = NSClassFromString(@"FBSOrientationObserver");
     if (!cls) {
@@ -746,15 +752,14 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _fbOrientationObserver = [[cls alloc] init];
     if (!_fbOrientationObserver) return;
     _lastOrientation = [self _currentGlobalOrientation];
-    // app 冷启动时设备可能已横屏: 此刻 _lastOrientation 已等于当前横屏方向 (3/4),
-    // 之后轮询 (_pollGlobalOrientation:) 永远检测不到方向"变化",
-    // _landscape 将一直保持 NO → 横屏下悬浮球走竖屏布局:
-    // 窗口 200×44 被系统旋转 90° 显示后, 按钮沿屏幕竖直方向排布 (向上展开),
-    // 图标也不做 ±90° 旋转。因此冷启动即横屏时必须立即应用一次方向布局,
-    // 把 _landscape/_curOrientation 初始化正确。竖屏 (1/2) 时 _landscape 本就
-    // 应为 NO, 不调用, 保持与现有竖屏行为一致。
-    if (_lastOrientation == 3 || _lastOrientation == 4) {
-        [self _applyOrientationLayout];
+    // 立即同步一次方向布局: app 冷启动时设备可能已横屏, 此刻 _lastOrientation
+    // 已等于当前横屏方向 (3/4), 之后轮询 (_pollGlobalOrientation:) 永远检测不到
+    // 方向"变化", _landscape 将一直保持 NO → 横屏下悬浮球走竖屏布局
+    // (窗口 200×44 被系统旋转 90° 显示后按钮沿屏幕竖直方向排布、图标不旋转)。
+    // 竖屏时 guard (landscape 一致且 _curOrientation==0) 直接返回, 不做任何
+    // 换算, 保持 _layoutBall 的初始位置, 与现有竖屏行为完全一致。
+    [self _applyOrientationLayout];
+    if (_landscape) {
         // 初始窗口位置是 _layoutBall 按横屏屏幕尺寸算的, 方向初始化后
         // 位置未贴边 (球停在屏幕中部), 立即按当前方向吸附一次。
         [self _snapToEdgeAnimated:NO];
@@ -767,21 +772,42 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     [[NSRunLoop mainRunLoop] addTimer:_orientationTimer forMode:NSRunLoopCommonModes];
 }
 
-// 读取 FBSOrientationObserver 当前界面方向 (NSInvocation 精确取 long long 返回值,
-// 避免 performSelector 的 id 截断)
+// 当前界面方向 (多源检测, 返回 UIInterfaceOrientation 码:
+// 1=Portrait 2=PortraitUpsideDown 3=LandscapeLeft 4=LandscapeRight)。
+// 来源优先级:
+//   1) UIDevice 物理方向 —— 与 app 前后台、是否支持横屏无关, 横屏游戏时
+//      设备必为 LandscapeLeft(3)/LandscapeRight(4), 后台 SBS 托管时也实时有效。
+//   2) FBSOrientationObserver (系统侧方向服务) —— 实测后台时它返回的是
+//      app 自身界面方向 (固定竖屏恒为 1), 不能作为横屏判断依据, 仅当
+//      设备方向为 Unknown/FaceUp/FaceDown 无法判断时兜底。
+//   3) _lastOrientation —— 上次有效方向兜底。
 - (long long)_currentGlobalOrientation {
-    if (!_fbOrientationObserver) return _lastOrientation;
-    SEL sel = NSSelectorFromString(@"activeInterfaceOrientation");
-    if (![_fbOrientationObserver respondsToSelector:sel]) return _lastOrientation;
-    NSMethodSignature *sig = [_fbOrientationObserver methodSignatureForSelector:sel];
-    if (!sig) return _lastOrientation;
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    inv.target = _fbOrientationObserver;
-    inv.selector = sel;
-    [inv invoke];
-    long long v = 0;
-    [inv getReturnValue:&v];
-    return v;
+    UIDeviceOrientation devO = [[UIDevice currentDevice] orientation];
+    switch (devO) {
+        case UIDeviceOrientationPortrait:
+        case UIDeviceOrientationPortraitUpsideDown:
+        case UIDeviceOrientationLandscapeLeft:
+        case UIDeviceOrientationLandscapeRight:
+            return (long long)devO; // 方向码与 UIInterfaceOrientation 一致
+        default:
+            break; // Unknown(0)/FaceUp(5)/FaceDown(6): 无法判断, 走下一来源
+    }
+    if (_fbOrientationObserver) {
+        SEL sel = NSSelectorFromString(@"activeInterfaceOrientation");
+        if ([_fbOrientationObserver respondsToSelector:sel]) {
+            NSMethodSignature *sig = [_fbOrientationObserver methodSignatureForSelector:sel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                inv.target = _fbOrientationObserver;
+                inv.selector = sel;
+                [inv invoke];
+                long long v = 0;
+                [inv getReturnValue:&v];
+                if (v >= 1 && v <= 4) return v;
+            }
+        }
+    }
+    return _lastOrientation;
 }
 
 // 设备当前实际方向 -> 脚本方向码 (0=home在下 1=home在右 2=home在左)。
@@ -849,6 +875,11 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)show {
     self.hidden = NO;
     [self _refreshButtons];
+    // 悬浮球可能长时间 hidden (未 show), 期间 _pollGlobalOrientation: 只更新
+    // _lastOrientation、不布局。显示时按当前方向同步一次布局并贴边, 覆盖
+    // "app 冷启动时设备已横屏 / 悬浮球显示前设备已横屏"等轮询检测不到变化的场景。
+    [self _applyOrientationLayout];
+    [self _snapToEdgeAnimated:NO];
     // app 不在前台时同步托管到系统层 (跨应用显示)
     if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
         [self _registerSBSHosting];
