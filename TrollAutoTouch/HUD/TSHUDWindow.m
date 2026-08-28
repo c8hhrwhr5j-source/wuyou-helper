@@ -562,21 +562,15 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         CGRect frame = self.frame;
         frame.origin.x += t.x;
         frame.origin.y += t.y;
-        // 限制在屏幕内。横屏时窗口被 SpringBoard 旋转 90° 显示:
-        // 窗口 x 方向(宽 44)对应屏幕竖直, 窗口 y 方向(高 200)对应屏幕水平,
-        // 边界也要相应交换 (用 _effectiveScreenSize 的横屏尺寸 667×375)。
-        CGSize screen = [self _effectiveScreenSize];
-        if (_landscape) {
-            CGFloat maxX = screen.height - frame.size.width;  // 375-44=331 (屏幕竖直)
-            CGFloat maxY = screen.width  - frame.size.height; // 667-200=467 (屏幕水平)
-            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
-            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
-        } else {
-            CGFloat maxX = screen.width  - frame.size.width;
-            CGFloat maxY = screen.height - frame.size.height;
-            frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
-            frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
-        }
+        // 窗口坐标始终基于竖屏基准 (rootVC 固定竖屏, 窗口不随 app/设备旋转):
+        // 窗口 x 方向 → 屏幕竖直(375), 窗口 y 方向 → 屏幕水平(667)。
+        // 横屏时窗口被系统旋转 90° 显示, 但 frame 仍在竖屏基准坐标,
+        // 所以边界统一 = 竖屏基准尺寸 - 窗口尺寸, 横竖屏同一公式。
+        // 注意: 不能用 _effectiveScreenSize —— app 已横屏时它返回 667×375,
+        // 与窗口竖屏基准坐标不符, 会把窗口 y (屏幕水平) 错限到 331 (只能拖到横屏左边)。
+        CGSize base = [self _portraitScreenSize];
+        frame.origin.x = MAX(0, MIN(frame.origin.x, base.width  - frame.size.width));
+        frame.origin.y = MAX(0, MIN(frame.origin.y, base.height - frame.size.height));
         self.frame = frame;
         [g setTranslation:CGPointZero inView:self];
     } else if (g.state == UIGestureRecognizerStateEnded
@@ -590,41 +584,41 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 吸附到最近的屏幕边缘 (左右), 并同步悬浮球位置与展开方向
 - (void)_snapToEdgeAnimated:(BOOL)animated {
     CGRect frame = self.frame;
-    CGSize screen = [self _effectiveScreenSize];
+    // 窗口坐标始终基于竖屏基准: base.width(375)=屏幕竖直基准, base.height(667)=屏幕水平基准。
+    // 竖屏时窗口不旋转, 贴边沿窗口 x; 横屏时窗口旋转 90° 显示, 贴边沿窗口 y。
+    CGSize base = [self _portraitScreenSize];
     BOOL right;
     if (_landscape) {
-        // 横屏: 屏幕水平由窗口 y(高 200)控制, 屏幕竖直由窗口 x(宽 44)控制。
-        // 窗口 x 保持在当前竖直位置; 窗口 y 按屏幕水平贴边。
+        // 横屏: 屏幕水平由窗口 y 控制 (范围 base.height=667), 屏幕竖直由窗口 x 控制 (base.width=375)。
         // LandscapeLeft(3): 屏幕 px = wy,  贴右 wy=大, 贴左 wy=小;
-        // LandscapeRight(4): 屏幕 px = 467-wy, 贴右 wy=小, 贴左 wy=大。
-        CGFloat maxWY = screen.width - frame.size.height; // 667-200=467
+        // LandscapeRight(4): 屏幕 px = 667-wy, 贴右 wy=小, 贴左 wy=大。
+        CGFloat maxWY = base.height - frame.size.height; // 667-44=623 (收起) / 667-200=467 (展开)
         BOOL ll = (_curOrientation == 3);
         CGFloat centerPx;
-        if (ll) centerPx = frame.origin.y + frame.size.height * 0.5;       // px = wy
-        else    centerPx = (maxWY - frame.origin.y) + frame.size.height * 0.5; // px = 467-wy
-        right = (centerPx >= screen.width * 0.5);
+        if (ll) centerPx = frame.origin.y + frame.size.height * 0.5;           // px = wy
+        else    centerPx = (maxWY - frame.origin.y) + frame.size.height * 0.5; // px = 623-wy
+        right = (centerPx >= base.height * 0.5); // 屏幕水平中线 333.5
         if (right != _dockRight) {
             _dockRight = right;
             [self _relayoutForDock];
         }
         const CGFloat margin = 0.0;
-        CGFloat targetWy = (right == ll) ? (maxWY - margin) : margin;
-        frame.origin.y = targetWy;
+        frame.origin.y = (right == ll) ? (maxWY - margin) : margin;
         // 屏幕竖直: 限制在屏内
-        CGFloat maxWX = MAX(0, screen.height - frame.size.width); // 375-44=331
+        CGFloat maxWX = MAX(0, base.width - frame.size.width); // 375-44=331
         frame.origin.x = MAX(margin, MIN(maxWX, frame.origin.x));
     } else {
         CGFloat midX = frame.origin.x + frame.size.width * 0.5;
-        right = (midX >= screen.width * 0.5);
+        right = (midX >= base.width * 0.5);
         if (right != _dockRight) {
             // 贴边方向改变: 重排悬浮球与快捷按钮 (悬浮球移到窗口对侧, 展开方向反转)
             _dockRight = right;
             [self _relayoutForDock];
         }
         const CGFloat margin = 0.0;
-        frame.origin.x = right ? (screen.width - frame.size.width - margin) : margin;
+        frame.origin.x = right ? (base.width - frame.size.width - margin) : margin;
         // y 限制在屏内 (横屏切换后屏幕高度变小, 防止悬浮球出屏)
-        CGFloat maxY = MAX(0, screen.height - frame.size.height);
+        CGFloat maxY = MAX(0, base.height - frame.size.height);
         frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
     }
     if (animated) {
@@ -657,11 +651,11 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     // 窗口尺寸跟随展开状态: 收起为球本体 44×44, 展开为面板宽度
     f.size = !_expanded ? CGSizeMake(kBallSize, kBallSize)
              : landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
-    CGSize base = [self _portraitScreenSize]; // 窗口坐标始终基于竖屏基准
-    CGFloat maxX = landscape ? (base.height - f.size.width) : (base.width - f.size.width);
-    CGFloat maxY = landscape ? (base.width  - f.size.height) : (base.height - f.size.height);
-    f.origin.x = MAX(0, MIN(f.origin.x, maxX));
-    f.origin.y = MAX(0, MIN(f.origin.y, maxY));
+    // 窗口坐标始终基于竖屏基准, 横竖屏同一公式 (横屏时窗口被系统旋转 90° 显示,
+    // 但 frame 坐标轴不变: x→屏幕竖直 base.width, y→屏幕水平 base.height)。
+    CGSize base = [self _portraitScreenSize];
+    f.origin.x = MAX(0, MIN(f.origin.x, base.width  - f.size.width));
+    f.origin.y = MAX(0, MIN(f.origin.y, base.height - f.size.height));
     self.frame = f;
 
     _landscape = landscape;
@@ -685,8 +679,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 // 反向同理。
 - (void)_convertFrame:(CGRect *)fp toLandscape:(BOOL)landscape orientation:(long long)o {
     CGSize base = [self _portraitScreenSize];           // 竖屏基准 375×667
-    CGFloat maxWX = base.height - kBallSize;            // 331 (横屏窗口宽)
-    CGFloat maxWY = base.width  - kExpandedW;           // 467 (横屏窗口高)
+    // 横屏窗口: 宽 kBallSize(44) → 屏幕竖直(base.width=375), 高 kExpandedW(200) → 屏幕水平(base.height=667)
+    CGFloat maxWX = base.width  - kBallSize;            // 375-44=331 (横屏窗口宽 → 屏幕竖直范围)
+    CGFloat maxWY = base.height - kExpandedW;           // 667-200=467 (横屏窗口高 → 屏幕水平范围)
     CGRect f = *fp;
     if (landscape) {
         // 竖屏(x,y) → 横屏(wx,wy)
