@@ -156,7 +156,7 @@ handleEventsForBackgroundURLSession:(NSString *)identifier
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
-    [[TSLogStore shared] append:@"[App] didBecomeActive 激活完成"];
+    // 激活诊断日志已移除(2026-08-28)
 }
 
 // iOS 16 上后台 app 被回收前系统常先发内存警告, 若日志停在内存警告之后

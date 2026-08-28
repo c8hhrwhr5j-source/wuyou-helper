@@ -29,7 +29,6 @@
 @property (nonatomic, assign) TSDaemonState state;
 @property (nonatomic, assign) BOOL isInBackground;
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTaskId;
-@property (nonatomic, strong) dispatch_source_t probeSource;   // GCD 探针 timer (后台可靠)
 @property (nonatomic, assign) BOOL hudVisible;
 @property (nonatomic, assign) BOOL silentStarted;  // 静音保活是否已启动(幂等保护)
 @end
@@ -100,12 +99,9 @@
     [[TSAuthKeepAlive shared] start];
     [self startSilentAudio];
     [self beginBackgroundTask];
-    [self startHeartbeat];
 }
 
 - (void)appWillEnterForeground:(NSNotification *)note {
-    NSLog(@"[Daemon] 应用回到前台");
-    [self log:@"应用回到前台"];
     _isInBackground = NO;
     _state = TSDaemonStateRunning;
     [self endBackgroundTask];
@@ -127,9 +123,6 @@
     // 静默检查通知权限状态（不弹窗，依赖 entitlements 预授权）
     [self checkNotificationPermission];
 
-    // 启动心跳
-    [self startHeartbeat];
-
     // 悬浮窗默认关闭，用户可通过界面手动开启
 
     _state = TSDaemonStateRunning;
@@ -137,7 +130,6 @@
 }
 
 - (void)stopAll {
-    [self stopHeartbeat];
     [self stopSilentAudio];
     [[TSAuthKeepAlive shared] stop];
     [[TSLocationKeepAlive shared] stop];
@@ -194,60 +186,9 @@
     NSLog(@"[Daemon] 静默音频保活已停止");
 }
 
-// GCD 探针 timer: 后台 run loop 不跑时 NSTimer 不触发(iOS 16 上几秒内被挂起),
-// 必须用 GCD timer。每 5s 在主线程写一条保活状态到 touch.log。
-// 脚本停止后看最后几条探针:
-//   - 探针一直写到停止前一刻 → 进程仍在跑, 是脚本 Lua 报错或 app 崩溃;
-//   - 探针提前中断(进入后台后很快没新行) → 进程已被挂起/回收, 后台保活失效。
-- (void)startHeartbeat {
-    [self stopHeartbeat];
-    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
-    _probeSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-    dispatch_source_set_timer(_probeSource,
-                              dispatch_time(DISPATCH_TIME_NOW, 5.0 * NSEC_PER_SEC),
-                              5.0 * NSEC_PER_SEC,
-                              1.0 * NSEC_PER_SEC);
-    __weak typeof(self) weakSelf = self;
-    dispatch_source_set_event_handler(_probeSource, ^{
-        [weakSelf probeTick];
-    });
-    dispatch_resume(_probeSource);
-    NSLog(@"[Daemon] 保活探针已启动(5s)");
-    [self log:@"保活探针已启动(每5s一条)"];
-}
-
-- (void)stopHeartbeat {
-    if (_probeSource) {
-        dispatch_source_cancel(_probeSource);
-        _probeSource = nil;
-    }
-}
-
-- (void)probeTick {
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [weakSelf writeProbe];
-    });
-}
-
-// 主线程写探针: backgroundTimeRemaining 必须主线程读。
-// raw < 0 = 前台或已获无限后台豁免(iOS 15 音频 / 特权 entitlements), 此时显示 -1 属正常。
-- (void)writeProbe {
-    @autoreleasepool {
-        NSTimeInterval raw = [[UIApplication sharedApplication] backgroundTimeRemaining];
-        NSInteger remain = (NSInteger)(raw < 0 ? -1 : raw);
-        // 静音播放器与引擎为同一 AVAudioPlayer (TSAudioKeepAlive)
-        BOOL silent = [TSAudioKeepAlive engineRunning];
-        BOOL engine = silent;
-        BOOL script = [TSLuaBridge shared].isRunning;
-        BOOL auth = [[TSAuthKeepAlive shared] challengePending];
-        BOOL loc = [[TSLocationKeepAlive shared] isRunning];
-        [[TSLogStore shared] append:[NSString stringWithFormat:
-            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d Auth=%d 定位=%d",
-            _isInBackground ? @"后台" : @"前台",
-            (int)remain, silent, engine, script, auth, loc]];
-    }
-}
+// 探针 timer 与 writeProbe 已移除(2026-08-28): 每 5s 一条 [保活] 探针日志写入
+// TSLogStore 属纯诊断输出, 高频写日志浪费 CPU/IO/内存, 用户确认删除。保活机制
+// 本身(location/audio/auth/后台任务)不受影响。
 
 - (void)log:(NSString *)msg {
     [[TSLogStore shared] append:[NSString stringWithFormat:@"[守护] %@", msg]];
