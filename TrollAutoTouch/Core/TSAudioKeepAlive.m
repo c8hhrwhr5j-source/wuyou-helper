@@ -86,6 +86,8 @@
 // 音频输出, 后台 app 会在几秒内被挂起并遭 Jetsam 回收。所以 Began 即启动
 // GCD 快速恢复(不等 Ended), Ended 时立即重建。
 - (void)onAudioInterruption:(NSNotification *)note {
+    // iOS 16+ 已禁用音频保活: 不处理中断, 避免启动快速恢复 GCD timer 空转
+    if (@available(iOS 16.0, *)) return;
     NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
     if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
         if (_refCount <= 0) return;   // 无持有者, 无需恢复
@@ -102,11 +104,13 @@
 
 // 游戏等重要音频开始/结束: 借机检查保活引擎是否仍在运行
 - (void)onSecondaryAudioHint:(NSNotification *)note {
+    if (@available(iOS 16.0, *)) return;
     [self rebuildIfNeeded];
 }
 
 // 音频服务崩溃后重建, 旧 engine/player 全部失效
 - (void)onMediaServicesReset:(NSNotification *)note {
+    if (@available(iOS 16.0, *)) return;
     NSLog(@"[TSAudioKeepAlive] 音频服务重置, 重建保活引擎");
     [self log:@"音频服务重置, 重建保活引擎"];
     @synchronized (self) {
@@ -222,10 +226,10 @@
 
 // 若仍被持有但引擎不在运行, 重建(供中断恢复/回前台兜底/看门狗调用)
 - (void)rebuildIfNeeded {
+    // iOS 16+ 已禁用音频保活: 不重建(见 buildAndStartEngine), 提前返回避免空转调度
+    if (@available(iOS 16.0, *)) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         @synchronized (self) {
-            // iOS 16+ 已禁用音频保活: 不重建(见 buildAndStartEngine)
-            if (@available(iOS 16.0, *)) return;
             if (self->_refCount <= 0) return;
             BOOL ok = self->_engine && self->_engine.isRunning
                    && self->_player && self->_player.isPlaying;
@@ -245,6 +249,7 @@
 // 15s 看门狗救不了"几秒内被挂起"的 iOS 16 场景, 必须用 GCD timer。
 - (void)startQuickRecovery {
     @synchronized (self) {
+        if (@available(iOS 16.0, *)) return;   // iOS 16+ 音频保活已禁用, 防御性拦截
         if (_recoverySource) return;
         dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
         _recoverySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
