@@ -474,6 +474,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     if (!CGSizeEqualToSize(self.frame.size, want)) {
         CGRect f = self.frame;
         f.size = want;
+        // 展开后窗口尺寸变大, 必须重新 clamp 位置 (竖屏基准坐标)。
+        // 收起贴边时窗口 44×44 (横屏贴右 y=623 / 竖屏贴右 x=331), 展开后若位置
+        // 不变, 窗口会超出屏幕 (横屏 623+200=823 > 667), 按钮全排到屏幕外只露叉号。
+        CGSize base = [self _portraitScreenSize];
+        f.origin.x = MAX(0, MIN(f.origin.x, base.width  - want.width));
+        f.origin.y = MAX(0, MIN(f.origin.y, base.height - want.height));
         self.frame = f;
         [self _relayoutForDock];
         TSFlushCATransaction();
