@@ -705,12 +705,19 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     *fp = f;
 }
 
-// 横屏时按钮内容旋转 ±90°, 使图标/T 字在屏幕上正立 (旋转绕按钮中心)。
+// 按钮内容旋转: 使图标/T 字在屏幕上正立 (旋转绕按钮中心)。
+//   - 横屏布局 (3/4): 窗口被系统旋转 90° 显示, 按钮内容反向转回 ±90°。
+//   - 方向读到 1 时: app 退后台方向冻结为竖屏 1, 但设备可能实际横屏
+//     (悬浮球以竖屏姿态显示在横屏屏幕上), 图标/按钮整体向右转 90° 补偿。
+//     注意: 真竖屏设备方向也是 1, 同样会转 90° (横屏挂机场景不受影响)。
 - (void)_applyButtonOrientation {
     CGAffineTransform t = CGAffineTransformIdentity;
     if (_landscape) {
         if (_curOrientation == 3) t = CGAffineTransformMakeRotation(M_PI / 2);   // LandscapeLeft
         else                      t = CGAffineTransformMakeRotation(-M_PI / 2);  // LandscapeRight
+    } else if (_curOrientation == 1) {
+        // 方向冻结为竖屏 1 (设备实际横屏): 向右转 90° 让图标/按钮正立
+        t = CGAffineTransformMakeRotation(M_PI / 2);
     }
     _mainBtn.transform = t;
     _pauseBtn.transform = t;
