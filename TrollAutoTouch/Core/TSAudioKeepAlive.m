@@ -169,12 +169,12 @@
         // 0.1 秒极低电平 1kHz 正弦 buffer 循环播放。
         // iOS 16 起系统对后台音频 app 检测更严格: 纯静音(全零数据)不被认可为
         // "正在播放音频", 后台豁免失效会被挂起并遭 Jetsam 回收(iOS 15 宽松)。
-        // 改用约 -50dB 正弦, 人耳几乎不可闻, 但足以让系统确认存在实际音频输出。
+        // 改用约 -40dB 正弦, 人耳几乎不可闻, 但足以让系统确认存在实际音频输出。
         AVAudioPCMBuffer *buf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:fmt frameCapacity:4410];
         buf.frameLength = 4410;
         float *samples = buf.floatChannelData[0];
         for (int i = 0; i < 4410; i++) {
-            samples[i] = 0.003f * sinf(2.0f * (float)M_PI * 1000.0f * i / 44100.0f);
+            samples[i] = 0.01f * sinf(2.0f * (float)M_PI * 1000.0f * i / 44100.0f);
         }
         [player scheduleBuffer:buf atTime:nil options:AVAudioPlayerNodeBufferLoops completionHandler:nil];
 

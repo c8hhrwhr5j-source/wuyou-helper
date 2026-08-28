@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #left-panel {
+            width: 30%;
+            min-width: 200px;
+            background: #fff;
+            position: relative;
+            overflow: hidden;
+            border-right: 1px solid #ddd;
+            flex-shrink: 0;
+        }
+        #right-panel {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background-color: #f5f5f5;
+        }
+        #resizer {
+            width: 6px;
+            background: #ddd;
+            cursor: col-resize;
+            flex-shrink: 0;
+        }
+        #screen-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #screen-image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            transform-origin: center;
+            user-select: none;
+            -webkit-user-drag: none;
+        }
+        .zoom-controls {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(255,255,255,0.9);
+            padding: 8px;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: flex;
+            gap: 5px;
+        }
+        .zoom-btn {
+            padding: 5px 12px;
+            border: none;
+            background: #3498db;
+            color: white;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        .zoom-btn:hover {
+            background: #2980b9;
+        }
+        .node-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 0;
+        }
+        .toggle-btn {
+            width: 20px;
+            height: 20px;
+            line-height: 20px;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
+            font-weight: bold;
+        }
+        ul { list-style: none; padding-left: 20px; margin: 0; }
+        li { margin: 4px 0; }
+        #right-panel {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background-color: #f5f5f5;
+            font-size: 13px;  /* 减小字大小 */
+        }
+        .node {
+            flex: 1;
+            padding: 6px 8px;  /* 减小内边距 */
+            background-color: white;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: all 0.2s ease;
+            cursor: pointer;
+            font-size: 13px;  /* 确保节点文本也使用小字体 */
+        }
+        .node:hover {
+            background-color: #e3f2fd;
+            transform: translateX(5px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+        }
+        .detail-btn {
+            padding: 4px 8px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.2s;
+        }
+        .detail-btn:hover {
+            background: #2980b9;
+        }
+        #details-panel {
+            position: fixed;
+            right: 0;
+            top: 0;
+            width: 700px;
+            height: 100vh;
+            background: white;
+            box-shadow: -2px 0 5px rgba(0,0,0,0.1);
+            padding: 20px;
+            transform: translateX(100%);
+            transition: transform 0.3s ease;
+            overflow-y: auto;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+        }
+        #details-panel.show {
+            transform: translateX(0);
+        }
+        .detail-item {
+            margin-bottom: 0;
+            padding: 5px 8px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+        }
+        .detail-item label {
+            min-width: 100px;
+            font-weight: bold;
+            color: #666;
+            white-space: nowrap;
+            font-size: 12px;
+        }
+        .detail-item .input-wrapper {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .detail-item input {
+            flex: 1;
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            font-size: 12px;
+            background-color: #f9f9f9;
+        }
+        .clickable {
+            background-color: #90EE90;
+        }
+        .clickable:hover {
+            background-color: #98FB98;
+        }
+        #bounds-box {
+            position: absolute;
+            border: 2px solid #f44336;
+            background-color: rgba(244, 67, 54, 0.2);
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+        }
+        #bounds-tooltip {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1001;
+            display: none;
+            white-space: nowrap;
+        }
+        .node.hover {
+            background-color: #ffcdd2 !important;
+            transform: translateX(5px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+        }
+        .input-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .add-icon {
+            cursor: pointer;
+            padding: 4px 8px;
+            color: #2196F3;
+            font-size: 14px;
+            border-radius: 3px;
+            transition: all 0.2s ease;
+            border: 1px solid #2196F3;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+        }
+        .add-icon:hover {
+            background-color: #2196F3;
+            color: white;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 5px rgba(33, 150, 243, 0.3);
+        }
+        #code-input {
+            width: 100%;
+            height: calc(100vh - 100px);
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            resize: none;
+        }
+        .copy-btn {
+            padding: 6px 12px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .copy-btn:hover {
+            background: #1976D2;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 5px rgba(33, 150, 243, 0.3);
+        }
+        .copy-btn:active {
+            transform: translateY(0);
+            box-shadow: none;
+        }
+        .details-container {
+            display: flex;
+            gap: 15px;
+            height: calc(100vh - 40px);
+        }
+        .left-column {
+            width: 60%;
+            overflow-y: auto;
+            padding-right: 10px;
+            border-right: 1px solid #eee;
+        }
+        .right-column {
+            width: 40%;
+            display: flex;
+            flex-direction: column;
+        }
+        .right-column > div:first-child {
+            padding: 0 5px;
+        }
+    </style>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 创建详情面板
+            const detailsPanel = document.createElement('div');
+            detailsPanel.id = 'details-panel';
+            document.body.appendChild(detailsPanel);
+
+            // 创建bounds框和提示框
+            const boundsBox = document.createElement('div');
+            boundsBox.id = 'bounds-box';
+            const boundsTooltip = document.createElement('div');
+            boundsTooltip.id = 'bounds-tooltip';
+            document.getElementById('screen-container').appendChild(boundsBox);
+            document.getElementById('screen-container').appendChild(boundsTooltip);
+
+            // 展开收缩功能
+            document.querySelectorAll('.toggle-btn').forEach(btn => {
+                if (btn.textContent) {  // 只为有+/-的按钮添加事件
+                    btn.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        const ul = this.closest('li').querySelector('ul');
+                        if (ul) {
+                            const isExpanded = this.textContent === '-';
+                            this.textContent = isExpanded ? '+' : '-';
+                            ul.style.display = isExpanded ? 'none' : 'block';
+                        }
+                    });
+                }
+            });
+
+            // 点击详情按钮显示节点信息
+            document.querySelectorAll('.detail-btn').forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const nodeData = JSON.parse(this.dataset.node);
+
+                    const labelMap = {
+                        'class': '类名',
+                        'text': '文本',
+                        'resource-id': '资源ID',
+                        'package': '包名',
+                        'content-desc': '描述',
+                        'checkable': '可选择',
+                        'checked': '已择',
+                        'clickable': '可点击',
+                        'enabled': '可用',
+                        'focusable': '可聚焦',
+                        'focused': '已聚焦',
+                        'scrollable': '可滚动',
+                        'long-clickable': '可长按',
+                        'password': '密码',
+                        'selected': '已选中',
+                        'bounds': '坐标',
+                        'index': '索引',
+                        'rotation': '旋转',
+                        'visible': '可见',
+                        'editable': '可编辑'
+                    };
+
+                    let detailsHtml = `
+                        <div class="details-container">
+                            <div class="left-column">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                    <h3 style="margin: 0; font-size: 14px;">节点详情</h3>
+                                </div>
+                            `;
+
+                    // 添加节点属性
+                    for (const [key, value] of Object.entries(nodeData)) {
+                        const chineseLabel = labelMap[key] || key;
+                        detailsHtml += `
+                            <div class="detail-item">
+                                <label>${chineseLabel} (${key}):</label>
+                                <div class="input-wrapper">
+                                    <input type="text" value="${value}" readonly>
+                                    <span class="add-icon" title="添加到代码" data-key="${key}" data-value="${value}">➕</span>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    detailsHtml += `
+                            </div>
+                            <div class="right-column">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                    <h3 style="margin: 0; font-size: 14px;">生成的代码</h3>
+                                    <div style="display: flex; gap: 8px;">
+                                        <button id="compress-btn" class="copy-btn" style="background: #FF9800;">压缩代码</button>
+                                        <button id="copy-btn" class="copy-btn">复制代码</button>
+                                    </div>
+                                </div>
+                                <textarea id="code-input" spellcheck="false" placeholder="点击左侧➕号添加代码..."></textarea>
+                            </div>
+                        </div>
+                    `;
+
+                    // 在生成详情面板HTML后添加事件监听器
+                    detailsPanel.innerHTML = detailsHtml;
+                    detailsPanel.classList.add('show');
+
+                    // 添加复制按钮事件
+                    document.getElementById('copy-btn').addEventListener('click', function() {
+                        const textarea = document.getElementById('code-input');
+                        textarea.select();
+                        document.execCommand('copy');
+                        
+                        // 显示复制成功提示
+                        const originalText = this.textContent;
+                        this.textContent = '复制成功!';
+                        this.style.backgroundColor = '#4CAF50';
+                        
+                        // 2秒后恢复按钮原始状态
+                        setTimeout(() => {
+                            this.textContent = originalText;
+                            this.style.backgroundColor = '#2196F3';
+                        }, 2000);
+                    });
+
+                    // 添加图标点击事件
+                    document.querySelectorAll('.add-icon').forEach(icon => {
+                        icon.addEventListener('click', function() {
+                            const key = this.dataset.key;
+                            const value = this.dataset.value;
+                            const textarea = document.getElementById('code-input');
+                            
+                            // 生成链式代码
+                            let code = '';
+                            switch (key) {
+                                case 'text':
+                                    code = `\n.Text("${value}")`;
+                                    break;
+                                case 'content-desc':
+                                    code = `\n.Desc("${value}")`;
+                                    break;
+                                case 'resource-id':
+                                    const idValue = value.includes('/') ? value.split('/').pop() : value;
+                                    code = `\n.Id("${idValue}")`;
+                                    break;
+                                case 'class':
+                                    code = `\n.ClassName("${value}")`;
+                                    break;
+                                case 'package':
+                                    code = `\n.PackageName("${value}")`;
+                                    break;
+                                case 'bounds':
+                                    const [x1, y1, x2, y2] = value.match(/\d+/g);
+                                    code = `\n.Bounds(${x1}, ${y1}, ${x2}, ${y2})`;
+                                    break;
+                                case 'long-clickable':
+                                    code = `\n.LongClickable(${value})`;
+                                    break;
+                                default:
+                                    code = `\n.${key.charAt(0).toUpperCase() + key.slice(1)}(${value})`;
+                            }
+                            
+                            // 在光标位置或末尾插入代码
+                            const pos = textarea.selectionStart;
+                            const text = textarea.value;
+                            
+                            // 检查是否需要添加前缀
+                            let prefix = '';
+                            if (!text.trim() || text.slice(pos-1, pos) === '\n') {
+                                prefix = 'node';  // 如果是空文本或新行，添加前缀
+                            }
+                            
+                            // 检查是否需要添加分号
+                            let suffix = '';
+                            // if (text.slice(pos).trim().length === 0) {
+                            //     suffix = ';';  // 如果是行尾，添加分号
+                            // }
+                            
+                            // 组合完整代码
+                            const newCode = prefix + code + suffix;
+                            
+                            // 插入代码
+                            textarea.value = text.slice(0, pos) + newCode + text.slice(pos);
+                            textarea.focus();
+                            textarea.selectionStart = pos + newCode.length;
+                            textarea.selectionEnd = pos + newCode.length;
+                        });
+                    });
+
+                    // 在事件监听器部分添加压缩按钮的处理逻辑
+                    document.getElementById('compress-btn').addEventListener('click', function() {
+                        const textarea = document.getElementById('code-input');
+                        const code = textarea.value;
+                        
+                        if (!code.trim()) {
+                            return;
+                        }
+
+                        // 压缩代码：移除空格和换行符，但保留基本格式
+                        const compressedCode = code
+                            .replace(/\n/g, '') // 移除所有换行符
+                            .replace(/;/g, ';\n') // 在分号后添加换行
+                            .replace(/node\./g, '\nnode.') // 在每个新的node.前添加换行
+                            .trim(); // 移除首尾空白
+
+                        // 更新文本框内容
+                        textarea.value = compressedCode;
+
+                        // 显示压缩成功提示
+                        this.textContent = '压缩成功!';
+                        this.style.backgroundColor = '#4CAF50';
+                        
+                        // 2秒后恢复按钮状态
+                        setTimeout(() => {
+                            this.textContent = '压缩代码';
+                            this.style.backgroundColor = '#FF9800';
+                        }, 2000);
+                    });
+                });
+            });
+
+            // 点击其他地方关闭详情面板
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('.detail-btn') && !e.target.closest('#details-panel')) {
+                    detailsPanel.classList.remove('show');
+                }
+            });
+
+            // 拖动调整面板大小
+            const resizer = document.getElementById('resizer');
+            const leftPanel = document.getElementById('left-panel');
+            let isResizing = false;
+
+            resizer.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                document.body.style.cursor = 'col-resize';
+                document.addEventListener('mousemove', handleMouseMove);
+                document.addEventListener('mouseup', stopResize);
+            });
+
+            function handleMouseMove(e) {
+                if (!isResizing) return;
+                const containerWidth = document.body.clientWidth;
+                const newWidth = (e.clientX / containerWidth * 100);
+                if (newWidth > 20 && newWidth < 80) {
+                    leftPanel.style.width = `${newWidth}%`;
+                }
+            }
+
+            function stopResize() {
+                isResizing = false;
+                document.body.style.cursor = 'default';
+                document.removeEventListener('mousemove', handleMouseMove);
+            }
+
+            // 图片缩放功能
+            const container = document.getElementById('screen-container');
+            const image = document.getElementById('screen-image');
+            let scale = 1;
+            let isDragging = false;
+            let startX, startY, translateX = 0, translateY = 0;
+
+            // 禁止图片默认事件
+            image.addEventListener('click', (e) => {
+                e.preventDefault();
+                return false;
+            });
+
+            image.addEventListener('dragstart', (e) => {
+                e.preventDefault();
+                return false;
+            });
+
+            document.getElementById('zoom-in').addEventListener('click', () => {
+                scale = Math.min(scale * 1.2, 5);
+                updateImageTransform();
+            });
+
+            document.getElementById('zoom-out').addEventListener('click', () => {
+                scale = Math.max(scale / 1.2, 0.2);
+                updateImageTransform();
+            });
+
+            document.getElementById('zoom-reset').addEventListener('click', () => {
+                scale = 1;
+                translateX = 0;
+                translateY = 0;
+                updateImageTransform();
+            });
+
+            container.addEventListener('mousedown', (e) => {
+                if (e.target === image) {
+                    isDragging = true;
+                    startX = e.clientX - translateX;
+                    startY = e.clientY - translateY;
+                }
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                translateX = e.clientX - startX;
+                translateY = e.clientY - startY;
+                updateImageTransform();
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                scale *= delta;
+                scale = Math.max(0.2, Math.min(scale, 5));
+                updateImageTransform();
+            });
+
+            function updateImageTransform() {
+                image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+                updateBoundsBox();
+            }
+
+            // 修改节点悬停事件处理
+            document.querySelectorAll('.node').forEach(node => {
+                node.addEventListener('mouseenter', function() {
+                    document.querySelectorAll('.node.hover').forEach(n => {
+                        n.classList.remove('hover');
+                    });
+                    this.classList.add('hover');
+
+                    const nodeData = JSON.parse(this.dataset.node);
+                    if (nodeData.bounds) {
+                        const bounds = nodeData.bounds.match(/\d+/g).map(Number);
+                        const [x1, y1, x2, y2] = bounds;
+
+                        // 获取图片和容器的信息
+                        const rect = image.getBoundingClientRect();
+                        const containerRect = container.getBoundingClientRect();
+                        
+                        // 计算图片的原始缩放比例
+                        const baseScaleX = rect.width / (image.naturalWidth * scale);
+                        const baseScaleY = rect.height / (image.naturalHeight * scale);
+
+                        // 计算边界框位置
+                        const scaledX1 = x1 * baseScaleX * scale;
+                        const scaledY1 = y1 * baseScaleY * scale;
+                        const scaledX2 = x2 * baseScaleX * scale;
+                        const scaledY2 = y2 * baseScaleY * scale;
+
+                        // 考虑图片的平移
+                        const left = containerRect.left + (containerRect.width - rect.width) / 2 + scaledX1 + translateX;
+                        const top = containerRect.top + (containerRect.height - rect.height) / 2 + scaledY1 + translateY;
+                        const width = scaledX2 - scaledX1;
+                        const height = scaledY2 - scaledY1;
+
+                        // 更新bounds框
+                        boundsBox.style.left = `${left}px`;
+                        boundsBox.style.top = `${top}px`;
+                        boundsBox.style.width = `${width}px`;
+                        boundsBox.style.height = `${height}px`;
+                        boundsBox.style.display = 'block';
+
+                        // 更新提示框
+                        boundsTooltip.textContent = `坐标: ${nodeData.bounds}`;
+                        boundsTooltip.style.left = `${left}px`;
+                        boundsTooltip.style.top = `${top - 25}px`;
+                        boundsTooltip.style.display = 'block';
+                    }
+                });
+
+                node.addEventListener('mouseleave', function() {
+                    this.classList.remove('hover');
+                    boundsBox.style.display = 'none';
+                    boundsTooltip.style.display = 'none';
+                });
+            });
+
+            // 在图片缩放和拖动时更新bounds框位置
+            function updateBoundsBox() {
+                const activeNode = document.querySelector('.node.hover');
+                if (activeNode) {
+                    const event = new MouseEvent('mouseenter', {
+                        bubbles: true,
+                        cancelable: true,
+                    });
+                    activeNode.dispatchEvent(event);
+                }
+            }
+
+            // 添加图片点击事件
+            image.addEventListener('click', function(e) {
+                e.preventDefault();
+                
+                // 获取点击位置相对于图片的坐标
+                const rect = image.getBoundingClientRect();
+                const containerRect = container.getBoundingClientRect();
+                
+                // 计算基础缩放比例
+                const baseScaleX = rect.width / (image.naturalWidth * scale);
+                const baseScaleY = rect.height / (image.naturalHeight * scale);
+                
+                // 计算点击位置相对于图片左上角的偏移
+                const offsetX = e.clientX - (containerRect.left + (containerRect.width - rect.width) / 2 + translateX);
+                const offsetY = e.clientY - (containerRect.top + (containerRect.height - rect.height) / 2 + translateY);
+                
+                // 计算实际坐标
+                const actualX = Math.round(offsetX / (baseScaleX * scale));
+                const actualY = Math.round(offsetY / (baseScaleY * scale));
+                
+                // 显示坐标提示
+                boundsTooltip.textContent = `点击坐标: [${actualX},${actualY}]`;
+                boundsTooltip.style.left = `${e.clientX}px`;
+                boundsTooltip.style.top = `${e.clientY - 25}px`;
+                boundsTooltip.style.display = 'block';
+                
+                // 3秒后隐藏提示
+                setTimeout(() => {
+                    boundsTooltip.style.display = 'none';
+                }, 3000);
+                
+                // 查找包含该坐标的节点
+                const nodes = document.querySelectorAll('.node[data-node]');
+                let foundNode = null;
+                let smallestArea = Infinity;
+                
+                nodes.forEach(node => {
+                    const nodeData = JSON.parse(node.dataset.node);
+                    if (nodeData.bounds) {
+                        const bounds = nodeData.bounds.match(/\d+/g).map(Number);
+                        const [x1, y1, x2, y2] = bounds;
+                        
+                        // 检查点击坐标是否在节点范围内
+                        if (actualX >= x1 && actualX <= x2 && actualY >= y1 && actualY <= y2) {
+                            // 计算区域大小，选择最小的区域（最具体的元素）
+                            const area = (x2 - x1) * (y2 - y1);
+                            if (area < smallestArea) {
+                                smallestArea = area;
+                                foundNode = node;
+                            }
+                        }
+                    }
+                });
+                
+                if (foundNode) {
+                    // 移除他节点的hover效果
+                    document.querySelectorAll('.node.hover').forEach(n => {
+                        n.classList.remove('hover');
+                    });
+                    
+                    // 展开所有父节点
+                    let parent = foundNode.closest('li');
+                    while (parent) {
+                        const ul = parent.querySelector('ul');
+                        const toggleBtn = parent.querySelector('.toggle-btn');
+                        if (ul && toggleBtn) {
+                            ul.style.display = 'block';
+                            toggleBtn.textContent = '-';
+                        }
+                        parent = parent.parentElement.closest('li');
+                    }
+                    
+                    // 添加hover效果
+                    foundNode.classList.add('hover');
+                    
+                    // 滚动到对应节点
+                    foundNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    
+                    // 触发mouseenter事件以显示bounds框
+                    const event = new MouseEvent('mouseenter', {
+                        bubbles: true,
+                        cancelable: true,
+                    });
+                    foundNode.dispatchEvent(event);
+                }
+            });
+
+            // 添加一个函数来初始化所有事件监听器
+            function initializeEventListeners() {
+                // 展开收缩功能
+                document.querySelectorAll('.toggle-btn').forEach(btn => {
+                    if (btn.textContent) {
+                        btn.addEventListener('click', function(e) {
+                            e.stopPropagation();
+                            const ul = this.closest('li').querySelector('ul');
+                            if (ul) {
+                                const isExpanded = this.textContent === '-';
+                                this.textContent = isExpanded ? '+' : '-';
+                                ul.style.display = isExpanded ? 'none' : 'block';
+                            }
+                        });
+                    }
+                });
+
+                // 节点悬停事件
+                document.querySelectorAll('.node').forEach(node => {
+                    node.addEventListener('mouseenter', handleNodeMouseEnter);
+                    node.addEventListener('mouseleave', handleNodeMouseLeave);
+                });
+
+                // 详情按钮事件
+                document.querySelectorAll('.detail-btn').forEach(btn => {
+                    btn.addEventListener('click', handleDetailButtonClick);
+                });
+            }
+
+            // 在添加事件监听器的部分添加查找按钮的事件处理
+            document.getElementById('find-btn').addEventListener('click', function() {
+                const textarea = document.getElementById('code-input');
+                const code = textarea.value.trim();
+                
+                if (!code) {
+                    alert('请先添加查找条件！');
+                    return;
+                }
+                
+                try {
+                    // 解析代码成查找条件
+                    const conditions = parseCodeToConditions(code);
+                    
+                    // 在所有节点中查找匹配的节点
+                    const nodes = document.querySelectorAll('.node[data-node]');
+                    let foundNodes = [];
+                    
+                    nodes.forEach(node => {
+                        const nodeData = JSON.parse(node.dataset.node);
+                        if (matchConditions(nodeData, conditions)) {
+                            foundNodes.push(node);
+                        }
+                    });
+                    
+                    // 清除之前的高亮
+                    document.querySelectorAll('.node.hover').forEach(n => {
+                        n.classList.remove('hover');
+                    });
+                    
+                    // 高亮找到的节点
+                    if (foundNodes.length > 0) {
+                        foundNodes.forEach(node => {
+                            node.classList.add('hover');
+                            
+                            // 展开所有父节点
+                            let parent = node.closest('li');
+                            while (parent) {
+                                const ul = parent.querySelector('ul');
+                                const toggleBtn = parent.querySelector('.toggle-btn');
+                                if (ul && toggleBtn) {
+                                    ul.style.display = 'block';
+                                    toggleBtn.textContent = '-';
+                                }
+                                parent = parent.parentElement.closest('li');
+                            }
+                            
+                            // 滚动到第一个找到的节点
+                            if (node === foundNodes[0]) {
+                                node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }
+                        });
+                        
+                        // 显示查找结果
+                        this.textContent = `找 ${foundNodes.length} 个节点`;
+                        this.style.backgroundColor = '#4CAF50';
+                    } else {
+                        this.textContent = '未找到节点';
+                        this.style.backgroundColor = '#f44336';
+                    }
+                    
+                    // 3秒后恢复按钮文字
+                    setTimeout(() => {
+                        this.textContent = '查找节点';
+                        this.style.backgroundColor = '#4CAF50';
+                    }, 3000);
+                    
+                } catch (error) {
+                    console.error('查找失败:', error);
+                    alert('查找失败: ' + error.message);
+                }
+            });
+
+            // 解析代码成查找条件
+            function parseCodeToConditions(code) {
+                const conditions = [];
+                const lines = code.split('\n');
+                
+                lines.forEach(line => {
+                    // 支持大写方法名的正则表达式
+                    const match = line.match(/\.(Text|Desc|Id|ClassName|Bounds|Clickable|Enabled|Selected|Checked|Focused|Scrollable|LongClickable)\("?([^"]*)"?\)/i);
+                    if (match) {
+                        const [_, key, value] = match;
+                        conditions.push({
+                            key: key.toLowerCase() === 'desc' ? 'content-desc' : 
+                                 key.toLowerCase() === 'classname' ? 'class' : 
+                                 key.toLowerCase() === 'id' ? 'resource-id' : 
+                                 key.toLowerCase(),
+                            value: value
+                        });
+                    }
+                });
+                
+                return conditions;
+            }
+
+            // 检查节点是否匹配所有条件
+            function matchConditions(nodeData, conditions) {
+                return conditions.every(condition => {
+                    if (condition.key === 'bounds') {
+                        // 特殊处理bounds条件
+                        const [x1, y1, x2, y2] = condition.value.split(',').map(Number);
+                        const nodeBounds = nodeData.bounds.match(/\d+/g).map(Number);
+                        return nodeBounds[0] === x1 && nodeBounds[1] === y1 && 
+                               nodeBounds[2] === x2 && nodeBounds[3] === y2;
+                    }
+                    return nodeData[condition.key] === condition.value;
+                });
+            }
+        });
+    </script>
+</head>
+<body>
+<div id="left-panel">
+    <div id="screen-container">
+        <!-- 图像的 src 动态设置 -->
+        <img id="screen-image" src="" alt="Screen capture">
+        <div class="zoom-controls">
+            <button id="zoom-in" class="zoom-btn">+</button>
+            <button id="zoom-reset" class="zoom-btn">重置</button>
+            <button id="zoom-out" class="zoom-btn">-</button>
+        </div>
+    </div>
+</div>
+<div id="resizer"></div>
+<div id="right-panel">
+    <ul class="tree">
+        {tree_content}
+    </ul>
+</div>
+
+<script>
+    // iOS 节点助手跑在设备自身的 8820 调试通道里，只有一个设备，截图接口
+    // 就是同端口的固定 /screenshot。
+    // 加 ts 查询串纯粹是为了绕过浏览器缓存，每次 URL 不同就能拿到新截图。
+    document.getElementById('screen-image').src =
+        '/screenshot?ts=' + Date.now();
+
+    // 右上角加一个刷新按钮：重刷页面 = 重扫节点 + 重拉截图。
+    (function () {
+        const btn = document.createElement('button');
+        btn.textContent = '刷新';
+        btn.className = 'zoom-btn';
+        btn.style.cssText =
+            'position:fixed;top:12px;right:16px;z-index:2000;background:#4CAF50;';
+        btn.addEventListener('click', () => location.reload());
+        document.body.appendChild(btn);
+    })();
+</script>
+</body>
+</html>

@@ -864,6 +864,7 @@ AREA={
 	["横石墓一层"]	       ={{477, 134, 0xECC391}, {527, 133, 0xCAA57B}, {509, 141, 0xEAC292}},
 	["地图盟重"]	       ={{991, 663, 0xefc794}, {1021, 608, 0xe7c38c}, {993, 536, 0xefc794}},
 	["去石墓一层"]	       ={{1072, 585, 0xe7be8c}, {1044, 518, 0xefc394}, {1044, 654, 0xefc394}},
+	["沃玛森林"]	       ={{1210,20,0xe7c295},{1225,20,0xd6b384},{1254,24,0xe7c795},{1279,16,0xefc295},{1259,14,0xefc795},{1290,16,0xe7c795},{1265,24,0xefc795},{1200,64,0x33b374}},
 	["地图沃玛森林"]	       ={{1070, 529, 0xefc794}, {1024, 595, 0xefc794}, {1049, 669, 0xefc79c}},
 	["沃玛寺庙一层"]	       ={{1288, 21, 0xd6b684}, {1185, 20, 0xefc794}, {1173, 19, 0xe7c394}},
 	["地图沃玛森林下"]	       ={{1098, 521, 0xefc794}, {1027, 581, 0xe7c394}, {1090, 652, 0xefc794}},
@@ -1041,29 +1042,85 @@ function main()
 	device.turnOffAssistiveTouch() -- 关闭辅助触控
     local w, h = getScreenSize()
     log(string.format("屏幕 %.0f x %.0f", w, h))
+	local xfq = os.time()
     while true do
         sleep(100)
         appsl()
-        if rgbbj("腾讯LOGO") or rgbbj("盛大LOGO") then
-            click(355,270,960,487) -- 关闭视频动画
-            sleep(500)
-			log("腾讯LOGO")
+		if os.time() - xfq >= 120 then
+			sys.setFloatBallPoint(27, 1309)   -- 把悬浮球移动到 (1300, 720)
+			xfq = os.time()
 		end
-        if rgbbj("主页公告") then
-            click(946,162,971,187) -- 关闭公告
-            sleep(500)
-			log("主页公告")
+		if rgbbj("附近下") then
+			if rgbbj("沃玛森林") then
+				if rgbbj("自动战斗") or rgbbj("自动战斗上") or rgbbj("自动战斗下") then
+					click(1245,344,1301,363) -- 点击自动战斗
+					sleep(1000)
+				end
+			else
+				click(1197,13,1306,63) -- 打开地图
+				sleep(1000)
+			end
+		else
+			if rgbbj("腾讯LOGO") or rgbbj("盛大LOGO") then
+				click(355,270,960,487) -- 关闭视频动画
+				sleep(500)
+				log("腾讯LOGO")
+			end
+			if rgbbj("主页公告") then
+				click(946,162,971,187) -- 关闭公告
+				sleep(500)
+				log("主页公告")
+			end
+			if rgbbj("断线重连") then
+				click(826,516,952,552) -- 进入游戏
+				sleep(500)
+				log("断线重连")
+			end
+			if rgbbj("选择角色") then
+				click(610,673,727,707) -- 进入游戏
+				sleep(500)
+				log("选择角色")
+			end
+			if rgbbj("地图") then
+				if rgbbj("地图沃玛森林") or rgbbj("地图沃玛森林下") then
+					click(1185,20,1214,48) -- 关闭地图
+					sleep(500)
+				else
+					click(1020,29,1105,52) -- 打开世界地图
+					sleep(500)
+				end
+			end
+			if rgbbj("世界地图") then
+				click(707,555,736,590) -- 沃玛森林
+				sleep(1500)
+				click(525, 472, 594, 501) -- 确定
+				sleep(500)
+			end
+
 		end
-        if rgbbj("断线重连") then
-            click(826,516,952,552) -- 进入游戏
-            sleep(500)
-			log("断线重连")
+		if rgbbj("每日礼包")  then
+            click(1169,85,1193,109)--关闭每日礼包限时活动
+            sleep(1000)	
         end
-		if rgbbj("选择角色") then
-            click(610,673,727,707) -- 进入游戏
-            sleep(500)
-			log("选择角色")
-        end
+		if rgbbj("新每日签到") then
+			click(1130,47,1153,70) -- 关闭
+            sleep(1000)
+		end
+		if rgbbj("挂机奖励") then
+            click(613, 517, 719, 542)	-- 免费领取	
+            sleep(1000)
+            click(1245,344,1301,363) -- 点击自动战斗
+        end	
+		if rgbbj("提示") or rgbbj("小提示框") or rgbbj("焰火提示") then	
+            click(738,473,805,502) -- 取消
+            sleep(1000)						
+        end		
+		if rgbbj("设置出现") or rgbbj("设置出现1") then
+            click(640,661,696,709) -- 把设置收回去
+            sleep(1000)
+        end	
+		XDZB_ZXLB()--新的装备or在线礼包
+		--[[
 		if rgbbj("附近下") then
 			if ocr(126,2,281,35,"我们与你",1) then
 				log("找到咖啡名字")
@@ -1081,9 +1138,28 @@ function main()
 				click(fx-1,fy-1,fx+1,fy+1)
 			end
 		end
+		--]]
     end
 end
 
+--新的装备or在线礼包
+function XDZB_ZXLB()--新的装备or在线礼包
+    if rgbbj("在线礼包") then
+        if rgbbj("新的装备") then
+            click(1029,398,1056,424)--关闭掉	
+        else
+            click(913,563,989,595)--==领取或装备 			
+            HandleLiBaoJiangLi()--处理礼包奖励弹窗
+        end
+    end
+end
+
+-- 单独处理礼包奖励弹窗
+function HandleLiBaoJiangLi()--单独处理礼包奖励弹窗
+    if rgbbj("礼包奖励") or rgbbj("礼包奖励1") then
+        click(634,650,700,705)  -- 任意地方关闭
+    end
+end
 -- 区域找字 OCR：识别 x1,y1-x2,y2 区域内的文字
 --   若识别结果中包含 txt 中的至少 n 个字，返回 true
 --   n 默认 1；txt 为空返回 false
@@ -1247,6 +1323,9 @@ function appsl()
     local bid = app.frontBid()
     if bid ~= APP then
         app.open(APP)
+		sleep(2000)
+        sys.setFloatBallPoint(27, 1309)   -- 把悬浮球移动到 (1300, 720)
+		sleep(2000)
     end
 end
 

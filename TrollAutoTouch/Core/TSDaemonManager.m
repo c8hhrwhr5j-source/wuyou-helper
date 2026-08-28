@@ -14,6 +14,7 @@
 #import "TSLogStore.h"
 #import "TSLuaBridge.h"
 #import "TSAudioKeepAlive.h"
+#import "TSPushKeepAlive.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <UIKit/UIKit.h>
@@ -85,6 +86,9 @@
     _state = TSDaemonStateBackground;
 
     // 自动开始后台保活
+    // iOS 16.6: 仅靠静音音频保活会在游戏抢占 audio session 时失效(约10秒被挂起/回收),
+    // PushKit VoIP 提供独立于音频的无限后台豁免, 与音频/后台任务三层保险。
+    [[TSPushKeepAlive shared] start];
     [self startSilentAudio];
     [self beginBackgroundTask];
     [self startHeartbeat];
@@ -114,6 +118,9 @@
     // 静默检查通知权限状态（不弹窗，依赖 entitlements 预授权）
     [self checkNotificationPermission];
 
+    // 启动 PushKit VoIP 注册(幂等), 进后台前先获得豁免
+    [[TSPushKeepAlive shared] start];
+
     // 启动心跳
     [self startHeartbeat];
 
@@ -126,6 +133,7 @@
 - (void)stopAll {
     [self stopHeartbeat];
     [self stopSilentAudio];
+    [[TSPushKeepAlive shared] stop];
     [self endBackgroundTask];
     [self hideHUD];
     _state = TSDaemonStateStopped;
@@ -277,12 +285,13 @@
     [wav appendBytes:"data" length:4];
     [wav appendBytes:&dataSize length:4];
 
-    // 极低电平 1kHz 正弦 PCM 数据(约 -50dB)。
-    // iOS 16 起纯静音(全零)不被认可为实际音频输出, 后台豁免失效会快速被杀。
+    // 极低电平 1kHz 正弦 PCM 数据(约 -40dB)。
+    // iOS 16 起纯静音(全零)不被认可为实际音频输出, 后台豁免失效会快速被杀;
+    // 音量取 0.01(-40dB) 比纯静音更能被系统认可, 同时人耳几乎不可闻。
     int16_t *pcm = (int16_t *)malloc(dataSize);
     for (int i = 0; i < sampleRate; i++) {
         double t = (double)i / sampleRate;
-        pcm[i] = (int16_t)(0.003 * 32767.0 * sin(2.0 * M_PI * 1000.0 * t));
+        pcm[i] = (int16_t)(0.01 * 32767.0 * sin(2.0 * M_PI * 1000.0 * t));
     }
     [wav appendBytes:pcm length:dataSize];
     free(pcm);
@@ -328,18 +337,20 @@
     });
 }
 
-// 主线程写探针: backgroundTimeRemaining 必须主线程读
+// 主线程写探针: backgroundTimeRemaining 必须主线程读。
+// raw < 0 = 前台或已获无限后台豁免(音频/VoIP), 此时显示 -1 属正常。
 - (void)writeProbe {
     @autoreleasepool {
-        NSInteger remain = (NSInteger)MAX(0.0,
-            [[UIApplication sharedApplication] backgroundTimeRemaining]);
+        NSTimeInterval raw = [[UIApplication sharedApplication] backgroundTimeRemaining];
+        NSInteger remain = (NSInteger)(raw < 0 ? -1 : raw);
         BOOL silent = _silentPlayer.isPlaying;
         BOOL engine = [TSAudioKeepAlive engineRunning];
         BOOL script = [TSLuaBridge shared].isRunning;
+        BOOL voip = [[TSPushKeepAlive shared] isRegistered];
         [[TSLogStore shared] append:[NSString stringWithFormat:
-            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d",
+            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d VoIP=%d",
             _isInBackground ? @"后台" : @"前台",
-            (int)remain, silent, engine, script]];
+            (int)remain, silent, engine, script, voip]];
     }
 }
 
