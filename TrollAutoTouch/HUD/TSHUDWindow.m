@@ -924,6 +924,35 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
             frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
             frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
         }
+    } else if (_landscape) {
+        // portraitOnly 且设备横屏: point 为竖屏基准逻辑点(球心, x∈[0,375], y∈[0,667])。
+        // 严格竖屏语义 —— 坐标按竖屏坐标系解释, 位置随屏幕旋转: 先把竖屏球心旋转到
+        // 当前方向的屏幕坐标, 再反解窗口 frame (窗口 frame 坐标始终为竖屏基准):
+        //   LL(3): 屏幕球心 (y, 375-x); LR(4): 屏幕球心 (667-y, x)
+        // 窗口显示映射(左上角): LL 屏幕 (wy, 331-wx); LR 屏幕 (467-wy, wx)
+        // 球心窗口内 (cx=22, cy), 反解得:
+        //   LL: wx = x-66, wy = y-cy; LR: wx = x-22, wy = y-cy
+        // (cx=22; cy=收起 22 / 展开 _ballY+22)
+        // 注意不能用 _effectiveScreenSize (横屏时已交换为 667×375) 做 clamp,
+        // 否则竖屏 y 会被错误压到"屏幕水平"范围 (1309 落到 ~700)。
+        CGSize base = [self _portraitScreenSize]; // 竖屏基准 375×667
+        BOOL ll = ([self _currentGlobalOrientation] == 3);
+        CGFloat cx = kBallSize / 2.0;
+        CGFloat cy = collapsed ? kBallSize / 2.0 : [self _ballY] + kBallSize / 2.0;
+        if (collapsed) {
+            frame.size = CGSizeMake(kBallSize, kBallSize);
+            _mainBtn.frame = CGRectMake((kBallSize - kBallVisSize) / 2.0,
+                                        (kBallSize - kBallVisSize) / 2.0,
+                                        kBallVisSize, kBallVisSize);
+        } else {
+            frame.size = CGSizeMake(kBallSize, kExpandedW);
+        }
+        CGFloat wx = ll ? (point.x - kBallSize - cx) : (point.x - cx);
+        CGFloat wy = point.y - cy;
+        CGFloat maxX = MAX(0, base.width  - frame.size.width);   // 屏幕竖直
+        CGFloat maxY = MAX(0, base.height - frame.size.height);  // 屏幕水平
+        frame.origin.x = MAX(0, MIN(wx, maxX));
+        frame.origin.y = MAX(0, MIN(wy, maxY));
     } else {
         if (collapsed) {
             // 收起: 窗口收缩为球本体 44×44, 球居中, point 即球心, 可贴任意边缘
