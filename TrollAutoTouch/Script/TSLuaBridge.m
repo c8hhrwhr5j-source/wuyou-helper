@@ -1299,7 +1299,7 @@ static int l_sys_battery(lua_State *L) {
 static int l_sys_setFloatBallPoint(lua_State *L) {
     CGFloat sx = (CGFloat)luaL_checknumber(L, 1);
     CGFloat sy = (CGFloat)luaL_checknumber(L, 2);
-    lua_log([NSString stringWithFormat:@"[setFloatBallPoint] script(%.0f, %.0f)", sx, sy]);
+    // [setFloatBallPoint] 日志已移除(2026-08-28): 脚本每 2 分钟调用一次, 属高频噪音
     dispatch_async(dispatch_get_main_queue(), ^{
         // 悬浮球移动固定按竖屏原始坐标系 (0 旋转): 不做脚本方向/设备方向旋转换算。
         // 脚本传入的物理像素直接除以 scale 作为竖屏窗口逻辑点坐标,
