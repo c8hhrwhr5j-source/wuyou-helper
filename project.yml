@@ -81,29 +81,24 @@ targets:
         CFBundleDisplayName: QQ音乐
         CFBundleVersion: "1"
         CFBundleShortVersionString: "1.0.0"
-        # 后台保活: 对齐原版 TrollAutoScript 2.3.6 —— 只声明 network-authentication,
-        # 不声明 audio/voip/processing 等后台模式。
-        # 原因(逆向原版 2.3.6 二进制 + iOS 16.6 实测的结论):
-        #   - iOS 16 起系统对后台模式审计严格: 声明 audio 却播放"无意义音频"
-        #     (静音/极低电平)会被判定滥用, 撤销豁免并快速挂起(实测 10s 内被杀);
-        #   - 声明 voip 但 PushKit 注册失败(iOS 16 强制检查, TrollStore 下
-        #     aps-environment 无有效凭证必然失败)启动即闪退 —— 已删除全部 PushKit。
-        #   - 特权 entitlements(platform-application / no-sandbox / multitasking.
-        #     termination / systemappassertions / private.kernel.jetsam) 在 iOS 16.6
-        #     TrollStore 下不授予 platform 身份, 后台豁免实测不生效
-        #     (backgroundTimeRemaining 仍正常倒数后被 Jetsam 清理)。
-        #   - 原版保活机制(逆向 2.3.6 二进制确认):
-        #     (1) NEHotspotHelper 注册(registerWithOptions:queue:handler:) —— 注册为
-        #         系统 Wi-Fi 热点认证助手, 系统将 app 视为 network-authentication 应用
-        #         (对应 com.apple.developer.networking.HotspotHelper +
-        #          com.apple.wifi.manager-access entitlement); 由 TSNetworkAuth 实现。
-        #     (2) background URLSession + downloadTask 认证挑战挂起 ——
-        #         didReceiveChallenge 中不调用 completionHandler, 保持未决认证,
-        #         由 background session(nsurlsessiond 托管)延续后台执行;
-        #         由 TSAuthKeepAlive 实现(依赖网络, 无网络时降级为后台任务兜底)。
-        # 因此 iOS 16+ 上禁用音频保活(TSAudioKeepAlive / TSDaemonManager 内判断),
-        # iOS 15 保留音频保活(系统不审计, 音频豁免仍有效)。
+        # 后台保活: 对齐 AutoGoRunner(无忧IOS, app-release.ipa, iOS 16.6 实测有效)。
+        # 逆向 AutoGoRunner 确认其保活组合(2026-08-28):
+        #   (1) UIBackgroundModes 声明 audio + AVAudioPlayer 播放运行时生成的
+        #       16000Hz 全零静音 WAV(volume=0.0, numberOfLoops=-1, 无限循环) ——
+        #       volume:0.0 仍属于"播放中", 系统据此豁免挂起。之前"iOS 16 播放
+        #       静音音频会被判定滥用加速挂起"是错误结论, AutoGoRunner 正是靠
+        #       静音 AVAudioPlayer 在 iOS 16.6 后台保活(实测后台不挂起);
+        #   (2) NEHotspotHelper 注册(network-authentication 后台模式) ——
+        #       registerWithOptions:queue:handler:, 收到系统命令后唤醒全部服务;
+        #       com.apple.developer.networking.HotspotHelper +
+        #       com.apple.wifi.manager-access entitlement; 由 TSNetworkAuth 实现。
+        #   (3) background URLSession + downloadTask 认证挑战挂起(TSAuthKeepAlive),
+        #       作为无网络环境的后台任务兜底。
+        # 注意: 声明 voip 但 PushKit 注册失败(iOS 16 强制检查, TrollStore 下
+        # aps-environment 无有效凭证必然失败)启动即闪退 —— 已删除全部 PushKit,
+        # 也不声明 voip 后台模式。
         UIBackgroundModes:
+          - audio
           - network-authentication
         # 对齐原版 TrollAutoScript 2.3.6: HideAtLaunch=true —— SpringBoard 私有键,
         # 让 app 在 App Switcher 中不显示(隐藏型应用), 后台挂起/切换器策略区别于普通 app。

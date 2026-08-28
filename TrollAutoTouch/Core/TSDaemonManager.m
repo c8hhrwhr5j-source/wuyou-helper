@@ -25,9 +25,9 @@
 @property (nonatomic, assign) TSDaemonState state;
 @property (nonatomic, assign) BOOL isInBackground;
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTaskId;
-@property (nonatomic, strong) AVAudioPlayer *silentPlayer;
 @property (nonatomic, strong) dispatch_source_t probeSource;   // GCD 探针 timer (后台可靠)
 @property (nonatomic, assign) BOOL hudVisible;
+@property (nonatomic, assign) BOOL silentStarted;  // 静音保活是否已启动(幂等保护)
 @end
 
 @implementation TSDaemonManager
@@ -65,9 +65,7 @@
                name:UIApplicationWillEnterForegroundNotification object:nil];
     [nc addObserver:self selector:@selector(appWillTerminate:)
                name:UIApplicationWillTerminateNotification object:nil];
-    // 音频被其他 app(如游戏)抢占时恢复静默保活
-    [nc addObserver:self selector:@selector(onAudioInterruption:)
-               name:AVAudioSessionInterruptionNotification object:nil];
+    // 音频中断/重置/前后台自愈统一由 TSAudioKeepAlive 处理, 此处不再重复注册
 }
 
 - (void)appDidEnterBackground:(NSNotification *)note {
@@ -85,10 +83,10 @@
     _isInBackground = YES;
     _state = TSDaemonStateBackground;
 
-    // 自动开始后台保活: network-authentication 认证挂起 + 后台任务兜底。
-    // 对齐原版 TrollAutoScript 2.3.6: 原版 UIBackgroundModes 仅声明
-    // network-authentication 并保持 URLSession 认证挑战未决, iOS 16 据此授予
-    // 后台执行时间(实测特权 entitlements 豁免在 iOS 16.6 TrollStore 下不生效)。
+    // 自动开始后台保活: 静音 AVAudioPlayer + network-authentication 认证挂起 + 后台任务兜底。
+    // 对齐 AutoGoRunner(无忧IOS, iOS 16.6 实测有效): UIBackgroundModes 声明 audio,
+    // AVAudioPlayer 无限循环播放 16kHz 全零静音 WAV(volume=0), 系统据此豁免挂起。
+    // network-authentication(TSAuthKeepAlive) 作为补充的认证挑战挂起。
     // 注意: 不注册 PushKit — iOS 16 起声明 voip 后台模式但 PushKit 注册失败
     // 的 app 会被系统启动时强制终止(TrollStore 下 aps-environment 无效必然失败)。
     [[TSAuthKeepAlive shared] start];
@@ -167,150 +165,24 @@
     _bgTaskId = UIBackgroundTaskInvalid;
 }
 
+// 静默音频保活: 委托给 TSAudioKeepAlive(单例 + 引用计数)。
+// 对齐 AutoGoRunner(无忧IOS): AVAudioPlayer 无限循环播放运行时生成的
+// 16kHz 全零静音 WAV(volume=0.0), iOS 16.6 实测保活有效。
+// TSAudioKeepAlive 内部处理音频中断/服务重置/前后台自愈, 这里只负责
+// 进入后台时启动、服务停止时关闭, 用 silentStarted 保证引用计数平衡。
 - (void)startSilentAudio {
-    // iOS 16+: 对齐原版 TrollAutoScript 2.3.6 —— 系统对后台音频 app 审计严格,
-    // "无意义音频"会被判定滥用并快速挂起, 音频保活失效且有害(原版也无音频保活)。
-    // iOS 16 后台保活由 TSAuthKeepAlive(network-authentication 认证挂起)承担。
-    // iOS 15 保留音频保活(系统不审计, 豁免仍有效)。
-    if (@available(iOS 16.0, *)) {
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            NSLog(@"[Daemon] iOS 16+ 已禁用静默音频保活 (由认证挂起保活替代)");
-            [self log:@"iOS 16+ 已禁用静默音频保活 (由认证挂起保活替代)"];
-        });
-        return;
-    }
-    if (_silentPlayer && _silentPlayer.isPlaying) return;
-
-    // 使用静默 WAV 文件(1 秒静默循环)
-    NSString *path = [[NSBundle mainBundle] pathForResource:@"silence" ofType:@"wav"];
-    if (!path) {
-        // 动态生成静默音频文件
-        path = [self createSilentWAV];
-    }
-
-    NSError *error = nil;
-    AVAudioSession *session = [AVAudioSession sharedInstance];
-    [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:&error];
-    [session setActive:YES error:&error];
-
-    NSURL *url = [NSURL fileURLWithPath:path];
-    _silentPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
-    if (_silentPlayer) {
-        _silentPlayer.numberOfLoops = -1; // 无限循环
-        _silentPlayer.volume = 0.5;       // WAV 已含 -50dB 信号, 保持极低音量
-        [_silentPlayer prepareToPlay];
-        [_silentPlayer play];
-        NSLog(@"[Daemon] 静默音频已开始(后台保活)");
-        [self log:@"静默音频(AVAudioPlayer)已开始"];
-    } else {
-        NSLog(@"[Daemon] 静默音频启动失败: %@", error);
-        [self log:[NSString stringWithFormat:@"静默音频(AVAudioPlayer)启动失败: %@", error]];
-    }
+    if (_silentStarted) return;
+    _silentStarted = YES;
+    [[TSAudioKeepAlive shared] start];
+    NSLog(@"[Daemon] 静默音频保活已启动 (AVAudioPlayer, 对齐 AutoGoRunner)");
+    [self log:@"静默音频保活已启动 (AVAudioPlayer 16kHz 全零 WAV)"];
 }
 
 - (void)stopSilentAudio {
-    if (_silentPlayer) {
-        [_silentPlayer stop];
-        _silentPlayer = nil;
-        NSLog(@"[Daemon] 静默音频已停止");
-    }
-}
-
-// 音频被游戏等抢占时 AVAudioPlayer 会停止, 必须恢复否则保活失效。
-// 与 TSAudioKeepAlive 同理: 不能只等 Ended(Began 后对方持续播放期间
-// 系统不会发 Ended), Began 后要主动重试。iOS 16 上不恢复会被快速挂起。
-- (void)onAudioInterruption:(NSNotification *)note {
-    NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
-    if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
-        if (!_isInBackground || !_silentPlayer) return;
-        NSLog(@"[Daemon] 音频中断开始, 调度静默音频恢复");
-        [self log:@"音频中断开始, 调度静默音频恢复"];
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
-                       dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            [weakSelf tryResumeSilentAudio];
-        });
-    } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
-        [self tryResumeSilentAudio];
-    }
-}
-
-// 若仍在后台且静默播放器已停止, 重新激活 session 并播放; 激活失败则 1s 后重试
-- (void)tryResumeSilentAudio {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self->_isInBackground) return;
-        if (!self->_silentPlayer || self->_silentPlayer.isPlaying) return;
-        NSError *err = nil;
-        AVAudioSession *session = [AVAudioSession sharedInstance];
-        if (![session setActive:YES error:&err]) {
-            NSLog(@"[Daemon] 恢复静默音频: 激活 session 失败 %@, 1s 后重试", err);
-            [self log:[NSString stringWithFormat:@"恢复静默音频失败: %@, 1s 后重试", err]];
-            __weak typeof(self) weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
-                           dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                [weakSelf tryResumeSilentAudio];
-            });
-            return;
-        }
-        [self->_silentPlayer play];
-        NSLog(@"[Daemon] 静默音频已恢复播放");
-        [self log:@"静默音频(AVAudioPlayer)已恢复播放"];
-    });
-}
-
-/// 动态生成 1 秒静默 WAV 文件缓存
-- (NSString *)createSilentWAV {
-    // WAV 头 + 静默采样数据
-    int sampleRate = 44100;
-    int bitsPerSample = 16;
-    int channels = 1;
-    int bytesPerSample = bitsPerSample / 8;
-    int dataSize = sampleRate * bytesPerSample * channels; // 1 秒
-
-    NSMutableData *wav = [NSMutableData data];
-
-    // RIFF header
-    uint32_t chunkSize = 36 + dataSize;
-    [wav appendBytes:"RIFF" length:4];
-    [wav appendBytes:&chunkSize length:4];
-    [wav appendBytes:"WAVE" length:4];
-
-    // fmt subchunk
-    [wav appendBytes:"fmt " length:4];
-    uint32_t fmtSize = 16;
-    uint16_t audioFormat = 1; // PCM
-    uint16_t numChannels = channels;
-    uint32_t sr = sampleRate;
-    uint32_t byteRate = sampleRate * numChannels * bytesPerSample;
-    uint16_t blockAlign = numChannels * bytesPerSample;
-    uint16_t bps = bitsPerSample;
-    [wav appendBytes:&fmtSize length:4];
-    [wav appendBytes:&audioFormat length:2];
-    [wav appendBytes:&numChannels length:2];
-    [wav appendBytes:&sr length:4];
-    [wav appendBytes:&byteRate length:4];
-    [wav appendBytes:&blockAlign length:2];
-    [wav appendBytes:&bps length:2];
-
-    // data subchunk
-    [wav appendBytes:"data" length:4];
-    [wav appendBytes:&dataSize length:4];
-
-    // 极低电平 1kHz 正弦 PCM 数据(约 -40dB)。
-    // iOS 16 起纯静音(全零)不被认可为实际音频输出, 后台豁免失效会快速被杀;
-    // 音量取 0.01(-40dB) 比纯静音更能被系统认可, 同时人耳几乎不可闻。
-    int16_t *pcm = (int16_t *)malloc(dataSize);
-    for (int i = 0; i < sampleRate; i++) {
-        double t = (double)i / sampleRate;
-        pcm[i] = (int16_t)(0.01 * 32767.0 * sin(2.0 * M_PI * 1000.0 * t));
-    }
-    [wav appendBytes:pcm length:dataSize];
-    free(pcm);
-
-    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"silence.wav"];
-    [wav writeToFile:tmpPath atomically:YES];
-    return tmpPath;
+    if (!_silentStarted) return;
+    _silentStarted = NO;
+    [[TSAudioKeepAlive shared] stop];
+    NSLog(@"[Daemon] 静默音频保活已停止");
 }
 
 // GCD 探针 timer: 后台 run loop 不跑时 NSTimer 不触发(iOS 16 上几秒内被挂起),
@@ -355,8 +227,9 @@
     @autoreleasepool {
         NSTimeInterval raw = [[UIApplication sharedApplication] backgroundTimeRemaining];
         NSInteger remain = (NSInteger)(raw < 0 ? -1 : raw);
-        BOOL silent = _silentPlayer.isPlaying;
-        BOOL engine = [TSAudioKeepAlive engineRunning];
+        // 静音播放器与引擎为同一 AVAudioPlayer (TSAudioKeepAlive)
+        BOOL silent = [TSAudioKeepAlive engineRunning];
+        BOOL engine = silent;
         BOOL script = [TSLuaBridge shared].isRunning;
         BOOL auth = [[TSAuthKeepAlive shared] challengePending];
         [[TSLogStore shared] append:[NSString stringWithFormat:

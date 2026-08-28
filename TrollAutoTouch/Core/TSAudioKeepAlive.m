@@ -2,25 +2,32 @@
 //  TSAudioKeepAlive.m
 //  TrollAutoTouch
 //
-//  实现: AVAudioEngine + 0.1s 静音 PCM buffer 循环播放。
-//  需要 Info.plist 的 UIBackgroundModes 含 audio, 且 AVFoundation 已弱链接。
+//  实现: AVAudioPlayer + 运行时生成的 16kHz 全零静音 WAV 无限循环播放。
+//  完全复刻 AutoGoRunner(无忧IOS, app-release.ipa) 在 iOS 16.6 上实测有效的保活方式:
+//    - 静音 WAV: 16000Hz / 单声道 / 16bit PCM / 2 秒全零 (44 头 + 64000 数据 = 64044 字节),
+//      运行时在内存生成(_createSilentWAVData), 不依赖资源文件;
+//    - AVAudioPlayer initWithData:(内存 WAV) → numberOfLoops=-1 → volume=0.0
+//      → prepareToPlay → play。volume=0.0 仍属于"播放中", 系统据此豁免挂起;
+//    - AVAudioSession setCategory:Playback mode:Default options:MixWithOthers
+//      → setActive:YES;
+//    - 4 个通知自愈(全部重入 ensurePlaying, isPlaying 检查保证幂等):
+//      * UIApplicationDidEnterBackgroundNotification     (进后台, 确保播放)
+//      * UIApplicationDidBecomeActiveNotification       (回前台, 兜底重启)
+//      * AVAudioSessionInterruptionNotification         (Ended 时重启, 对齐原版)
+//      * AVAudioSessionMediaServicesWereResetNotification (重建播放器后重启)
+//    - 15s 看门狗兜底。
 //
-//  自愈机制:
-//   - 监听音频中断(切到游戏等独占音频的 app / 来电), 中断结束后自动恢复;
-//   - 监听 MediaServices 重置(音频服务崩溃恢复), 重建引擎;
-//   - 15s 看门狗自检, 引擎意外停止时自动重启;
-//   - 回前台时兜底重启。
-//  防止保活引擎被系统打断后失效 → App 被挂起 → 8080 服务器随之不可达。
+//  历史结论纠正(2026-08-28 逆向 AutoGoRunner @ _AGStartDebugAudioKeepAlive):
+//  之前误以为 "iOS 16+ 播放静音音频会被系统判定滥用快速挂起" —— 该结论错误。
+//  AutoGoRunner 正是靠 volume=0.0 的静音 AVAudioPlayer 在 iOS 16.6 上保活成功,
+//  且其 Info.plist 的 UIBackgroundModes 声明了 audio。原版 TrollAutoScript 2.3.6
+//  只声明 network-authentication 是另一条路线(特权 entitlements + HotspotHelper),
+//  但 iOS 16.6 TrollStore 下 platform 身份不可用, 该路线实测失败(后台 30s 被杀)。
+//  故 TrollAutoTouch 采用 AutoGoRunner 路线: audio 后台模式 + 静音 AVAudioPlayer。
 //
-//  ⚠️ iOS 16+ 禁用(对齐原版 TrollAutoScript 2.3.6 保活机制):
-//     逆向原版确认: 原版在 iOS 16.6 上不依赖 audio 后台模式/音频保活,
-//     UIBackgroundModes 只声明 network-authentication, 保活完全靠签名内嵌的
-//     特权 entitlements(platform-application / no-sandbox / multitasking.termination /
-//     systemappassertions / private.kernel.jetsam)。iOS 16 起系统对后台音频
-//     app 审计严格, 声明 audio 却播放"无意义音频"(静音/极低电平)会被判定滥用,
-//     撤销豁免并快速挂起(实测 10s 内被杀)。因此 iOS 16+ 直接跳过音频引擎,
-//     靠 entitlement 豁免保活; iOS 15 保留音频保活(系统不审计, 豁免仍有效)。
-//
+//  ⚠️ 关键差异(与旧实现): AVAudioPlayer(非 AVAudioEngine); WAV 为 16kHz 全零静音
+//  (非 44100Hz 1kHz 正弦); volume=0.0(非 0.01); 不区分 iOS 15/16(统一启用);
+//  UIBackgroundModes 声明 audio(见 project.yml)。
 
 #import "TSAudioKeepAlive.h"
 #import "TSLogStore.h"
@@ -28,12 +35,21 @@
 #import <UIKit/UIKit.h>
 #import <math.h>
 
+// 与 AutoGoRunner _AGCreateSilentWAVData 完全一致的参数:
+//   16000Hz / 1ch / 16bit / 2 秒全零
+//   dataSize = 16000 * 2 * 2 = 64000 (0xFA00)
+//   byteRate = 16000 * 2 = 32000 (0x7D00)
+//   总长 = 44 + 64000 = 64044 (0xFA2C)
+static const uint32_t kSilentSampleRate   = 16000;
+static const uint16_t kSilentChannels     = 1;
+static const uint16_t kSilentBitDepth     = 16;
+static const uint32_t kSilentDataBytes    = 64000; // 2 秒
+
 @implementation TSAudioKeepAlive {
-    AVAudioEngine *_engine;
-    AVAudioPlayerNode *_player;
+    AVAudioPlayer *_player;
+    NSData *_silentWAV;
     NSInteger _refCount;
     NSTimer *_watchdogTimer;
-    dispatch_source_t _recoverySource;   // 中断期间快速恢复 timer (GCD, 后台可靠触发)
     BOOL _notificationsInstalled;
 }
 
@@ -49,6 +65,7 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _silentWAV = [self createSilentWAVData];
         [self installNotifications];
     }
     return self;
@@ -56,71 +73,45 @@
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    if (_recoverySource) {
-        dispatch_source_cancel(_recoverySource);
-        _recoverySource = nil;
-    }
     [_watchdogTimer invalidate];
     _watchdogTimer = nil;
 }
 
-#pragma mark - 通知监听(音频中断 / 服务重置 / 回前台)
+#pragma mark - 通知监听(对齐 AutoGoRunner: 4 个观察者全部重入 ensurePlaying)
 
 - (void)installNotifications {
     if (_notificationsInstalled) return;
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    // 进入后台: 确保静音播放器持续播放(系统据此豁免挂起)
+    [nc addObserver:self selector:@selector(rebuildIfNeeded)
+               name:UIApplicationDidEnterBackgroundNotification object:nil];
+    // 回到前台: 兜底重启
+    [nc addObserver:self selector:@selector(rebuildIfNeeded)
+               name:UIApplicationDidBecomeActiveNotification object:nil];
+    // 音频中断: 对齐原版仅处理 Ended(值 0)。Began 在 MixWithOthers 混音模式下
+    // 一般不会触发(与其他 app 混音而非抢占); 来电等硬中断结束时恢复即可。
     [nc addObserver:self selector:@selector(onAudioInterruption:)
                name:AVAudioSessionInterruptionNotification object:nil];
+    // 音频服务重置(崩溃恢复): 播放器对象失效, 需重建后再启动
     [nc addObserver:self selector:@selector(onMediaServicesReset:)
                name:AVAudioSessionMediaServicesWereResetNotification object:nil];
-    [nc addObserver:self selector:@selector(onDidBecomeActive:)
-               name:UIApplicationDidBecomeActiveNotification object:nil];
-    // iOS 12+: 其他 app(如游戏)的重要音频开始/结束时都会收到, 借此确认保活引擎存活
-    [nc addObserver:self selector:@selector(onSecondaryAudioHint:)
-               name:AVAudioSessionSilenceSecondaryAudioHintNotification object:nil];
     _notificationsInstalled = YES;
 }
 
-// 其他 app 抢占音频(如切到游戏)会触发中断。
-// 关键: 对方持续播放期间系统不会发 Ended, 只发 Began。iOS 16 上不尽快恢复
-// 音频输出, 后台 app 会在几秒内被挂起并遭 Jetsam 回收。所以 Began 即启动
-// GCD 快速恢复(不等 Ended), Ended 时立即重建。
 - (void)onAudioInterruption:(NSNotification *)note {
-    // iOS 16+ 已禁用音频保活: 不处理中断, 避免启动快速恢复 GCD timer 空转
-    if (@available(iOS 16.0, *)) return;
     NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
-    if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
-        if (_refCount <= 0) return;   // 无持有者, 无需恢复
-        NSLog(@"[TSAudioKeepAlive] 音频中断开始(被抢占), 启动快速恢复");
-        [self log:@"音频中断开始(被抢占), 启动快速恢复"];
-        [self startQuickRecovery];
-    } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
-        NSLog(@"[TSAudioKeepAlive] 音频中断结束, 停止快速恢复并重建");
-        [self log:@"音频中断结束, 停止快速恢复并重建"];
-        [self stopQuickRecovery];
-        [self rebuildIfNeeded];
-    }
-}
-
-// 游戏等重要音频开始/结束: 借机检查保活引擎是否仍在运行
-- (void)onSecondaryAudioHint:(NSNotification *)note {
-    if (@available(iOS 16.0, *)) return;
+    if (type.unsignedIntegerValue != AVAudioSessionInterruptionTypeEnded) return;
+    NSLog(@"[TSAudioKeepAlive] 音频中断结束, 恢复播放");
+    [self log:@"音频中断结束, 恢复播放"];
     [self rebuildIfNeeded];
 }
 
-// 音频服务崩溃后重建, 旧 engine/player 全部失效
 - (void)onMediaServicesReset:(NSNotification *)note {
-    if (@available(iOS 16.0, *)) return;
-    NSLog(@"[TSAudioKeepAlive] 音频服务重置, 重建保活引擎");
-    [self log:@"音频服务重置, 重建保活引擎"];
+    NSLog(@"[TSAudioKeepAlive] 音频服务重置, 重建播放器");
+    [self log:@"音频服务重置, 重建播放器"];
     @synchronized (self) {
-        [self teardownEngine];
+        _player = nil; // 旧播放器随音频服务崩溃失效
     }
-    [self rebuildIfNeeded];
-}
-
-// 回到前台: 若引擎意外停止则重启(兜底)
-- (void)onDidBecomeActive:(NSNotification *)note {
     [self rebuildIfNeeded];
 }
 
@@ -129,48 +120,56 @@
 - (void)start {
     @synchronized (self) {
         _refCount++;
-        if (_engine && _engine.isRunning) {
-            [self startWatchdog];
-            return;
-        }
-        [self teardownEngine];
-        [self buildAndStartEngine];
+        [self ensurePlaying];
     }
 }
 
 - (void)stop {
     @synchronized (self) {
         if (_refCount > 0) _refCount--;
-        if (_refCount > 0) return; // 仍有其他持有者, 保持引擎运行
+        if (_refCount > 0) return; // 仍有其他持有者, 保持播放
         [self stopWatchdog];
-        [self teardownEngine];
-        [[AVAudioSession sharedInstance] setActive:NO
-                                       withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
-                                             error:nil];
+        if (![NSThread isMainThread]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self stopPlayerAndDeactivate];
+            });
+        } else {
+            [self stopPlayerAndDeactivate];
+        }
         NSLog(@"[TSAudioKeepAlive] 静音保活已停止");
     }
 }
 
-#pragma mark - 引擎构建
-
-- (void)buildAndStartEngine {
+- (void)stopPlayerAndDeactivate {
     @synchronized (self) {
-        // iOS 16+: 系统对后台音频 app 审计严格, "无意义音频"会被判定滥用并快速挂起。
-        // 对齐原版 TrollAutoScript 2.3.6: 不依赖音频保活, 靠特权 entitlements 豁免。
-        // 仅记录一次日志, 后续恢复/看门狗走同路径直接返回, 不反复构建引擎。
-        if (@available(iOS 16.0, *)) {
-            static dispatch_once_t once;
-            dispatch_once(&once, ^{
-                NSLog(@"[TSAudioKeepAlive] iOS 16+ 已禁用音频保活 (对齐原版, 靠 entitlement 豁免)");
-                [[TSLogStore shared] append:@"[保活] iOS 16+ 已禁用音频保活 (对齐原版, 靠 entitlement 豁免)"];
-            });
-            return;
-        }
+        [_player stop];
+        _player = nil;
+        [[AVAudioSession sharedInstance] setActive:NO
+                                       withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                             error:nil];
+    }
+}
+
+#pragma mark - 播放核心(对齐 AutoGoRunner _AGStartDebugAudioKeepAlive)
+
+// 幂等: 已在播放则无操作。非主线程时派发到主线程执行(AVAudioPlayer 主线程操作)。
+- (void)ensurePlaying {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self ensurePlaying];
+        });
+        return;
+    }
+    @synchronized (self) {
+        if (_refCount <= 0) return;
+        if (_player && _player.isPlaying) return;
+
         NSError *err = nil;
         AVAudioSession *session = [AVAudioSession sharedInstance];
         if (![session setCategory:AVAudioSessionCategoryPlayback
-                     withOptions:AVAudioSessionCategoryOptionMixWithOthers
-                           error:&err]) {
+                             mode:AVAudioSessionModeDefault
+                          options:AVAudioSessionCategoryOptionMixWithOthers
+                            error:&err]) {
             NSLog(@"[TSAudioKeepAlive] 设置 audio session 失败: %@", err);
             [self log:[NSString stringWithFormat:@"设置 audio session 失败: %@", err]];
             return;
@@ -181,115 +180,65 @@
             return;
         }
 
-        AVAudioEngine *engine = [AVAudioEngine new];
-        AVAudioPlayerNode *player = [AVAudioPlayerNode new];
-        [engine attachNode:player];
-        AVAudioFormat *fmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                              sampleRate:44100
-                                                                channels:1
-                                                             interleaved:NO];
-        [engine connect:player to:engine.mainMixerNode format:fmt];
-
-        // 0.1 秒极低电平 1kHz 正弦 buffer 循环播放。
-        // iOS 16 起系统对后台音频 app 检测更严格: 纯静音(全零数据)不被认可为
-        // "正在播放音频", 后台豁免失效会被挂起并遭 Jetsam 回收(iOS 15 宽松)。
-        // 改用约 -40dB 正弦, 人耳几乎不可闻, 但足以让系统确认存在实际音频输出。
-        AVAudioPCMBuffer *buf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:fmt frameCapacity:4410];
-        buf.frameLength = 4410;
-        float *samples = buf.floatChannelData[0];
-        for (int i = 0; i < 4410; i++) {
-            samples[i] = 0.01f * sinf(2.0f * (float)M_PI * 1000.0f * i / 44100.0f);
-        }
-        [player scheduleBuffer:buf atTime:nil options:AVAudioPlayerNodeBufferLoops completionHandler:nil];
-
-        if (![engine startAndReturnError:&err]) {
-            NSLog(@"[TSAudioKeepAlive] 启动音频引擎失败: %@", err);
-            return;
-        }
-        [player play];
-
-        _engine = engine;
-        _player = player;
-        [self startWatchdog];
-        NSLog(@"[TSAudioKeepAlive] 静音保活已启动 (后台运行保护)");
-    }
-}
-
-- (void)teardownEngine {
-    @synchronized (self) {
-        [_player stop];
-        [_engine stop];
-        _player = nil;
-        _engine = nil;
-    }
-}
-
-// 若仍被持有但引擎不在运行, 重建(供中断恢复/回前台兜底/看门狗调用)
-- (void)rebuildIfNeeded {
-    // iOS 16+ 已禁用音频保活: 不重建(见 buildAndStartEngine), 提前返回避免空转调度
-    if (@available(iOS 16.0, *)) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @synchronized (self) {
-            if (self->_refCount <= 0) return;
-            BOOL ok = self->_engine && self->_engine.isRunning
-                   && self->_player && self->_player.isPlaying;
-            if (ok) return;
-            NSLog(@"[TSAudioKeepAlive] 保活引擎未在运行, 自动重建");
-            [self log:@"保活引擎未在运行, 自动重建"];
-            [self teardownEngine];
-            [self buildAndStartEngine];
-        }
-    });
-}
-
-#pragma mark - 快速恢复(GCD, 后台可靠)
-
-// 被抢占后每 0.5s 尝试重建保活引擎, 直到成功或中断结束。
-// 用 dispatch_source 而非 NSTimer: 后台 run loop 不跑时 NSTimer 不触发,
-// 15s 看门狗救不了"几秒内被挂起"的 iOS 16 场景, 必须用 GCD timer。
-- (void)startQuickRecovery {
-    @synchronized (self) {
-        if (@available(iOS 16.0, *)) return;   // iOS 16+ 音频保活已禁用, 防御性拦截
-        if (_recoverySource) return;
-        dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-        _recoverySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-        dispatch_source_set_timer(_recoverySource,
-                                  dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC),
-                                  0.5 * NSEC_PER_SEC,
-                                  0.1 * NSEC_PER_SEC);
-        __weak typeof(self) weakSelf = self;
-        dispatch_source_set_event_handler(_recoverySource, ^{
-            [weakSelf quickRecoverTick];
-        });
-        dispatch_resume(_recoverySource);
-    }
-}
-
-- (void)stopQuickRecovery {
-    @synchronized (self) {
-        if (_recoverySource) {
-            dispatch_source_cancel(_recoverySource);
-            _recoverySource = nil;
-        }
-    }
-}
-
-// 快速恢复节拍
-- (void)quickRecoverTick {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @synchronized (self) {
-            if (self->_refCount <= 0) return;
-            BOOL ok = self->_engine && self->_engine.isRunning
-                   && self->_player && self->_player.isPlaying;
-            if (ok) {
-                NSLog(@"[TSAudioKeepAlive] 快速恢复: 保活引擎已恢复运行");
-                [self stopQuickRecovery];
+        if (!_player) {
+            _player = [[AVAudioPlayer alloc] initWithData:_silentWAV error:&err];
+            if (!_player) {
+                NSLog(@"[TSAudioKeepAlive] 创建 AVAudioPlayer 失败: %@", err);
+                [self log:[NSString stringWithFormat:@"创建 AVAudioPlayer 失败: %@", err]];
                 return;
             }
-            NSLog(@"[TSAudioKeepAlive] 快速恢复: 引擎未运行, 尝试重建");
-            [self rebuildIfNeeded];
+            _player.numberOfLoops = -1; // 无限循环
+            _player.volume = 0.0;       // 对齐原版: 全零静音 + volume=0
+            [_player prepareToPlay];
         }
+
+        [_player play];
+        [self startWatchdog];
+        NSLog(@"[TSAudioKeepAlive] 静音保活已启动 (AVAudioPlayer 16kHz 全零 WAV, 对齐 AutoGoRunner)");
+        [self log:@"静音保活已启动 (AVAudioPlayer 16kHz 全零 WAV, 对齐 AutoGoRunner)"];
+    }
+}
+
+// 若仍被持有但播放器未在播放, 重建(供通知自愈/看门狗调用)
+- (void)rebuildIfNeeded {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self ensurePlaying];
     });
+}
+
+#pragma mark - 静音 WAV 生成(对齐 AutoGoRunner _AGCreateSilentWAVData @ 0x100018974)
+
+// 构造 44 字节 RIFF 头 + 64000 字节全零 PCM。iOS 为小端, 直接 memcpy 各字段。
+- (NSData *)createSilentWAVData {
+    NSMutableData *wav = [NSMutableData dataWithLength:44 + kSilentDataBytes];
+    Byte *b = (Byte *)wav.mutableBytes;
+
+    uint32_t chunkSize = 36 + kSilentDataBytes;        // 0xFA24
+    uint32_t fmtSize   = 16;
+    uint16_t audioFormat = 1;                          // PCM
+    uint16_t numChannels = kSilentChannels;
+    uint32_t sampleRate  = kSilentSampleRate;          // 0x3E80
+    uint32_t byteRate    = kSilentSampleRate * kSilentChannels * (kSilentBitDepth / 8); // 0x7D00
+    uint16_t blockAlign  = kSilentChannels * (kSilentBitDepth / 8);                      // 2
+    uint16_t bitsPerSample = kSilentBitDepth;          // 0x10
+    uint32_t dataSize    = kSilentDataBytes;           // 0xFA00
+
+    memcpy(b + 0,  "RIFF", 4);
+    memcpy(b + 4,  &chunkSize, 4);
+    memcpy(b + 8,  "WAVE", 4);
+    memcpy(b + 12, "fmt ", 4);
+    memcpy(b + 16, &fmtSize, 4);
+    memcpy(b + 20, &audioFormat, 2);
+    memcpy(b + 22, &numChannels, 2);
+    memcpy(b + 24, &sampleRate, 4);
+    memcpy(b + 28, &byteRate, 4);
+    memcpy(b + 32, &blockAlign, 2);
+    memcpy(b + 34, &bitsPerSample, 2);
+    memcpy(b + 36, "data", 4);
+    memcpy(b + 40, &dataSize, 4);
+    // b+44 起 64000 字节由 dataWithLength 保证全零(静音)
+
+    return wav;
 }
 
 #pragma mark - 看门狗
@@ -326,8 +275,7 @@
 + (BOOL)engineRunning {
     TSAudioKeepAlive *ka = [TSAudioKeepAlive shared];
     @synchronized (ka) {
-        return ka->_engine && ka->_engine.isRunning
-            && ka->_player && ka->_player.isPlaying;
+        return ka->_player && ka->_player.isPlaying;
     }
 }
 
