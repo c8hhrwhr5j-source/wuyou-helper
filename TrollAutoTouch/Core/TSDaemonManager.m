@@ -14,7 +14,6 @@
 #import "TSLogStore.h"
 #import "TSLuaBridge.h"
 #import "TSAudioKeepAlive.h"
-#import "TSPushKeepAlive.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <UIKit/UIKit.h>
@@ -85,10 +84,9 @@
     _isInBackground = YES;
     _state = TSDaemonStateBackground;
 
-    // 自动开始后台保活
-    // iOS 16.6: 仅靠静音音频保活会在游戏抢占 audio session 时失效(约10秒被挂起/回收),
-    // PushKit VoIP 提供独立于音频的无限后台豁免, 与音频/后台任务三层保险。
-    [[TSPushKeepAlive shared] start];
+    // 自动开始后台保活: 静音音频 + 后台任务双保险。
+    // 注意: 不注册 PushKit — iOS 16 起声明 voip 后台模式但 PushKit 注册失败
+    // 的 app 会被系统启动时强制终止(TrollStore 下 aps-environment 无效必然失败)。
     [self startSilentAudio];
     [self beginBackgroundTask];
     [self startHeartbeat];
@@ -118,9 +116,6 @@
     // 静默检查通知权限状态（不弹窗，依赖 entitlements 预授权）
     [self checkNotificationPermission];
 
-    // 启动 PushKit VoIP 注册(幂等), 进后台前先获得豁免
-    [[TSPushKeepAlive shared] start];
-
     // 启动心跳
     [self startHeartbeat];
 
@@ -133,7 +128,6 @@
 - (void)stopAll {
     [self stopHeartbeat];
     [self stopSilentAudio];
-    [[TSPushKeepAlive shared] stop];
     [self endBackgroundTask];
     [self hideHUD];
     _state = TSDaemonStateStopped;
@@ -346,11 +340,10 @@
         BOOL silent = _silentPlayer.isPlaying;
         BOOL engine = [TSAudioKeepAlive engineRunning];
         BOOL script = [TSLuaBridge shared].isRunning;
-        BOOL voip = [[TSPushKeepAlive shared] isRegistered];
         [[TSLogStore shared] append:[NSString stringWithFormat:
-            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d VoIP=%d",
+            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d",
             _isInBackground ? @"后台" : @"前台",
-            (int)remain, silent, engine, script, voip]];
+            (int)remain, silent, engine, script]];
     }
 }
 

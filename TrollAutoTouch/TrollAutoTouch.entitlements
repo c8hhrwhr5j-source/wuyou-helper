@@ -184,10 +184,6 @@
 	<true/>
 	<key>application-identifier</key>
 	<string>com.tencent.QQMusic</string>
-	<key>aps-connection-initiate</key>
-	<true/>
-	<key>aps-environment</key>
-	<string>development</string>
 	<key>auth-key-vault-client</key>
 	<string>2093460704</string>
 	<key>backupd-connection-initiate</key>

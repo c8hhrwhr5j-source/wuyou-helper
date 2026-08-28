@@ -29,7 +29,7 @@ settings:
     #       (v2.1.5-procursus7) 签名，支持 chained fixups 重签。
     # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
     #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreImage -framework Security -framework WebKit -framework PushKit -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreImage -framework Security -framework WebKit -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
 targets:
   TrollAutoTouch:
     type: application
