@@ -11,6 +11,7 @@
 #import "HUD/TSHUDWindow.h"
 #import "HUD/TSHUDHost.h"
 #import "Core/TSDaemonManager.h"
+#import "Core/TSAuthKeepAlive.h"
 #import "Core/TSLicense.h"
 #import "Core/TSTrialManager.h"
 #import "Script/TSLuaBridge.h"
@@ -60,6 +61,11 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // 表现为"启动 App 后要按 4 次音量键才弹出暂停/运行按钮"。
     // 预热成功后首次按键即秒开弹窗 (只预创建 context, 不注册托管)。
     [[TSHUDHost shared] prepareOverlayContext];
+
+    // ── 预热认证保活会话 ──
+    // background session 标识符固定: 若上次运行有未完成任务, 系统冷启动时会恢复,
+    // 必须在启动阶段用同一标识符创建 session 并设置 delegate, 否则系统丢弃事件。
+    [TSAuthKeepAlive shared];
 
     NSLog(@"[QQ音乐] App 启动完成");
     return YES;
@@ -133,6 +139,16 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 - (void)applicationWillEnterForeground:(UIApplication *)application {
     [[TSLogStore shared] append:@"[App] willEnterForeground 回到前台"];
     [[TSDaemonManager shared] endBackgroundTask];
+}
+
+// background URLSession 事件: 系统在后台会话任务完成后唤醒/激活 app 时回调。
+// 保活场景任务持续挂起, 此回调仅在任务意外完成时触发, 尽快收尾即可。
+- (void)application:(UIApplication *)application
+handleEventsForBackgroundURLSession:(NSString *)identifier
+  completionHandler:(void (^)(void))completionHandler {
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[认证保活] 后台会话事件: %@", identifier]];
+    [TSAuthKeepAlive shared]; // 确保 session 已创建/关联
+    if (completionHandler) completionHandler();
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {

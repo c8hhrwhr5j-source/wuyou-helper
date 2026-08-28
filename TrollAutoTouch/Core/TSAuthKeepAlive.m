@@ -2,6 +2,21 @@
 //  TSAuthKeepAlive.m
 //  TrollAutoTouch
 //
+//  network-authentication 保活(对齐原版 TrollAutoScript):
+//  background URLSession + downloadTask + 认证挑战挂起。
+//
+//  依据原版二进制静态证据:
+//    - downloadTaskWithURL: / setHTTPMethod:
+//    - URLSession:task:didReceiveChallenge:completionHandler:
+//    - URLSessionDidFinishEventsForBackgroundURLSession:
+//    - application:handleEventsForBackgroundURLSession:completionHandler:
+//    - UIBackgroundModes = network-authentication
+//    - com.apple.wlan.authentication entitlement
+//
+//  background session 的任务由系统 nsurlsessiond 守护进程管理,
+//  任务执行期间(含认证挑战挂起)系统为 app 保持后台执行,
+//  不受 30 秒 beginBackgroundTask 窗口限制 —— 这是原版后台持续的关键。
+//
 
 #import "TSAuthKeepAlive.h"
 #import "TSLogStore.h"
@@ -23,10 +38,12 @@ static NSArray<NSString *> *authURLs(void) {
 }
 // 单次挑战挂起时长上限: 超过后任务被 request timeout 终止, 再发起下一轮
 static const NSTimeInterval kChallengeTimeout = 40.0;
+// background session 标识符: 系统据此在冷启动时恢复未完成任务
+static NSString *const kTSAuthSessionIdentifier = @"com.trollautotouch.auth-keepalive";
 
 @interface TSAuthKeepAlive ()
 @property (nonatomic, strong) NSURLSession *session;
-@property (nonatomic, strong) NSURLSessionDataTask *activeTask;
+@property (nonatomic, strong) NSURLSessionDownloadTask *activeTask;
 @property (nonatomic, strong) dispatch_source_t retryTimer;   // 兜底: 定时确保始终有未决任务
 @property (nonatomic, assign) NSUInteger urlIndex;
 @property (nonatomic, assign) BOOL running;
@@ -46,12 +63,16 @@ static const NSTimeInterval kChallengeTimeout = 40.0;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        // background session: 任务由系统 nsurlsessiond 接管,
+        // 认证挑战挂起期间系统保持 app 后台执行(不受 30s 窗口限制)。
+        NSURLSessionConfiguration *cfg =
+            [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:kTSAuthSessionIdentifier];
         cfg.timeoutIntervalForRequest = kChallengeTimeout;
         cfg.timeoutIntervalForResource = kChallengeTimeout;
         cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        cfg.waitsForConnectivity = NO;
-        // delegateQueue = nil → 主队列回调; 挑战状态与探针(主线程)天然串行
+        cfg.waitsForConnectivity = YES;
+        cfg.sessionSendsLaunchEvents = NO;   // 保活场景 app 常驻, 无需系统为任务完成唤醒
+        cfg.discretionary = NO;              // 立即发起, 不等待空闲/充电
         _session = [NSURLSession sessionWithConfiguration:cfg delegate:self delegateQueue:nil];
     }
     return self;
@@ -60,7 +81,7 @@ static const NSTimeInterval kChallengeTimeout = 40.0;
 - (void)start {
     if (_running) return;
     _running = YES;
-    [[TSLogStore shared] append:@"[认证保活] 启动 network-authentication 认证挂起会话"];
+    [[TSLogStore shared] append:@"[认证保活] 启动 network-authentication 认证挂起会话(background session)"];
     [self fireAuthRequest];
     [self startRetryTimer];
 }
@@ -68,10 +89,7 @@ static const NSTimeInterval kChallengeTimeout = 40.0;
 - (void)stop {
     _running = NO;
     _challengePending = NO;
-    if (_retryTimer) {
-        dispatch_source_cancel(_retryTimer);
-        _retryTimer = nil;
-    }
+    [self stopRetryTimer];
     [_activeTask cancel];
     _activeTask = nil;
 }
@@ -87,7 +105,8 @@ static const NSTimeInterval kChallengeTimeout = 40.0;
     NSURL *url = [NSURL URLWithString:urls[_urlIndex]];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = kChallengeTimeout;
-    NSURLSessionDataTask *task = [_session dataTaskWithRequest:req];
+    // 对齐原版: downloadTask(background session 中下载任务由系统持续执行)
+    NSURLSessionDownloadTask *task = [_session downloadTaskWithRequest:req];
     _activeTask = task;
     [task resume];
 }
@@ -159,6 +178,21 @@ didCompleteWithError:(NSError *)error {
                    dispatch_get_main_queue(), ^{
         [weakSelf fireAuthRequest];
     });
+}
+
+// background session 事件收尾(下载完成/会话结束)。保活场景任务持续存在,
+// 此回调仅在任务意外完成时触发, 记录日志即可; 系统要求尽快返回。
+- (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session {
+    [[TSLogStore shared] append:@"[认证保活] background session 事件结束"];
+}
+
+// downloadTask 意外完成时清理临时文件
+- (void)URLSession:(NSURLSession *)session
+     downloadTask:(NSURLSessionDownloadTask *)downloadTask
+didFinishDownloadingToURL:(NSURL *)location {
+    if (location) {
+        [[NSFileManager defaultManager] removeItemAtURL:location error:nil];
+    }
 }
 
 @end
