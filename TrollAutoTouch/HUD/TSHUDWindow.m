@@ -647,7 +647,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_applyOrientationLayout {
     long long o = [self _currentGlobalOrientation];
     BOOL landscape = (o == 3 || o == 4);
-    if (landscape == _landscape && o == _curOrientation) return;
+    // _curOrientation==0 表示方向布局尚未初始化: 若横竖屏类型一致则无需任何
+    // 换算 (避免竖屏初始化时对竖屏 frame 做"竖屏→竖屏"的误换算)。
+    if (landscape == _landscape && (o == _curOrientation || _curOrientation == 0)) return;
 
     // 换算窗口位置: 竖屏 1:1; 横屏时窗口 x(宽44)→屏幕竖直, y(高200)→屏幕水平。
     // LandscapeLeft(3):  屏幕 px=wy,   py=331-wx
@@ -746,6 +748,16 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _fbOrientationObserver = [[cls alloc] init];
     if (!_fbOrientationObserver) return;
     _lastOrientation = [self _currentGlobalOrientation];
+    // app 冷启动时设备可能已横屏: 此刻 _lastOrientation 已等于当前横屏方向,
+    // 之后轮询检测不到"方向变化"→ _landscape 将一直保持 NO。
+    // 因此就绪后立即同步一次方向布局。竖屏时 guard (landscape 一致且
+    // _curOrientation 未初始化) 直接返回, 不做换算, 与现有竖屏行为一致。
+    [self _applyOrientationLayout];
+    if (_landscape) {
+        // 初始窗口位置是 _layoutBall 按竖屏屏幕尺寸算的, 方向初始化后
+        // 位置未贴边, 立即按当前方向吸附一次。
+        [self _snapToEdgeAnimated:NO];
+    }
     _orientationTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                          target:self
                                                        selector:@selector(_pollGlobalOrientation:)
@@ -754,21 +766,70 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     [[NSRunLoop mainRunLoop] addTimer:_orientationTimer forMode:NSRunLoopCommonModes];
 }
 
-// 读取 FBSOrientationObserver 当前界面方向 (NSInvocation 精确取 long long 返回值,
-// 避免 performSelector 的 id 截断)
-- (long long)_currentGlobalOrientation {
-    if (!_fbOrientationObserver) return _lastOrientation;
-    SEL sel = NSSelectorFromString(@"activeInterfaceOrientation");
-    if (![_fbOrientationObserver respondsToSelector:sel]) return _lastOrientation;
-    NSMethodSignature *sig = [_fbOrientationObserver methodSignatureForSelector:sel];
-    if (!sig) return _lastOrientation;
+// 读取对象 selector 的 long long 返回值 (NSInvocation 精确取, 避免
+// performSelector 把 long long 当 id 截断)
+- (long long)_longLongFrom:(id)target selector:(SEL)sel {
+    if (!target || !sel || ![target respondsToSelector:sel]) return 0;
+    NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+    if (!sig) return 0;
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    inv.target = _fbOrientationObserver;
+    inv.target = target;
     inv.selector = sel;
     [inv invoke];
     long long v = 0;
     [inv getReturnValue:&v];
     return v;
+}
+
+// 从 FrontBoard 显示布局读取系统当前界面方向 (UIInterfaceOrientation 码:
+// 1=Portrait 2=PortraitUpsideDown 3=LandscapeLeft 4=LandscapeRight)。
+// FBSDisplayLayoutMonitor 连接系统显示服务, 即使本 app 退到后台也能拿到主屏
+// 当前布局 → 前台 app (游戏) 的界面方向。这是悬浮球 SBS 托管时唯一可靠的方向
+// 来源: FBSOrientationObserver / UIDevice / statusBarOrientation 在后台都会
+// 冻结为本 app 最后的界面方向 (竖屏 1), 设备转横屏时永远读不到 3/4。
+- (long long)_systemInterfaceOrientation {
+    Class cls = NSClassFromString(@"FBSDisplayLayoutMonitor");
+    if (!cls) {
+        void *h = dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+        if (h) cls = NSClassFromString(@"FBSDisplayLayoutMonitor");
+    }
+    if (!cls) return 0;
+    SEL mainSel = NSSelectorFromString(@"mainDisplayInstance");
+    if (![cls respondsToSelector:mainSel]) return 0;
+    id monitor = [cls performSelector:mainSel];
+    if (!monitor) return 0;
+    SEL curSel = NSSelectorFromString(@"currentLayout");
+    if (![monitor respondsToSelector:curSel]) return 0;
+    id layout = [monitor performSelector:curSel];
+    if (!layout) return 0;
+    // 遍历布局元素, 取 UIApplication 元素 (前台 app) 的界面方向
+    NSArray *elements = [layout valueForKey:@"elements"];
+    if ([elements isKindOfClass:[NSArray class]]) {
+        for (id el in elements) {
+            id isApp = [el valueForKey:@"isUIApplicationElement"];
+            if (![isApp boolValue]) continue;
+            long long o = [self _longLongFrom:el selector:NSSelectorFromString(@"interfaceOrientation")];
+            if (o >= 1 && o <= 4) return o;
+        }
+    }
+    // 兜底: 布局级界面方向 (主屏当前方向)
+    long long lo = [self _longLongFrom:layout selector:NSSelectorFromString(@"interfaceOrientation")];
+    if (lo >= 1 && lo <= 4) return lo;
+    return 0;
+}
+
+// 当前界面方向 (多源检测, 返回 UIInterfaceOrientation 码)。
+// 来源优先级:
+//   1) FBSDisplayLayoutMonitor 系统显示布局 —— app 后台 SBS 托管悬浮球时的
+//      唯一可靠来源 (返回前台 app/游戏的当前方向, 横屏游戏即 3/4)。
+//   2) FBSOrientationObserver —— 兜底。
+//   3) _lastOrientation —— 上次有效方向兜底。
+- (long long)_currentGlobalOrientation {
+    long long sysO = [self _systemInterfaceOrientation];
+    if (sysO >= 1 && sysO <= 4) return sysO;
+    long long o = [self _longLongFrom:_fbOrientationObserver selector:NSSelectorFromString(@"activeInterfaceOrientation")];
+    if (o >= 1 && o <= 4) return o;
+    return _lastOrientation;
 }
 
 // 设备当前实际方向 -> 脚本方向码 (0=home在下 1=home在右 2=home在左)。
