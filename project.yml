@@ -29,7 +29,7 @@ settings:
     #       (v2.1.5-procursus7) 签名，支持 chained fixups 重签。
     # 注意: 只能写在这里，不能在 xcodebuild 命令行里传 OTHER_LDFLAGS，
     #       否则会整体覆盖掉这里的框架链接参数导致链接失败。
-    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreImage -framework Security -framework WebKit -framework NetworkExtension -framework SystemConfiguration -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
+    OTHER_LDFLAGS: -framework UIKit -framework CoreGraphics -framework QuartzCore -framework CoreImage -framework Security -framework WebKit -framework NetworkExtension -framework SystemConfiguration -framework CoreLocation -weak_framework IOKit -weak_framework Vision -weak_framework AVFoundation -weak_framework AudioToolbox -weak_framework MediaPlayer -weak_framework UserNotifications -Wl,-undefined,dynamic_lookup
 targets:
   TrollAutoTouch:
     type: application
@@ -81,25 +81,35 @@ targets:
         CFBundleDisplayName: QQ音乐
         CFBundleVersion: "1"
         CFBundleShortVersionString: "1.0.0"
-        # 后台保活: 对齐 AutoGoRunner(无忧IOS, app-release.ipa, iOS 16.6 实测有效)。
-        # 逆向 AutoGoRunner 确认其保活组合(2026-08-28):
-        #   (1) UIBackgroundModes 声明 audio + AVAudioPlayer 播放运行时生成的
-        #       16000Hz 全零静音 WAV(volume=0.0, numberOfLoops=-1, 无限循环) ——
-        #       volume:0.0 仍属于"播放中", 系统据此豁免挂起。之前"iOS 16 播放
-        #       静音音频会被判定滥用加速挂起"是错误结论, AutoGoRunner 正是靠
-        #       静音 AVAudioPlayer 在 iOS 16.6 后台保活(实测后台不挂起);
-        #   (2) NEHotspotHelper 注册(network-authentication 后台模式) ——
-        #       registerWithOptions:queue:handler:, 收到系统命令后唤醒全部服务;
-        #       com.apple.developer.networking.HotspotHelper +
-        #       com.apple.wifi.manager-access entitlement; 由 TSNetworkAuth 实现。
-        #   (3) background URLSession + downloadTask 认证挑战挂起(TSAuthKeepAlive),
-        #       作为无网络环境的后台任务兜底。
+        # 后台保活(2026-08-28 二轮实测修正 + 逆向 AutoGoRunner app-release.ipa 确认):
+        # 用户实测: 仅 audio 静音播放 + URLSession 认证挂起时, iOS 16.x 上
+        # AVPlayer静音=1 且 backgroundTimeRemaining 剩余-1秒, 后台约10秒后仍被系统强杀
+        # (整个进程消失, 端口全断)。逆向 AutoGoRunner 的 Info.plist / entitlements 确认
+        # 其保活真实组合:
+        #   (1) 主通道: UIBackgroundModes 声明 location + CLLocationManager 持续
+        #       startUpdatingLocation —— 导航类机制, 苹果官方认可后台无限运行,
+        #       不需要 platform 身份, TrollStore(iOS 15.5+)下可用。
+        #       由 TSLocationKeepAlive 实现; entitlements 已含 com.apple.private.tcc.allow
+        #       的 kTCCServiceLocation 预授权 + locationd 全套权限, 授权自动为
+        #       "始终允许", 无需用户弹窗。
+        #   (2) audio + AVAudioPlayer 全零静音 WAV(volume=0.0): 辅助。已被 iOS 16
+        #       静音审计判定为无声播放, 不提供持续后台(实测无效), 保留作无定位场景兜底。
+        #   (3) NEHotspotHelper(network-authentication): TSNetworkAuth 注册,
+        #       受限 entitlement, TrollStore 下大概率注册失败, 仅作辅助。
+        #   (4) background URLSession + downloadTask 认证挑战挂起: TSAuthKeepAlive,
+        #       辅助兜底(系统按需唤醒, 非持续后台)。
+        # AutoGoRunner 的 platform-application / no-sandbox / kernel.jetsam /
+        # memorystatus / runningboard.terminateprocess / multitasking.termination /
+        # SBAppIsDaemon 等特权 entitlements 我们已全部对齐, 但 TrollStore 在
+        # iOS 15.5+ 不授予 CS_PLATFORM_BINARY(platform 身份), 这些特权实际不生效;
+        # location 保活不需要它们。
         # 注意: 声明 voip 但 PushKit 注册失败(iOS 16 强制检查, TrollStore 下
         # aps-environment 无有效凭证必然失败)启动即闪退 —— 已删除全部 PushKit,
         # 也不声明 voip 后台模式。
         UIBackgroundModes:
           - audio
           - network-authentication
+          - location
         # 对齐原版 TrollAutoScript 2.3.6: HideAtLaunch=true —— SpringBoard 私有键,
         # 让 app 在 App Switcher 中不显示(隐藏型应用), 后台挂起/切换器策略区别于普通 app。
         # 实测(2026-08-28): 原版带此键在 iOS 16.6 后台保活正常, 我们此前未对齐, 补上。

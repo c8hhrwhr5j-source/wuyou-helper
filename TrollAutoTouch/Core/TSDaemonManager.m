@@ -3,7 +3,10 @@
 //  TrollAutoTouch
 //
 //  后台守护实现。
-//  通过音频后台模式 + beginBackgroundTask + 系统级悬浮窗实现持久化后台服务。
+//  保活主通道: location 后台模式 + 持续定位 (TSLocationKeepAlive, 导航类机制,
+//  iOS 16 官方认可无限后台, 无需 platform 身份, TrollStore 下可用)。
+//  辅助: 静音音频 (TSAudioKeepAlive) + URLSession 认证挂起 (TSAuthKeepAlive) +
+//  beginBackgroundTask + 系统级悬浮窗。
 //
 
 #import "TSDaemonManager.h"
@@ -15,6 +18,7 @@
 #import "TSLuaBridge.h"
 #import "TSAudioKeepAlive.h"
 #import "TSAuthKeepAlive.h"
+#import "TSLocationKeepAlive.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <UIKit/UIKit.h>
@@ -83,12 +87,16 @@
     _isInBackground = YES;
     _state = TSDaemonStateBackground;
 
-    // 自动开始后台保活: 静音 AVAudioPlayer + network-authentication 认证挂起 + 后台任务兜底。
-    // 对齐 AutoGoRunner(无忧IOS, iOS 16.6 实测有效): UIBackgroundModes 声明 audio,
-    // AVAudioPlayer 无限循环播放 16kHz 全零静音 WAV(volume=0), 系统据此豁免挂起。
-    // network-authentication(TSAuthKeepAlive) 作为补充的认证挑战挂起。
+    // 自动开始后台保活: 定位持续保活(主) + 静音音频(辅) + network-authentication 认证挂起 + 后台任务兜底。
+    // 对齐 AutoGoRunner(无忧IOS, iOS 16.x 实测有效)的保活组合, 查证结论见 project.yml:
+    //   (1) location 后台模式 + 持续定位(TSLocationKeepAlive) —— 导航类机制,
+    //       iOS 16 官方认可后台无限运行, 无需 platform 身份, 保活主通道;
+    //   (2) audio 静音 AVAudioPlayer(TSAudioKeepAlive) —— 辅助(已被 iOS 16 静音
+    //       审计判定为无声播放, 不提供持续后台, 保留作无定位场景兜底);
+    //   (3) network-authentication(TSAuthKeepAlive) —— 辅助认证挑战挂起。
     // 注意: 不注册 PushKit — iOS 16 起声明 voip 后台模式但 PushKit 注册失败
     // 的 app 会被系统启动时强制终止(TrollStore 下 aps-environment 无效必然失败)。
+    [[TSLocationKeepAlive shared] start];
     [[TSAuthKeepAlive shared] start];
     [self startSilentAudio];
     [self beginBackgroundTask];
@@ -132,6 +140,7 @@
     [self stopHeartbeat];
     [self stopSilentAudio];
     [[TSAuthKeepAlive shared] stop];
+    [[TSLocationKeepAlive shared] stop];
     [self endBackgroundTask];
     [self hideHUD];
     _state = TSDaemonStateStopped;
@@ -232,10 +241,11 @@
         BOOL engine = silent;
         BOOL script = [TSLuaBridge shared].isRunning;
         BOOL auth = [[TSAuthKeepAlive shared] challengePending];
+        BOOL loc = [[TSLocationKeepAlive shared] isRunning];
         [[TSLogStore shared] append:[NSString stringWithFormat:
-            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d Auth=%d",
+            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d Auth=%d 定位=%d",
             _isInBackground ? @"后台" : @"前台",
-            (int)remain, silent, engine, script, auth]];
+            (int)remain, silent, engine, script, auth, loc]];
     }
 }
 
