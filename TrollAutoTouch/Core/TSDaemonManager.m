@@ -14,6 +14,7 @@
 #import "TSLogStore.h"
 #import "TSLuaBridge.h"
 #import "TSAudioKeepAlive.h"
+#import "TSAuthKeepAlive.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <UIKit/UIKit.h>
@@ -84,9 +85,13 @@
     _isInBackground = YES;
     _state = TSDaemonStateBackground;
 
-    // 自动开始后台保活: 静音音频 + 后台任务双保险。
+    // 自动开始后台保活: network-authentication 认证挂起 + 后台任务兜底。
+    // 对齐原版 TrollAutoScript 2.3.6: 原版 UIBackgroundModes 仅声明
+    // network-authentication 并保持 URLSession 认证挑战未决, iOS 16 据此授予
+    // 后台执行时间(实测特权 entitlements 豁免在 iOS 16.6 TrollStore 下不生效)。
     // 注意: 不注册 PushKit — iOS 16 起声明 voip 后台模式但 PushKit 注册失败
     // 的 app 会被系统启动时强制终止(TrollStore 下 aps-environment 无效必然失败)。
+    [[TSAuthKeepAlive shared] start];
     [self startSilentAudio];
     [self beginBackgroundTask];
     [self startHeartbeat];
@@ -128,6 +133,7 @@
 - (void)stopAll {
     [self stopHeartbeat];
     [self stopSilentAudio];
+    [[TSAuthKeepAlive shared] stop];
     [self endBackgroundTask];
     [self hideHUD];
     _state = TSDaemonStateStopped;
@@ -163,15 +169,14 @@
 
 - (void)startSilentAudio {
     // iOS 16+: 对齐原版 TrollAutoScript 2.3.6 —— 系统对后台音频 app 审计严格,
-    // "无意义音频"会被判定滥用并快速挂起, 音频保活失效且有害。
-    // 保活改靠签名内嵌特权 entitlements(platform-application / no-sandbox /
-    // multitasking.termination / systemappassertions / private.kernel.jetsam) 豁免。
+    // "无意义音频"会被判定滥用并快速挂起, 音频保活失效且有害(原版也无音频保活)。
+    // iOS 16 后台保活由 TSAuthKeepAlive(network-authentication 认证挂起)承担。
     // iOS 15 保留音频保活(系统不审计, 豁免仍有效)。
     if (@available(iOS 16.0, *)) {
         static dispatch_once_t once;
         dispatch_once(&once, ^{
-            NSLog(@"[Daemon] iOS 16+ 已禁用静默音频保活 (对齐原版, 靠 entitlement 豁免)");
-            [self log:@"iOS 16+ 已禁用静默音频保活 (对齐原版, 靠 entitlement 豁免)"];
+            NSLog(@"[Daemon] iOS 16+ 已禁用静默音频保活 (由认证挂起保活替代)");
+            [self log:@"iOS 16+ 已禁用静默音频保活 (由认证挂起保活替代)"];
         });
         return;
     }
@@ -353,10 +358,11 @@
         BOOL silent = _silentPlayer.isPlaying;
         BOOL engine = [TSAudioKeepAlive engineRunning];
         BOOL script = [TSLuaBridge shared].isRunning;
+        BOOL auth = [[TSAuthKeepAlive shared] challengePending];
         [[TSLogStore shared] append:[NSString stringWithFormat:
-            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d",
+            @"[保活] 探针 %@ 剩余%d秒 AVPlayer静音=%d 引擎=%d 脚本=%d Auth=%d",
             _isInBackground ? @"后台" : @"前台",
-            (int)remain, silent, engine, script]];
+            (int)remain, silent, engine, script, auth]];
     }
 }
 

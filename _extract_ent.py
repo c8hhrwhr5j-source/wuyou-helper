@@ -1,31 +1,49 @@
-import re, sys
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-data = open(r'_tas236_extract\Payload\TrollAutoScript.app\HUD\HUDServices','rb').read()
+# -*- coding: utf-8 -*-
+# 从 Mach-O 签名 blob (type 2/5) 提取 XML plist entitlements 并输出 plist
+import struct, sys, re, plistlib
 
-# 找所有 iokit-user-client-class 出现的 XML 段
-for m in re.finditer(rb'iokit-user-client-class', data):
-    off = m.start()
-    # 向前找 <key> 或 dict 开始, 向后找 </dict>
-    start = data.rfind(b'<dict>', max(0, off-4000), off)
-    end = data.find(b'</dict>', off, min(len(data), off+6000))
-    if start == -1 or end == -1:
-        continue
-    xml = data[start:end+7]
-    try:
-        print(f"===== iokit-user-client-class @0x{off:x} =====")
-        print(xml.decode('utf-8', errors='replace')[:5000])
-    except Exception as e:
-        print("decode err", e)
-    break
+def main(path):
+    data = open(path, 'rb').read()
+    magic = data[:4]
+    slices = []
+    if magic in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'):
+        nfat = struct.unpack('>I', data[4:8])[0]
+        off = 8
+        for _ in range(nfat):
+            cpu, sub, o, sz, al = struct.unpack('>IIIII', data[off:off+20])
+            off += 20
+            if cpu in (0x0100000c, 0x01000007):
+                slices.append((cpu, data[o:o+sz]))
+    else:
+        slices.append((0, data))
+    found = []
+    for cpu, m in slices:
+        endian = '>' if m[:4] == b'\xfe\xed\xfa\xcf' else '<'
+        ncmds = struct.unpack(endian+'I', m[16:20])[0]
+        off = 32
+        for _ in range(ncmds):
+            cmd, csz = struct.unpack('<II', m[off:off+8])
+            if cmd == 0x1d:
+                doff, dsz = struct.unpack('<II', m[off+8:off+16])
+                sig = m[doff:doff+dsz]
+                count = struct.unpack('>I', sig[8:12])[0]
+                for i in range(count):
+                    typ, elo = struct.unpack('>II', sig[12+i*8:12+i*8+8])
+                    el = sig[elo:]
+                    for mm in re.finditer(rb'<\?xml.*?</plist>', el, re.S):
+                        try:
+                            d = plistlib.loads(mm.group(0))
+                            if isinstance(d, dict) and len(d) > 3:
+                                found.append((typ, d))
+                        except Exception as e:
+                            pass
+            off += csz
+    return found
 
-# 也找 com.apple.security 其他键
-for m in re.finditer(rb'com\.apple\.security\.', data):
-    off = m.start()
-    start = data.rfind(b'<key>', max(0, off-2000), off)
-    if start == -1: continue
-    end = data.find(b'</dict>', off, min(len(data), off+4000))
-    if end == -1: continue
-    xml = data[start:end+7]
-    tag = data[off:off+60]
-    print(f"\n===== security key @0x{off:x}: {tag.decode(errors='replace')} =====")
-    print(xml.decode('utf-8', errors='replace')[:3000])
+if __name__ == '__main__':
+    res = main(sys.argv[1])
+    print("found %d plist blobs" % len(res))
+    for typ, d in res:
+        print("=== type %d, %d keys ===" % (typ, len(d)))
+        for k in sorted(d):
+            print("%s = %r" % (k, d[k]))

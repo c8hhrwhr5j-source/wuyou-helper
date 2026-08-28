@@ -83,15 +83,19 @@ targets:
         CFBundleShortVersionString: "1.0.0"
         # 后台保活: 对齐原版 TrollAutoScript 2.3.6 —— 只声明 network-authentication,
         # 不声明 audio/voip/processing 等后台模式。
-        # 原因(逆向原版 iOS 16.6 保活机制的结论):
+        # 原因(逆向原版 2.3.6 二进制 + iOS 16.6 实测的结论):
         #   - iOS 16 起系统对后台模式审计严格: 声明 audio 却播放"无意义音频"
         #     (静音/极低电平)会被判定滥用, 撤销豁免并快速挂起(实测 10s 内被杀);
         #   - 声明 voip 但 PushKit 注册失败(iOS 16 强制检查, TrollStore 下
         #     aps-environment 无有效凭证必然失败)启动即闪退 —— 已删除全部 PushKit。
-        #   - 原版在 iOS 16 上保活完全靠签名内嵌特权 entitlements
-        #     (platform-application / no-sandbox / multitasking.termination /
-        #     systemappassertions / private.kernel.jetsam), 系统将其视为特权应用,
-        #     进后台后不挂起、不被 Jetsam 清理。
+        #   - 特权 entitlements(platform-application / no-sandbox / multitasking.
+        #     termination / systemappassertions / private.kernel.jetsam) 在 iOS 16.6
+        #     TrollStore 下不授予 platform 身份, 后台豁免实测不生效
+        #     (backgroundTimeRemaining 仍正常倒数后被 Jetsam 清理)。
+        #   - 原版保活机制: network-authentication 后台模式 + 保持未决的 URLSession
+        #     认证挑战(didReceiveChallenge 中不调用 completionHandler), 系统网络栈
+        #     据此认为 app 正在网络身份验证, 授予后台持续执行时间。
+        #     由 TSAuthKeepAlive 实现(依赖网络, 无网络时降级为后台任务兜底)。
         # 因此 iOS 16+ 上禁用音频保活(TSAudioKeepAlive / TSDaemonManager 内判断),
         # iOS 15 保留音频保活(系统不审计, 音频豁免仍有效)。
         UIBackgroundModes:
