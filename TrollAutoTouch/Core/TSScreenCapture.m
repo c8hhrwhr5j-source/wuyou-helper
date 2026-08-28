@@ -138,6 +138,15 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
                                          //   不再绑定本 App 画面)
     // _UICreateCGImageFromIOSurface 函数指针(AutoTouch 原版主截屏读取路径)
     UICreateCGImageFromIOSurfaceFunc _uiCreateCGImageFn;
+
+    // CARenderServer 复用 surface(iOS16 前台主路径):
+    // 原实现每次截屏都新建 12MB GPU IOSurface, iOS 16 高频截屏下 GPU/IO 内存暴涨
+    // 被 jetsam 杀(SE3 iOS16.6 实测 7 秒爆内存; 6S iOS15 走 UIScreenSurface 系统
+    // surface 无此问题, 24h 稳定)。复用同一 surface(尺寸不变, renderFn 每次重绘
+    // 当前帧, 内容仍实时), 与 TrollShot daemon 常驻做法一致。
+    IOSurfaceRef _renderServerSurface;
+    int _renderServerSurfaceW;
+    int _renderServerSurfaceH;
 }
 @end
 
@@ -795,11 +804,26 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     } else {
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
         __block IOSurfaceRef created = NULL;
+        __block BOOL timedOut = NO;
         dispatch_async(dispatch_get_main_queue(), ^{
-            created = [self _createUIScreenSurface];
+            IOSurfaceRef s = [self _createUIScreenSurface];
+            BOOL abandoned = NO;
+            @synchronized (self) {
+                if (timedOut) { abandoned = YES; }
+                else { created = s; }
+            }
             dispatch_semaphore_signal(sema);
+            // 主线程已超时未取走时, block 自行释放, 避免 surface 泄漏
+            if (abandoned && s) { CFRelease(s); }
         });
-        dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC));
+        long ws = dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC));
+        if (ws != 0) {
+            @synchronized (self) { timedOut = YES; }
+            // 等主线程 block 收尾(创建+释放)完成再返回, 确保不泄漏
+            dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+            TSSetLastError(@"路径0 UIScreenSurface: 主线程 800ms 未响应, 截屏取消");
+            return NO;
+        }
         surf = created;
     }
     if (!surf) {
@@ -1024,48 +1048,67 @@ static const char *_gsSurfaceKeys[] = {
     }
     NSLog(@"[TSScreenCapture] 尝试 CARenderServerRenderDisplay 截屏 %dx%d", w, h);
 
-    IOSurfaceRef src = [self _createIOSurfaceWithWidth:w height:h];
+    // 复用上次的 src surface(尺寸不变), 避免每次截屏重建 12MB GPU IOSurface。
+    // iOS 16 高频截屏下每次创建/释放 GPU surface 导致 IO 内存暴涨被 jetsam 杀
+    // (SE3 iOS16.6 实测 7 秒爆内存; 6S iOS15 走 UIScreenSurface 系统 surface 无此问题)。
+    // renderFn 每次把当前帧重绘到该 surface, 内容实时, 不影响"点击后取新帧"语义。
+    IOSurfaceRef src = NULL;
+    @synchronized (self) {
+        if (_renderServerSurface && _renderServerSurfaceW == w && _renderServerSurfaceH == h) {
+            src = (IOSurfaceRef)CFRetain(_renderServerSurface);
+        } else {
+            if (_renderServerSurface) { CFRelease(_renderServerSurface); _renderServerSurface = NULL; }
+            src = [self _createIOSurfaceWithWidth:w height:h];
+            if (src) {
+                _renderServerSurface = (IOSurfaceRef)CFRetain(src);
+                _renderServerSurfaceW = w;
+                _renderServerSurfaceH = h;
+            }
+        }
+    }
     if (!src) {
         TSSetLastError(@"路径2 CARenderServer: 创建 IOSurface 失败 %dx%d", w, h);
         NSLog(@"[TSScreenCapture] CARenderServer 方案创建 IOSurface 失败 %dx%d", w, h);
         return NO;
     }
+    @try {
+        // 与 TrollShot 完全一致: 首参传 0, 显示名 "LCD"; "Main" 作为个别版本回退
+        const char *displayNames[2] = { "LCD", "Main" };
+        for (int attempt = 0; attempt < 2; attempt++) {
+            CFStringRef display = CFStringCreateWithCString(kCFAllocatorDefault,
+                                                            displayNames[attempt],
+                                                            kCFStringEncodingUTF8);
+            renderFn(0, display, src, 0, 0);
+            CFRelease(display);
+            // 等 WindowServer 完成异步渲染再读
+            usleep(100 * 1000);
 
-    // 与 TrollShot 完全一致: 首参传 0, 显示名 "LCD"; "Main" 作为个别版本回退
-    const char *displayNames[2] = { "LCD", "Main" };
-    for (int attempt = 0; attempt < 2; attempt++) {
-        CFStringRef display = CFStringCreateWithCString(kCFAllocatorDefault,
-                                                        displayNames[attempt],
-                                                        kCFStringEncodingUTF8);
-        renderFn(0, display, src, 0, 0);
-        CFRelease(display);
-        // 等 WindowServer 完成异步渲染再读
-        usleep(100 * 1000);
-
-        // surface 声明为 sRGB, WindowServer 渲染已完成色彩管理,
-        // 像素即 sRGB 编码 —— 跳过 P3→sRGB 二次转换(iOS16+P3 屏发灰修复)
-        uint8_t *px = NULL; int rw = 0, rh = 0;
-        if ([self _dumpIOSurface:src skipColorConvert:YES pixelsOut:&px width:&rw height:&rh] && px) {
-            if (![self _isAllZeroPixels:px width:rw height:rh]) {
-                NSLog(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
-                      rw, rh, displayNames[attempt]);
-                self.lastError = nil;
-                *pixelsOut = px; *widthOut = rw; *heightOut = rh;
-                CFRelease(src);
-                return YES;
+            // surface 声明为 sRGB, WindowServer 渲染已完成色彩管理,
+            // 像素即 sRGB 编码 —— 跳过 P3→sRGB 二次转换(iOS16+P3 屏发灰修复)
+            uint8_t *px = NULL; int rw = 0, rh = 0;
+            if ([self _dumpIOSurface:src skipColorConvert:YES pixelsOut:&px width:&rw height:&rh] && px) {
+                if (![self _isAllZeroPixels:px width:rw height:rh]) {
+                    NSLog(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
+                          rw, rh, displayNames[attempt]);
+                    self.lastError = nil;
+                    *pixelsOut = px; *widthOut = rw; *heightOut = rh;
+                    return YES;
+                }
+                TSSetLastError(@"路径2 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
+                NSLog(@"[TSScreenCapture] CARenderServer display=%s 取到空内容", displayNames[attempt]);
+                free(px);
+            } else {
+                TSSetLastError(@"路径2 CARenderServer: display=%s 读 surface 失败", displayNames[attempt]);
+                NSLog(@"[TSScreenCapture] CARenderServer display=%s 读 surface 失败", displayNames[attempt]);
             }
-            TSSetLastError(@"路径2 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
-            NSLog(@"[TSScreenCapture] CARenderServer display=%s 取到空内容", displayNames[attempt]);
-            free(px);
-        } else {
-            TSSetLastError(@"路径2 CARenderServer: display=%s 读 surface 失败", displayNames[attempt]);
-            NSLog(@"[TSScreenCapture] CARenderServer display=%s 读 surface 失败", displayNames[attempt]);
         }
-    }
 
-    NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 两次渲染均取到空内容");
-    CFRelease(src);
-    return NO;
+        NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 两次渲染均取到空内容");
+        return NO;
+    } @finally {
+        // 仅释放本地临时引用; _renderServerSurface 缓存引用保留, 供下次复用
+        CFRelease(src);
+    }
 }
 
 #pragma mark - 跨应用截屏: windowWithContextId 链路(对齐原版 HUD)
@@ -1716,6 +1759,7 @@ static const char *_gsSurfaceKeys[] = {
 - (void)dealloc {
     if (_cachedPixels) { free(_cachedPixels); _cachedPixels = NULL; }
     if (_cachedScreenSurface) { CFRelease(_cachedScreenSurface); _cachedScreenSurface = NULL; }
+    if (_renderServerSurface) { CFRelease(_renderServerSurface); _renderServerSurface = NULL; }
 }
 
 @end
