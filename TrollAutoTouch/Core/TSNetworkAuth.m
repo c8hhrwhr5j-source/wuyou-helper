@@ -17,7 +17,8 @@
 
 #import "TSNetworkAuth.h"
 #import "TSLogStore.h"
-#import <NetworkExtension/NEHotspotHelper.h>
+// iOS 18 SDK 起 NEHotspotHelper 头文件拒绝直接 #import, 必须用 module import
+@import NetworkExtension;
 
 static BOOL gRegistered = NO;
 
@@ -27,7 +28,7 @@ static BOOL gRegistered = NO;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSDictionary *options = @{
-            NEHotspotHelperOptionDisplayName: @"TrollAutoTouch",
+            kNEHotspotHelperOptionDisplayName: @"TrollAutoTouch",
         };
         gRegistered = [NEHotspotHelper registerWithOptions:options
                                                      queue:dispatch_get_main_queue()
@@ -36,9 +37,9 @@ static BOOL gRegistered = NO;
             // FilterScanList / FilterNetworkList 返回空网络列表(不干预用户选择热点),
             // 其余命令(Evaluate/Authenticate/PresentUI/Maintain/Logoff)保持注册状态即可。
             switch (cmd.commandType) {
-                case NEHotspotHelperCommandTypeFilterScanList:
-                case NEHotspotHelperCommandTypeFilterNetworkList: {
-                    NEHotspotHelperResponse *resp = [cmd createResponse:NEHotspotHelperResultSuccess];
+                case kNEHotspotHelperCommandTypeFilterScanList:
+                case kNEHotspotHelperCommandTypeFilterNetworkList: {
+                    NEHotspotHelperResponse *resp = [cmd createResponse:kNEHotspotHelperResultSuccess];
                     [NEHotspotHelper setResponse:resp];
                     break;
                 }
