@@ -14,12 +14,25 @@
 //  属于 network-authentication 应用 —— 这正是 UIBackgroundModes 中
 //  network-authentication 模式的判定依据, 授予后台持续执行豁免。
 //
+//  兼容性注记(iOS 18 SDK / Xcode 16+):
+//    Apple 精简了 NEHotspotHelper 公开 API:
+//      - +setResponse: 声明被移除(旧系统 iOS 15/16 运行时仍存在)
+//      - kNEHotspotHelperCommandTypeFilterNetworkList 声明被移除(历史值=2)
+//    本文件对两者做动态兼容, 产物可同时在 iOS 15/16/18 上运行。
+//
 
 #import "TSNetworkAuth.h"
 #import "TSLogStore.h"
 // 必须用 umbrella 头文件: NEHotspotHelper.h 拒绝被直接 #import,
 // 且构建禁用了 Clang modules(@import 不可用)。
 #import <NetworkExtension/NetworkExtension.h>
+#import <objc/message.h>
+
+// iOS 18+ SDK 移除了 FilterNetworkList 命令声明(iOS 17.4+ 起不再下发)。
+// 旧系统(iOS 16 及更早)仍可能收到, 保持历史值 2 兼容。
+#ifndef kNEHotspotHelperCommandTypeFilterNetworkList
+#define kNEHotspotHelperCommandTypeFilterNetworkList 2
+#endif
 
 static BOOL gRegistered = NO;
 
@@ -41,7 +54,15 @@ static BOOL gRegistered = NO;
                 case kNEHotspotHelperCommandTypeFilterScanList:
                 case kNEHotspotHelperCommandTypeFilterNetworkList: {
                     NEHotspotHelperResponse *resp = [cmd createResponse:kNEHotspotHelperResultSuccess];
-                    [NEHotspotHelper setResponse:resp];
+                    if (resp) {
+                        // iOS 18+ SDK 移除了 +setResponse: 的声明, 但旧系统
+                        // (iOS 15/16)运行时的 NEHotspotHelper 仍实现该方法,
+                        // 用 objc_msgSend 动态调用以通过新 SDK 编译。
+                        SEL setRespSel = NSSelectorFromString(@"setResponse:");
+                        if ([NEHotspotHelper respondsToSelector:setRespSel]) {
+                            ((void (*)(id, SEL, id))objc_msgSend)([NEHotspotHelper class], setRespSel, resp);
+                        }
+                    }
                     break;
                 }
                 default:
