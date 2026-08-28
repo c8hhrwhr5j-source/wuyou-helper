@@ -746,6 +746,19 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _fbOrientationObserver = [[cls alloc] init];
     if (!_fbOrientationObserver) return;
     _lastOrientation = [self _currentGlobalOrientation];
+    // app 冷启动时设备可能已横屏: 此刻 _lastOrientation 已等于当前横屏方向 (3/4),
+    // 之后轮询 (_pollGlobalOrientation:) 永远检测不到方向"变化",
+    // _landscape 将一直保持 NO → 横屏下悬浮球走竖屏布局:
+    // 窗口 200×44 被系统旋转 90° 显示后, 按钮沿屏幕竖直方向排布 (向上展开),
+    // 图标也不做 ±90° 旋转。因此冷启动即横屏时必须立即应用一次方向布局,
+    // 把 _landscape/_curOrientation 初始化正确。竖屏 (1/2) 时 _landscape 本就
+    // 应为 NO, 不调用, 保持与现有竖屏行为一致。
+    if (_lastOrientation == 3 || _lastOrientation == 4) {
+        [self _applyOrientationLayout];
+        // 初始窗口位置是 _layoutBall 按横屏屏幕尺寸算的, 方向初始化后
+        // 位置未贴边 (球停在屏幕中部), 立即按当前方向吸附一次。
+        [self _snapToEdgeAnimated:NO];
+    }
     _orientationTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                          target:self
                                                        selector:@selector(_pollGlobalOrientation:)
