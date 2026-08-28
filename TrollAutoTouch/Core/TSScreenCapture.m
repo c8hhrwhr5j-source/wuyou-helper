@@ -312,18 +312,14 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     }
 
     // ---- 系统色彩管理路径: _UICreateCGImageFromIOSurface(原版 AutoTouch 读取端) ----
-    // 仅当加速器失败(lastAccelOK=NO, readSurface=源 w30r)时启用: iOS 16 后台源 surface 是
-    // w30r(10-bit Display P3), 手动 P3->sRGB(转换/截断) 两种实测都降饱和发灰; 改由 CoreGraphics
-    // 按 surface 私有元数据自动色彩管理, 与原版 AutoGoRunner 同机制。
-    // 若加速器成功(readSurface=自建 BGRA8 sRGB, 格式已知), 不启用本路径 - 历史实测 iOS 16 上
-    // _UICreateCGImageFromIOSurface 会把加速器"仅像素转储"的 dst 标称格式当真实属性,
-    // 造成"热成像"伪彩; 该情形走下方手动 BGRA 读取(iOS 15 已验证颜色正确)。
-    // 源为 BGRA(如 CARenderServer 自建 surface)时也走手动读取, 避免本路径在 iOS 16 上误判。
-    // 实测(iOS 16.6)加速器 IOSurfaceAcceleratorCreate 失败(lastAccelError=0, 未到 transfer),
-    // 进入本路径后 colorDecision 仍为 format-w30r => _UICreateCGImageFromIOSurface 未出图。
-    // 疑因后台线程调用 UIKit 私有函数返回 NULL, 改为主线程调用(原版 AutoGoRunner 主线程)。
-    // 统一系统路径: 符号加载成功则主线程调用, 无论成败都尝试 CIImage 兜底
-    if (self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */) {
+    // ★已禁用(2026-08-28): iOS 16.6 + P3 屏(w30r)高频截屏下, 本路径的 CIImage 兜底
+    // (kCIContextUseSoftwareRenderer=NO, GPU 渲染) 每次截屏都在 GPU 分配缓冲, GPU/IO 内存
+    // 暴涨被 jetsam 杀 —— SE3 iOS 16.6 实测 9 秒 4 次内存警告后闪退; 6S iOS15 源为
+    // 8-bit BGRA 不经本路径, 24h 稳定, 两平台唯一路径差异即此处。
+    // 且实测 iOS 16.6 上 _UICreateCGImageFromIOSurface 返回 NULL 不出图, 本路径本就无效。
+    // 现统一走下方手动读取(w30r 10-bit 白点归一化 + 编码域对比度拉伸, dcc15cf 实测颜色正确),
+    // 完全跳过 CGImage/CIImage 大分配, 不再有 GPU 内存累积。若需恢复仅改回 YES。
+    if (NO && self.lastAccelOK == NO && srcFmt != 0x42475241 /* 'BGRA' */) {
         __block CGImageRef cg = NULL;
         if (_uiCreateCGImageFn) {
             if ([NSThread isMainThread]) {
