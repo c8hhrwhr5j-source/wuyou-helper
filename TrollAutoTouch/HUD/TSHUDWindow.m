@@ -880,6 +880,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)applyBallFrame:(CGPoint)point collapsed:(BOOL)collapsed portraitOnly:(BOOL)portraitOnly {
     CGRect frame = self.frame;
     CGSize screen = [self _effectiveScreenSize];
+    // 竖屏基准 375×667: portrait 模式(含横屏设备) clamp 恒用它,
+    // 不能用 _effectiveScreenSize(横屏时交换为 667×375, 会把竖屏 y 压错)。
+    CGSize base = [self _portraitScreenSize];
 
     if (_landscape && !portraitOnly) {
         // 横屏: 窗口坐标系为竖屏基准(窗口 x 范围 screen.height, y 范围 screen.width),
@@ -924,36 +927,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
             frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
             frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
         }
-    } else if (_landscape) {
-        // portraitOnly 且设备横屏: point 为竖屏基准逻辑点(球心, x∈[0,375], y∈[0,667])。
-        // 严格竖屏语义 —— 坐标按竖屏坐标系解释, 位置随屏幕旋转: 先把竖屏球心旋转到
-        // 当前方向的屏幕坐标, 再反解窗口 frame (窗口 frame 坐标始终为竖屏基准):
-        //   LL(3): 屏幕球心 (y, 375-x); LR(4): 屏幕球心 (667-y, x)
-        // 窗口显示映射(左上角): LL 屏幕 (wy, 331-wx); LR 屏幕 (467-wy, wx)
-        // 球心窗口内 (cx=22, cy), 反解得:
-        //   LL: wx = x-66, wy = y-cy; LR: wx = x-22, wy = y-cy
-        // (cx=22; cy=收起 22 / 展开 _ballY+22)
-        // 注意不能用 _effectiveScreenSize (横屏时已交换为 667×375) 做 clamp,
-        // 否则竖屏 y 会被错误压到"屏幕水平"范围 (1309 落到 ~700)。
-        CGSize base = [self _portraitScreenSize]; // 竖屏基准 375×667
-        BOOL ll = ([self _currentGlobalOrientation] == 3);
-        CGFloat cx = kBallSize / 2.0;
-        CGFloat cy = collapsed ? kBallSize / 2.0 : [self _ballY] + kBallSize / 2.0;
-        if (collapsed) {
-            frame.size = CGSizeMake(kBallSize, kBallSize);
-            _mainBtn.frame = CGRectMake((kBallSize - kBallVisSize) / 2.0,
-                                        (kBallSize - kBallVisSize) / 2.0,
-                                        kBallVisSize, kBallVisSize);
-        } else {
-            frame.size = CGSizeMake(kBallSize, kExpandedW);
-        }
-        CGFloat wx = ll ? (point.x - kBallSize - cx) : (point.x - cx);
-        CGFloat wy = point.y - cy;
-        CGFloat maxX = MAX(0, base.width  - frame.size.width);   // 屏幕竖直
-        CGFloat maxY = MAX(0, base.height - frame.size.height);  // 屏幕水平
-        frame.origin.x = MAX(0, MIN(wx, maxX));
-        frame.origin.y = MAX(0, MIN(wy, maxY));
     } else {
+        // portrait 模式(或竖屏设备): point 恒为竖屏基准逻辑点(球心)。
+        // 全部按竖屏坐标直接放置 —— 不做任何方向/旋转换算:
+        //   frame.origin = point - 球心窗口内偏移, clamp 用竖屏基准尺寸。
+        // 横屏设备上窗口 frame 坐标系本就是竖屏基准(375×667), 由系统旋转显示,
+        // 所以"直接按竖屏坐标放"即"位置随屏幕旋转", 无需也不应该判断 LL/LR。
         if (collapsed) {
             // 收起: 窗口收缩为球本体 44×44, 球居中, point 即球心, 可贴任意边缘
             frame.size = CGSizeMake(kBallSize, kBallSize);
@@ -962,8 +941,8 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
                                         kBallVisSize, kBallVisSize);
             frame.origin.x = point.x - kBallSize / 2.0;
             frame.origin.y = point.y - kBallSize / 2.0;
-            CGFloat maxX = MAX(0, screen.width  - frame.size.width);
-            CGFloat maxY = MAX(0, screen.height - frame.size.height);
+            CGFloat maxX = MAX(0, base.width  - frame.size.width);
+            CGFloat maxY = MAX(0, base.height - frame.size.height);
             frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
             frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
         } else {
@@ -971,8 +950,8 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
             frame.size = CGSizeMake(kExpandedW, kBallSize);
             frame.origin.x = point.x - ([self _ballX] + kBallSize / 2.0);
             frame.origin.y = point.y - kBallSize / 2.0;
-            CGFloat maxX = MAX(0, screen.width  - frame.size.width);
-            CGFloat maxY = MAX(0, screen.height - frame.size.height);
+            CGFloat maxX = MAX(0, base.width  - frame.size.width);
+            CGFloat maxY = MAX(0, base.height - frame.size.height);
             frame.origin.x = MAX(0, MIN(frame.origin.x, maxX));
             frame.origin.y = MAX(0, MIN(frame.origin.y, maxY));
         }
