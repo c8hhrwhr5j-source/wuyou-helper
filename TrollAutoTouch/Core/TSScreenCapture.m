@@ -1444,6 +1444,18 @@ static const char *_gsSurfaceKeys[] = {
 - (BOOL)_captureBackgroundToRGBA:(uint8_t **)pixelsOut
                            width:(int *)widthOut
                           height:(int *)heightOut {
+    // iOS 16 上每次 [UIScreen createScreenIOSurface] 都会在系统侧新建全屏 GPU
+    // IOSurface。挂机脚本约每 100ms 截一次屏, 即使进程内 CFRelease, 系统侧的
+    // IO/GPU 内存也持续累积, 几小时后触发 Jetsam 杀后台 —— 与下方
+    // _captureRenderServerToRGBA 注释中 SE3 iOS16.6 实测结论一致。
+    // CARenderServerRenderDisplay 复用同一个自建 surface 反复渲染, 无累积问题,
+    // 因此 iOS 16 后台也改为 CARenderServer 优先; iOS 15 保持 UIScreen 优先
+    // (系统 surface 无此问题, 与原版行为一致)。
+    BOOL isIOS16OrLater = ([[UIDevice currentDevice].systemVersion doubleValue] >= 16.0);
+    if (isIOS16OrLater && [self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        return YES;
+    }
+    NSString *errRS = isIOS16OrLater ? [self.lastError copy] : nil;
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 与 App 前后台无关)
     //    对齐 AutoTouch: 不隐藏本 App 窗口(原版无此步骤), 每次截屏都重新创建 surface,
     //    读取走 _UICreateCGImageFromIOSurface 路径, 拿到的是系统当前帧(实时画面)。
@@ -1453,11 +1465,11 @@ static const char *_gsSurfaceKeys[] = {
     }
     NSString *err0 = [self.lastError copy];
     // 1. CARenderServerRenderDisplay: TrollShot/TrollVNC 在后台/锁屏验证过的跨 App 截屏方案,
-    //    走 WindowServer 渲染管线, 与 App 自身前后台无关。
-    if ([self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
+    //    走 WindowServer 渲染管线, 与 App 自身前后台无关。iOS 16 已在上面优先尝试。
+    if (!isIOS16OrLater && [self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;
     }
-    NSString *errRS = [self.lastError copy];
+    if (!errRS) { errRS = [self.lastError copy]; }
     // 2. IORegistry DisplaySurface + IOSurfaceLookup(全局显示缓冲, 不依赖前台)
     if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
         return YES;

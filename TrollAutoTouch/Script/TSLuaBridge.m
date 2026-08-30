@@ -701,6 +701,11 @@ static void tsParseMultiColorString(NSString *str, CGFloat sim,
 ///   findColor(color, x,y,w,h,sim) 区域, 指定相似度
 ///   findColor(color, rect, sim)  区域(table), 指定相似度
 static int l_screen_findColor(lua_State *L) {
+    // @autoreleasepool: 脚本在 GCD block 内长时间运行, 系统 autoreleasepool
+    // 从不 drain。每 100ms 一次找色产生的临时对象(TSColorResult/NSString/
+    // NSDictionary 等)会持续累积, 挂机几小时后内存耗尽被杀。这里每次调用
+    // drain 一次, 让临时对象及时释放(返回给 Lua 栈的值不受影响)。
+    @autoreleasepool {
     int color = (int)luaL_checkinteger(L, 1);
     int top = lua_gettop(L);
     int next = 2;
@@ -732,6 +737,7 @@ static int l_screen_findColor(lua_State *L) {
     lua_pushnumber(L, pt.x);
     lua_pushnumber(L, pt.y);
     return 2;
+    }
 }
 
 /// 多点找色:
@@ -743,6 +749,9 @@ static int l_screen_findColor(lua_State *L) {
 ///     匹配为 AutoGo 逐通道偏色判定: |R1-R2|<=tolR && |G1-G2|<=tolG && |B1-B2|<=tolB
 ///     x2/y2 为 0 表示使用屏幕最大宽高; dir 为扫描方向(0~3)
 static int l_screen_findColors(lua_State *L) {
+    // @autoreleasepool: 见 l_screen_findColor —— 挂机脚本每 100ms 调用的
+    // 高频找色必须每次 drain, 否则临时对象在 GCD block 的池里无限累积。
+    @autoreleasepool {
     int mainColor = 0;
     NSMutableArray<NSDictionary *> *offsets = [NSMutableArray array];
     CGRect rect;
@@ -821,10 +830,13 @@ static int l_screen_findColors(lua_State *L) {
     lua_pushnumber(L, pt.x);
     lua_pushnumber(L, pt.y);
     return 2;
+    }
 }
 
 /// 取色: getColor(x, y) -> 0xRRGGBB
 static int l_screen_getColor(lua_State *L) {
+    // @autoreleasepool: 同 findColor, 高频取色每次 drain 防止挂机内存累积
+    @autoreleasepool {
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
     uint8_t *px = NULL; int w = 0, h = 0;
@@ -847,11 +859,14 @@ static int l_screen_getColor(lua_State *L) {
     free(px);
     lua_pushinteger(L, color);
     return 1;
+    }
 }
 
 /// 获取屏幕某点的 RGB 分量: screen.getColorRGB(x, y) → r, g, b
 /// 与 getColor(x, y) 等价, 但直接返回三个 0~255 的分量, 省去脚本里位运算。
 static int l_screen_getColorRGB(lua_State *L) {
+    // @autoreleasepool: 同 findColor, 高频取色每次 drain 防止挂机内存累积
+    @autoreleasepool {
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);
     CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));
@@ -886,6 +901,7 @@ static int l_screen_getColorRGB(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)((color >> 8) & 0xFF));    // G
     lua_pushinteger(L, (lua_Integer)(color & 0xFF));            // B
     return 3;
+    }
 }
 
 /// 模板找图: findImage(path[, accuracy][, x, y, w, h])
@@ -1597,6 +1613,9 @@ static int l_appNode_unKeep(lua_State *L) { [[TSAppNodeInfo shared] unkeepTree];
 #pragma mark - OCR
 
 static int l_screen_findText(lua_State *L) {
+    // @autoreleasepool: OCR 每次创建全屏 UIImage(数 MB) + 识别结果对象,
+    // 必须每次 drain 防止挂机脚本内存累积
+    @autoreleasepool {
     const char *text = luaL_checkstring(L, 1);
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
@@ -1613,6 +1632,7 @@ static int l_screen_findText(lua_State *L) {
     lua_pushnumber(L, c.x);
     lua_pushnumber(L, c.y);
     return 2;
+    }
 }
 
 // 把 OCR 结果数组压入 Lua 表
@@ -1652,6 +1672,9 @@ static void pushOCRResults(lua_State *L, NSArray<TSOCRResult *> *results, BOOL s
 /// screen.paddleOcr([x1, y1, x2, y2]) → 文本数组
 /// 全屏/区域 OCR, 默认中英文, 返回 {string, x, y, w, h, confidence} 列表
 static int l_screen_paddleOcr(lua_State *L) {
+    // @autoreleasepool: 同 findText, OCR 每次创建全屏 UIImage + 识别结果,
+    // 每次 drain 防止挂机脚本内存累积
+    @autoreleasepool {
     CGRect region = CGRectZero;
     if (lua_gettop(L) >= 4) {
         CGFloat x1 = (CGFloat)luaL_checknumber(L, 1);
@@ -1678,11 +1701,15 @@ static int l_screen_paddleOcr(lua_State *L) {
     NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img inRegion:region];
     pushOCRResults(L, results, scriptSpace);
     return 1;
+    }
 }
 
 /// screen.visionOcr([lang], [x1, y1, x2, y2]) → 文本数组
 /// 支持自定义识别语言, 返回 {string, x, y, w, h, confidence} 列表
 static int l_screen_visionOcr(lua_State *L) {
+    // @autoreleasepool: 同 findText, OCR 每次创建全屏 UIImage + 识别结果,
+    // 每次 drain 防止挂机脚本内存累积
+    @autoreleasepool {
     NSString *lang = nil;
     CGRect region = CGRectZero;
     int idx = 1;
@@ -1724,6 +1751,7 @@ static int l_screen_visionOcr(lua_State *L) {
                                                               languages:languages];
     pushOCRResults(L, results, scriptSpace);
     return 1;
+    }
 }
 
 #pragma mark - JSON
