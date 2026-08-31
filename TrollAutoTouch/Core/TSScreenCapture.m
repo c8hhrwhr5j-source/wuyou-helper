@@ -157,6 +157,19 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     self.lastError = [NSString stringWithFormat:__VA_ARGS__]; \
 } while (0)
 
+// NSLog 节流: 高频截屏(约每 100ms 一次)下每次 NSLog 都会产生 os_log 缓冲与 IO,
+// iOS 16 长时间挂机会额外累积内存压力, 同一来源日志每 2 秒最多打一次。
+static void _logThrottled(NSString *fmt, ...) {
+    static NSTimeInterval s_lastLog = 0;
+    NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if (now - s_lastLog < 2.0) { return; }
+    s_lastLog = now;
+    va_list args;
+    va_start(args, fmt);
+    NSLogv(fmt, args);
+    va_end(args);
+}
+
 + (instancetype)shared {
     static TSScreenCapture *instance;
     static dispatch_once_t onceToken;
@@ -211,6 +224,7 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
 /// 传输在 WindowServer 侧(GPU)执行，不依赖 App 自身渲染状态，后台/其他 App 前台仍可用。
 - (BOOL)_dumpIOSurface:(IOSurfaceRef)sourceSurface
       skipColorConvert:(BOOL)skipColorConvert
+      directReadIfBgra:(BOOL)directReadIfBgra
             pixelsOut:(uint8_t **)pixelsOut
                width:(int *)widthOut
               height:(int *)heightOut {
@@ -238,7 +252,7 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     self.lastSourceFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)srcFmt];
     self.lastAccelOK = NO;
     self.lastAccelError = 0;
-    NSLog(@"[TSScreenCapture] _dumpIOSurface source=%zux%zu fmt=0x%08X", srcW, srcH, (unsigned int)srcFmt);
+    _logThrottled(@"[TSScreenCapture] _dumpIOSurface source=%zux%zu fmt=0x%08X", srcW, srcH, (unsigned int)srcFmt);
     if (srcW == 0 || srcH == 0) { return NO; }
 
     // 直接 IOSurfaceLock 读硬件输出 surface 在 iOS 15+/后台/部分机型不可靠(空内容),
@@ -246,7 +260,13 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     IOSurfaceRef readSurface = sourceSurface;
     IOSurfaceRef dstSurface = NULL;
     void *accel = NULL;
-    if (accelCreateFn && accelTransferFn && createFn &&
+    // 源已是 BGRA 且允许直读(仅 RenderServer 自建 surface): 直接 IOSurfaceLock 读,
+    // 不再经加速器转储创建 dstSurface。iOS 16 上每次截屏创建-释放全屏 GPU surface
+    // (约 12MB)系统侧不立即回收, 长时间挂机持续累积触发 Jetsam(SE3 iOS16.6 实测
+    // 约 18h 被杀; iOS 15 系统回收正常故无此问题)。自建 surface 由 renderFn 渲染,
+    // lock 直读稳定, 且两 surface 同为 BGRA 无色彩转换差异。
+    BOOL directBgra = (srcFmt == 0x42475241 /*BGRA*/ && directReadIfBgra);
+    if (!directBgra && accelCreateFn && accelTransferFn && createFn &&
         accelCreateFn(kCFAllocatorDefault, 0, &accel) == KERN_SUCCESS && accel) {
         CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -303,7 +323,7 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
             if (tr == KERN_SUCCESS) {
                 readSurface = dstSurface;
                 self.lastAccelOK = YES;
-                NSLog(@"[TSScreenCapture] 加速器转储成功 src=0x%08X -> dst=BGRA", (unsigned int)srcFmt);
+                _logThrottled(@"[TSScreenCapture] 加速器转储成功 src=0x%08X -> dst=BGRA", (unsigned int)srcFmt);
             } else {
                 self.lastAccelError = (int)tr;
                 NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d (0x%x), 回退直接读", (int)tr, (unsigned int)tr);
@@ -661,7 +681,7 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     // IOMFB 帧缓冲在后台/其他 App 前台时可能返回空 surface(IOSurfaceLock 读到全 0),
     // 加全 0 检测, 避免静默返回黑屏让 getColor 误判成 0x000000。
     uint8_t *px = NULL; int w = 0, h = 0;
-    if (![self _dumpIOSurface:surface skipColorConvert:NO pixelsOut:&px width:&w height:&h] || !px) {
+    if (![self _dumpIOSurface:surface skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&w height:&h] || !px) {
         TSSetLastError(@"路径3 IOMFB: 转储帧缓冲 surface 失败");
         return NO;
     }
@@ -829,7 +849,7 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
 
     // 读取像素(后台线程, 走 _UICreateCGImageFromIOSurface / 加速器转储 / 手动 lock 三级读取)
     uint8_t *px = NULL; int w = 0, h = 0;
-    BOOL ok = [self _dumpIOSurface:surf skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px;
+    BOOL ok = [self _dumpIOSurface:surf skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&w height:&h] && px;
     CFRelease(surf);
     if (!ok) {
         TSSetLastError(@"路径0 UIScreenSurface: surface 读取失败");
@@ -927,7 +947,7 @@ static const char *_gsSurfaceKeys[] = {
         if (!found) { continue; }
 
         uint8_t *px = NULL; int w = 0, h = 0;
-        if ([self _dumpIOSurface:found skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px) {
+        if ([self _dumpIOSurface:found skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&w height:&h] && px) {
             if (![self _isAllZeroPixels:px width:w height:h]) {
                 NSLog(@"[TSScreenCapture] 全局显示截屏成功 %dx%d (%@)", w, h, foundVia);
                 CFRelease(found);
@@ -1042,7 +1062,7 @@ static const char *_gsSurfaceKeys[] = {
         TSSetLastError(@"路径2 CARenderServer: 屏幕尺寸无效 %dx%d", w, h);
         return NO;
     }
-    NSLog(@"[TSScreenCapture] 尝试 CARenderServerRenderDisplay 截屏 %dx%d", w, h);
+    _logThrottled(@"[TSScreenCapture] 尝试 CARenderServerRenderDisplay 截屏 %dx%d", w, h);
 
     // 复用上次的 src surface(尺寸不变), 避免每次截屏重建 12MB GPU IOSurface。
     // iOS 16 高频截屏下每次创建/释放 GPU surface 导致 IO 内存暴涨被 jetsam 杀
@@ -1082,9 +1102,9 @@ static const char *_gsSurfaceKeys[] = {
             // surface 声明为 sRGB, WindowServer 渲染已完成色彩管理,
             // 像素即 sRGB 编码 —— 跳过 P3→sRGB 二次转换(iOS16+P3 屏发灰修复)
             uint8_t *px = NULL; int rw = 0, rh = 0;
-            if ([self _dumpIOSurface:src skipColorConvert:YES pixelsOut:&px width:&rw height:&rh] && px) {
+            if ([self _dumpIOSurface:src skipColorConvert:YES directReadIfBgra:YES pixelsOut:&px width:&rw height:&rh] && px) {
                 if (![self _isAllZeroPixels:px width:rw height:rh]) {
-                    NSLog(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
+                    _logThrottled(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
                           rw, rh, displayNames[attempt]);
                     self.lastError = nil;
                     *pixelsOut = px; *widthOut = rw; *heightOut = rh;
@@ -1308,7 +1328,7 @@ static const char *_gsSurfaceKeys[] = {
     IOSurfaceRef src = [self _sourceSurfaceFromWindow:remoteWindow];
     if (src) {
         uint8_t *px = NULL; int w = 0, h = 0;
-        if ([self _dumpIOSurface:src skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px) {
+        if ([self _dumpIOSurface:src skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&w height:&h] && px) {
             if (![self _isAllZeroPixels:px width:w height:h]) {
                 NSLog(@"[TSScreenCapture] 系统窗口截屏成功(路径A/IOSurface) %dx%d contextId=%u", w, h, contextId);
                 self.lastError = nil;
@@ -1479,7 +1499,7 @@ static const char *_gsSurfaceKeys[] = {
     IOSurfaceRef cached = [self _getCachedScreenSurface];
     if (cached) {
         uint8_t *px = NULL; int w = 0, h = 0;
-        BOOL ok = [self _dumpIOSurface:cached skipColorConvert:NO pixelsOut:&px width:&w height:&h] && px
+        BOOL ok = [self _dumpIOSurface:cached skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&w height:&h] && px
                   && ![self _isAllZeroPixels:px width:w height:h];
         CFRelease(cached);
         if (ok) {
@@ -1524,7 +1544,7 @@ static const char *_gsSurfaceKeys[] = {
             int sw = (int)(getW ? getW(s) : 0);
             int sh = (int)(getH ? getH(s) : 0);
             uint8_t *px = NULL; int dw = 0, dh = 0;
-            BOOL dumpOk = (sw > 0 && sh > 0) && [self _dumpIOSurface:s skipColorConvert:NO pixelsOut:&px width:&dw height:&dh];
+            BOOL dumpOk = (sw > 0 && sh > 0) && [self _dumpIOSurface:s skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&dw height:&dh];
             BOOL allZero = dumpOk && px && [self _isAllZeroPixels:px width:dw height:dh];
             NSMutableDictionary *res = [@{
                 @"ok": @YES,
@@ -1554,7 +1574,7 @@ static const char *_gsSurfaceKeys[] = {
             size_t (*gW)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetWidth");
             size_t (*gH)(IOSurfaceRef) = (size_t (*)(IOSurfaceRef))dlsym(_iosurfaceHandle, "IOSurfaceGetHeight");
             uint8_t *hpx = NULL; int hw = 0, hh = 0;
-            BOOL hdump = (gW && gH && gW(hs) > 0) && [self _dumpIOSurface:hs skipColorConvert:NO pixelsOut:&hpx width:&hw height:&hh];
+            BOOL hdump = (gW && gH && gW(hs) > 0) && [self _dumpIOSurface:hs skipColorConvert:NO directReadIfBgra:NO pixelsOut:&hpx width:&hw height:&hh];
             BOOL hzero = hdump && hpx && [self _isAllZeroPixels:hpx width:hw height:hh];
             diag[@"hiddenWindowsSurfaceResult"] = @{
                 @"ok": @YES,
