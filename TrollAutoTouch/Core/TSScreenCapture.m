@@ -1808,6 +1808,19 @@ static const char *_gsSurfaceKeys[] = {
 #pragma mark - keep/unkeep 缓存
 
 - (void)keepPixels {
+    // 60ms 限频(与 grabScreen 一致): 无 mSleep 的死循环脚本每圈 keep() 都会触发一次
+    // 完整截屏 —— createScreenIOSurface 在系统侧新建全屏 GPU surface, 实测可达 100 次/秒,
+    // iOS15/16 上系统侧均不随 CFRelease 及时回收, 持续累积内存(6S iOS15.8.4 实测约 71MB/h,
+    // 7 小时 footprint 涨 487MB)。限频后复用现有缓存帧(≤16.7fps 更新), 对找色脚本足够。
+    // 注: 缓存被 unkeep 清空时不限频(必须截屏), 但后续 findColor 走 grabScreen 仍有
+    // 60ms 限频兜底, 整体截屏频率不会失控。
+    static NSTimeInterval lastKeepAt = 0;
+    NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if (_cachedPixels && _cachedWidth > 0 && _cachedHeight > 0 &&
+        lastKeepAt > 0 && (now - lastKeepAt) < 0.06) {
+        return;
+    }
+    lastKeepAt = now;
     // 先释放旧缓存
     if (_cachedPixels) { free(_cachedPixels); _cachedPixels = NULL; }
 
