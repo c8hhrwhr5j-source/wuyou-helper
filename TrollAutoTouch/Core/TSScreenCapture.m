@@ -290,58 +290,11 @@ static void _logThrottled(NSString *fmt, ...) {
             }
         }
         if (accel) {
+            // 尺寸匹配 → 复用上次转储目标 surface; 否则新建并缓存
             if (_dumpDstSurface && _dumpDstSurfaceW == (int)srcW && _dumpDstSurfaceH == (int)srcH) {
                 dstSurface = (IOSurfaceRef)CFRetain(_dumpDstSurface);
             } else {
-                CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
-                    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-                if (props) {
-                    uint32_t bgra = 0x42475241; // 'BGRA'
-                    // BytesPerRow 需按 IOSurfaceAlignProperty 对齐(TrollShot 做法), 否则 IOSurfaceCreate 可能失败
-                    size_t (*alignPropFn)(CFStringRef, size_t) = dlsym(_iosurfaceHandle, "IOSurfaceAlignProperty");
-                    size_t bytesPerRow = alignPropFn ? alignPropFn(CFSTR("BytesPerRow"), srcW * 4) : srcW * 4;
-                    size_t allocSize = bytesPerRow * srcH;
-                    // 数值统一 32 位 SInt32(与 TrollShot @(int) 一致):
-                    // IOSurfaceCreate 对 CFNumber 字节宽度敏感, 用 64 位 long 会导致属性解析失败返回 NULL
-                    int wl = (int)srcW, hl = (int)srcH;
-                    int bprl = (int)bytesPerRow, allocl = (int)allocSize;
-                    CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &wl);
-                    CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &hl);
-                    CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
-                    CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bprl);
-                    CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &allocl);
-                    // 键名与原版 kIOSurface* 常量对应的字符串字面值一致
-                    CFDictionarySetValue(props, CFSTR("Width"), wNum);
-                    CFDictionarySetValue(props, CFSTR("Height"), hNum);
-                    CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
-                    CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
-                    CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
-                    // 对齐原版 HUDServices: 原版导入符号含 kIOSurfaceMemoryRegion(无 kIOSurfaceColorSpace)。
-                    // GPU 内存区让 accelerator 可写目标 surface, 否则 IOSurfaceAcceleratorTransferSurface
-                    // 在 iOS 16 上可能失败(实测 lastAccelOK=false 的疑点之一)。
-                    CFDictionarySetValue(props, CFSTR("MemoryRegion"), CFSTR("PurpleGFXMemory"));
-                    // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace
-                    int bpe = 4;
-                    CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
-                    if (bpeNum) {
-                        CFDictionarySetValue(props, CFSTR("BytesPerElement"), bpeNum);
-                        CFRelease(bpeNum);
-                    }
-                    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-                    if (cs) {
-                        CFPropertyListRef csProps = CGColorSpaceCopyPropertyList(cs);
-                        CGColorSpaceRelease(cs);
-                        if (csProps) {
-                            CFDictionarySetValue(props, CFSTR("ColorSpace"), csProps);
-                            CFRelease(csProps);
-                        }
-                    }
-                    CFRelease(wNum); CFRelease(hNum); CFRelease(fmtNum);
-                    CFRelease(bprNum); CFRelease(allocNum);
-
-                    dstSurface = createFn(props);
-                    CFRelease(props);
-                }
+                dstSurface = [self _createIOSurfaceWithWidth:(int)srcW height:(int)srcH];
                 if (dstSurface) {
                     @synchronized (self) {
                         if (_dumpDstSurface) { CFRelease(_dumpDstSurface); _dumpDstSurface = NULL; }
@@ -351,17 +304,35 @@ static void _logThrottled(NSString *fmt, ...) {
                     }
                 }
             }
-        }
-        if (dstSurface) {
-            // 真实签名 7 参数(对齐 TrollShot/TrollVNC)
-            kern_return_t tr = accelTransferFn(accel, sourceSurface, dstSurface, NULL, NULL, NULL, NULL);
-            if (tr == KERN_SUCCESS) {
-                readSurface = dstSurface;
-                self.lastAccelOK = YES;
-                _logThrottled(@"[TSScreenCapture] 加速器转储成功 src=0x%08X -> dst=BGRA", (unsigned int)srcFmt);
-            } else {
+            // 转储; 复用后的 transfer 在部分 iOS 版本上不可靠, 失败时丢弃缓存的
+            // accel+dstSurface 按首建流程重建一次, 仍失败才回退直接读。
+            for (int retry = 0; dstSurface && retry < 2; retry++) {
+                kern_return_t tr = accelTransferFn(accel, sourceSurface, dstSurface, NULL, NULL, NULL, NULL);
+                if (tr == KERN_SUCCESS) {
+                    readSurface = dstSurface;
+                    self.lastAccelOK = YES;
+                    _logThrottled(@"[TSScreenCapture] 加速器转储成功 src=0x%08X -> dst=BGRA", (unsigned int)srcFmt);
+                    break;
+                }
                 self.lastAccelError = (int)tr;
-                NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d (0x%x), 回退直接读", (int)tr, (unsigned int)tr);
+                NSLog(@"[TSScreenCapture] IOSurfaceAcceleratorTransferSurface 失败 kr=%d (0x%x), 重建重试", (int)tr, (unsigned int)tr);
+                if (dstSurface) { CFRelease(dstSurface); dstSurface = NULL; }
+                @synchronized (self) {
+                    if (_dumpAccel) { CFRelease(_dumpAccel); _dumpAccel = NULL; }
+                    if (_dumpDstSurface) { CFRelease(_dumpDstSurface); _dumpDstSurface = NULL; }
+                    _dumpDstSurfaceW = 0; _dumpDstSurfaceH = 0;
+                }
+                if (retry == 0 && accelCreateFn(kCFAllocatorDefault, 0, &_dumpAccel) == KERN_SUCCESS && _dumpAccel) {
+                    accel = _dumpAccel;
+                    dstSurface = [self _createIOSurfaceWithWidth:(int)srcW height:(int)srcH];
+                    if (dstSurface) {
+                        @synchronized (self) {
+                            _dumpDstSurface = (IOSurfaceRef)CFRetain(dstSurface);
+                            _dumpDstSurfaceW = (int)srcW;
+                            _dumpDstSurfaceH = (int)srcH;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1041,6 +1012,9 @@ static const char *_gsSurfaceKeys[] = {
     CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
     CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
     CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
+    // GPU 内存区(PurpleGFXMemory): 对齐转储目标 surface —— 让 WindowServer 渲染
+    // 与 IOSurfaceAccelerator 可写该 surface, 否则 iOS 16 上渲染/传输可能被拒。
+    CFDictionarySetValue(props, CFSTR("MemoryRegion"), CFSTR("PurpleGFXMemory"));
     // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace(WindowServer 渲染与 accel 转换需要)
     int bpe = 4;
     CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
@@ -1523,11 +1497,39 @@ static const char *_gsSurfaceKeys[] = {
     }
     NSString *errRS = isIOS16OrLater ? [self.lastError copy] : nil;
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 与 App 前后台无关)
-    //    对齐 AutoTouch: 不隐藏本 App 窗口(原版无此步骤), 每次截屏都重新创建 surface,
-    //    读取走 _UICreateCGImageFromIOSurface 路径, 拿到的是系统当前帧(实时画面)。
-    //    ★iOS 16 跳过: 每次调用系统侧新建全屏 GPU surface, iOS16 下不随 CFRelease
-    //    及时回收, 高频截屏持续累积(旧注释已确认此问题); iOS15 系统回收正常保留。
-    if (!isIOS16OrLater) {
+    //    iOS 15: 系统 surface 回收正常, 每次截屏都重新创建(与原版行为一致)。
+    //    iOS 16: RenderServer 失败后的节流兜底 —— 该路径每次调用都在系统侧新建全屏
+    //    GPU surface 且不随 CFRelease 及时回收(挂机几小时后 Jetsam 的累积源)。
+    //    兜底帧缓存 1 秒: 1 秒内再次失败直接复用缓存帧, createScreenIOSurface 实际
+    //    调用 ≤1 次/秒(原为每 100ms 一次), 累积速度降低约 10 倍, 同时保住
+    //    RenderServer 不可用时的取色(否则 iOS 16 上截屏全挂 → 找色失败)。
+    if (isIOS16OrLater) {
+        static uint8_t *sFbPx = NULL;
+        static int sFbW = 0, sFbH = 0;
+        static NSTimeInterval sFbAt = 0;
+        NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+        if (sFbPx && sFbW > 0 && sFbH > 0 && (now - sFbAt) < 1.0) {
+            uint8_t *copy = malloc((size_t)sFbW * (size_t)sFbH * 4);
+            if (copy) {
+                memcpy(copy, sFbPx, (size_t)sFbW * (size_t)sFbH * 4);
+                _statCreateUIScreenOK++;
+                *pixelsOut = copy; *widthOut = sFbW; *heightOut = sFbH;
+                self.lastError = nil;
+                return YES;
+            }
+        }
+        BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
+        if (ok0) {
+            if (sFbPx) { free(sFbPx); }
+            sFbW = *widthOut; sFbH = *heightOut;
+            sFbPx = malloc((size_t)sFbW * (size_t)sFbH * 4);
+            if (sFbPx) { memcpy(sFbPx, *pixelsOut, (size_t)sFbW * (size_t)sFbH * 4); }
+            sFbAt = now;
+            _statCreateUIScreenOK++;
+            return YES;
+        }
+        _statCreateUIScreenFail++;
+    } else {
         BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
         if (ok0) { _statCreateUIScreenOK++; return YES; }
         _statCreateUIScreenFail++;
