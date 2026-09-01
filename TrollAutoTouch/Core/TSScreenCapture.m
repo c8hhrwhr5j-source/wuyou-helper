@@ -159,7 +159,27 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     unsigned long long _statCreateUIScreenOK, _statCreateUIScreenFail;
     unsigned long long _statGlobalOK, _statGlobalFail;
     unsigned long long _statCacheOK, _statCacheFail;
+
+    // ── 内存泄漏诊断计数(2026-09-01, iOS16.6 SE3 挂机 71MB/h 累积定位) ──
+    // 拆分 createScreenIOSurface "真实创建" 与后台 "1 秒缓存命中"：
+    // 原 _statCreateUIScreenOK 把两者混计, 99.6 次/秒 中无法区分真实创建频率。
+    unsigned long long _statUIScreenCreateCalls;   // createScreenIOSurface 返回非空次数
+    unsigned long long _statUIScreenReleased;      // 已 CFRelease 的 surface 次数
+    unsigned long long _statUIScreenCacheHit;      // 后台 1 秒缓存命中(未新建 surface)
+    unsigned long long _statUIScreenRealCreateOK;  // 真实创建并成功读取
+    unsigned long long _statUIScreenAllocBytes;    // 累计 surface alloc size(字节, 诊断量级)
+    unsigned long long _statUIScreenAllocSizeLast; // 最近一次 surface alloc size
+    unsigned long long _statKeepCalls;             // keepPixels 调用次数
+    unsigned long long _statKeepThrottled;         // keep 60ms 限频跳过次数
+    unsigned long long _statKeepRealCapture;       // keep 实际触发截屏次数
+    unsigned long long _statCaptureCalls;          // captureScreenToRGBA 总调用次数
+    unsigned long long _statDumpMallocBytes;       // _dumpIOSurface 累计 malloc 缓冲字节
+    unsigned long long _statDumpMallocCount;       // _dumpIOSurface malloc 调用次数
 }
+
+// Lua 层 grabScreen 调用统计(static 计数器, 供类方法 +statsLine 读取)
+static unsigned long long s_statGrabScreenCalls = 0;   // grabScreen 总调用次数
+static unsigned long long s_statGrabThrottled = 0;     // grabScreen 60ms 限频跳过次数
 @end
 
 @implementation TSScreenCapture
@@ -452,6 +472,11 @@ static void _logThrottled(NSString *fmt, ...) {
         if (dstSurface) { CFRelease(dstSurface); }
         return NO;
     }
+    // 诊断: 进程内转储缓冲 malloc 流量累计(每次截屏 ~4MB, 对比 heap 增长判断
+    // 缓冲是否被正常 free —— 若 dumpMalloc 累计巨大而 heap 不涨, 说明缓冲都释放了,
+    // 泄漏在别处(系统侧 surface 或 ObjC 对象); 若 heap 同步涨, 则进程内泄漏)
+    _statDumpMallocCount++;
+    _statDumpMallocBytes += (unsigned long long)w * (unsigned long long)h * 4;
 
     uint32_t fmt = pixelFormatFn ? pixelFormatFn(readSurface) : 0x42475241; // 默认假设 BGRA
     self.lastReadFormat = [NSString stringWithFormat:@"0x%08X", (unsigned int)fmt];
@@ -756,6 +781,7 @@ static void _logThrottled(NSString *fmt, ...) {
             } @catch (NSException *e) { }
         }
     } @catch (NSException *e) { }
+    if (result) { _statUIScreenCreateCalls++; }
     return result;
 }
 
@@ -831,7 +857,7 @@ static void _logThrottled(NSString *fmt, ...) {
             }
             dispatch_semaphore_signal(sema);
             // 主线程已超时未取走时, block 自行释放, 避免 surface 泄漏
-            if (abandoned && s) { CFRelease(s); }
+            if (abandoned && s) { _statUIScreenReleased++; CFRelease(s); }
         });
         long ws = dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC));
         if (ws != 0) {
@@ -851,6 +877,15 @@ static void _logThrottled(NSString *fmt, ...) {
     // 读取像素(后台线程, 走 _UICreateCGImageFromIOSurface / 加速器转储 / 手动 lock 三级读取)
     uint8_t *px = NULL; int w = 0, h = 0;
     BOOL ok = [self _dumpIOSurface:surf skipColorConvert:NO directReadIfBgra:NO pixelsOut:&px width:&w height:&h] && px;
+    // 诊断: 记录本次 surface 的 alloc size(系统侧 GPU/IO 内存量级), 累计用于判断
+    // "创建-释放是否配对" —— 若 allocBytes 增长远高于释放次数预期, 即为系统侧累积。
+    size_t (*allocSizeFn)(IOSurfaceRef) = _iosurfaceHandle ? dlsym(_iosurfaceHandle, "IOSurfaceGetAllocSize") : NULL;
+    if (allocSizeFn) {
+        size_t asz = allocSizeFn(surf);
+        _statUIScreenAllocBytes += asz;
+        _statUIScreenAllocSizeLast = asz;
+    }
+    _statUIScreenReleased++;
     CFRelease(surf);
     if (!ok) {
         TSSetLastError(@"路径0 UIScreenSurface: surface 读取失败");
@@ -1513,6 +1548,7 @@ static const char *_gsSurfaceKeys[] = {
             if (copy) {
                 memcpy(copy, sFbPx, (size_t)sFbW * (size_t)sFbH * 4);
                 _statCreateUIScreenOK++;
+                _statUIScreenCacheHit++;   // 1 秒节流命中: 未调用 createScreenIOSurface
                 *pixelsOut = copy; *widthOut = sFbW; *heightOut = sFbH;
                 self.lastError = nil;
                 return YES;
@@ -1526,12 +1562,13 @@ static const char *_gsSurfaceKeys[] = {
             if (sFbPx) { memcpy(sFbPx, *pixelsOut, (size_t)sFbW * (size_t)sFbH * 4); }
             sFbAt = now;
             _statCreateUIScreenOK++;
+            _statUIScreenRealCreateOK++;
             return YES;
         }
         _statCreateUIScreenFail++;
     } else {
         BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
-        if (ok0) { _statCreateUIScreenOK++; return YES; }
+        if (ok0) { _statCreateUIScreenOK++; _statUIScreenRealCreateOK++; return YES; }
         _statCreateUIScreenFail++;
     }
     NSString *err0 = isIOS16OrLater ? nil : [self.lastError copy];
@@ -1572,16 +1609,39 @@ static const char *_gsSurfaceKeys[] = {
 
 #pragma mark - 截图链路诊断
 
++ (void)noteGrabScreenCall { s_statGrabScreenCalls++; }
++ (void)noteGrabScreenThrottled { s_statGrabThrottled++; }
+
 /// 截屏路径统计摘要(供 AppDelegate 周期写入 touch.log, 定位 iOS16 高频截屏内存累积来源)
 - (NSString *)statsLine {
+    // 诊断字段说明(2026-09-01, 定位 iOS16 挂机内存累积):
+    //   UIScreen创建 = createScreenIOSurface 真实调用次数(系统侧 GPU surface 新建)
+    //   UIScreen释放 = 进程内已 CFRelease 次数; 若 创建-释放 持续为正 → 进程内未释放
+    //   缓存命中     = 后台 1 秒节流命中(未新建 surface, 不产生系统侧内存)
+    //   alloc累计    = 已释放 surface 的 alloc size 总和(衡量系统侧 surface 大小)
+    //   keep 限频跳过 = keepPixels 60ms 限频拦截次数; keep 实际截屏 = 真实触发的截屏
+    UIApplicationState st = [UIApplication sharedApplication].applicationState;
+    NSString *stName = (st == UIApplicationStateActive) ? @"前台Active"
+                      : (st == UIApplicationStateInactive) ? @"Inactive" : @"后台Background";
     return [NSString stringWithFormat:
-        @"[截屏] RenderServer 成功%llu/失败%llu(直读%llu/转储回退%llu) "
-        @"UIScreen 成功%llu/失败%llu 全局显示 成功%llu/失败%llu 缓存 成功%llu/失败%llu",
+        @"[截屏] %@ RenderServer 成功%llu/失败%llu(直读%llu/转储回退%llu) "
+        @"UIScreen 创建%llu/释放%llu 成功%llu/失败%llu(缓存命中%llu/真实创建%llu) "
+        @"alloc累计%llu(最近%llu) "
+        @"全局显示 成功%llu/失败%llu 缓存 成功%llu/失败%llu "
+        @"keep 调用%llu 限频跳过%llu 实际截屏%llu grab 调用%llu/限频跳过%llu "
+        @"dump malloc %llu次/%lluMB 总请求%llu",
+        stName,
         _statRenderServerOK, _statRenderServerFail,
         _statRenderServerDirectOK, _statRenderServerDirectFail,
-        _statCreateUIScreenOK, _statCreateUIScreenFail,
+        _statUIScreenCreateCalls, _statUIScreenReleased,
+        _statCreateUIScreenOK, _statCreateUIScreenFail, _statUIScreenCacheHit, _statUIScreenRealCreateOK,
+        _statUIScreenAllocBytes, _statUIScreenAllocSizeLast,
         _statGlobalOK, _statGlobalFail,
-        _statCacheOK, _statCacheFail];
+        _statCacheOK, _statCacheFail,
+        _statKeepCalls, _statKeepThrottled, _statKeepRealCapture,
+        s_statGrabScreenCalls, s_statGrabThrottled,
+        _statDumpMallocCount, _statDumpMallocBytes / 1024 / 1024,
+        _statCaptureCalls];
 }
 
 - (NSDictionary *)diagnostics {
@@ -1700,6 +1760,7 @@ static const char *_gsSurfaceKeys[] = {
 - (BOOL)captureScreenToRGBA:(uint8_t **)pixelsOut
                      width:(int *)widthOut
                     height:(int *)heightOut {
+    _statCaptureCalls++;
     self.lastPathUsed = @"(未截屏)";
     self.lastSourceFormat = nil;
     self.lastReadFormat = nil;
@@ -1808,6 +1869,7 @@ static const char *_gsSurfaceKeys[] = {
 #pragma mark - keep/unkeep 缓存
 
 - (void)keepPixels {
+    _statKeepCalls++;
     // 60ms 限频(与 grabScreen 一致): 无 mSleep 的死循环脚本每圈 keep() 都会触发一次
     // 完整截屏 —— createScreenIOSurface 在系统侧新建全屏 GPU surface, 实测可达 100 次/秒,
     // iOS15/16 上系统侧均不随 CFRelease 及时回收, 持续累积内存(6S iOS15.8.4 实测约 71MB/h,
@@ -1818,6 +1880,7 @@ static const char *_gsSurfaceKeys[] = {
     NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
     if (_cachedPixels && _cachedWidth > 0 && _cachedHeight > 0 &&
         lastKeepAt > 0 && (now - lastKeepAt) < 0.06) {
+        _statKeepThrottled++;
         return;
     }
     lastKeepAt = now;
@@ -1826,6 +1889,8 @@ static const char *_gsSurfaceKeys[] = {
 
     if (![self captureScreenToRGBA:&_cachedPixels width:&_cachedWidth height:&_cachedHeight]) {
         _cachedPixels = NULL; _cachedWidth = 0; _cachedHeight = 0;
+    } else {
+        _statKeepRealCapture++;
     }
 }
 

@@ -81,6 +81,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 截屏路径统计摘要字符串(供内存诊断日志使用)
 - (NSString *)statsLine;
 
+/// 记录 Lua 层 grabScreen 调用(用于诊断 keep/grab 限频与截屏请求频率)
++ (void)noteGrabScreenCall;
++ (void)noteGrabScreenThrottled;
+
 /// keepScreen: 缓存上一次截屏像素(避免每次截屏，用于多色查找等场景)
 - (void)keepPixels;
 /// unkeepScreen: 释放缓存

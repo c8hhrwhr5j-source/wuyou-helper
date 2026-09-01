@@ -21,6 +21,7 @@
 #import "Common/TSLogStore.h"
 #import "Core/TSScreenCapture.h"
 #import <mach/mach.h>
+#import <malloc/malloc.h>
 
 // TAS 服务开关 key (与 TSSettingsViewController 一致, 默认开)
 static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
@@ -76,8 +77,8 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // 这是 network-authentication 后台豁免的判定依据(对齐原版)。
     [TSNetworkAuth registerHotspotHelper];
 
-    // ── 内存诊断: 启动记录版本/机型 + 每 5 分钟采样 footprint + 截屏路径统计,
-    //    定位 iOS16 挂机十几小时后内存累积(Jetsam 杀后台)的来源 ──
+    // ── 内存诊断: 启动记录版本/机型 + 每 1 分钟采样 footprint/heap/VM 细分
+    //    + 截屏路径统计, 定位 iOS16 挂机十几小时后内存累积(Jetsam 杀后台)的来源 ──
     [self _startMemoryDiag];
 
     NSLog(@"[QQ音乐] App 启动完成");
@@ -94,10 +95,54 @@ static unsigned long long TS_physFootprint(void) {
     return 0;
 }
 
+// 进程 VM 细分: 返回 internal/external/compressor 页数 ×4096 字节
+//   internal  = 普通匿名内存(堆/malloc 之外的 VM, 含 autorelease 块、CG/图像缓存等)
+//   external  = IO/GPU 相关页(IOKit/IOSurface/IOAccelerator 映射 —— createScreenIOSurface
+//               系统侧 surface 若未回收, 主要体现为 external 增长)
+//   compressor= 已压缩内存页(内存压力时的压缩, 涨说明 dirty 内存持续产生)
+static void TS_vmBreakdown(unsigned long long *internalBytes,
+                           unsigned long long *externalBytes,
+                           unsigned long long *compressorBytes) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &cnt) != KERN_SUCCESS) {
+        *internalBytes = *externalBytes = *compressorBytes = 0;
+        return;
+    }
+    const unsigned long long page = 4096;
+    *internalBytes = (unsigned long long)info.internal_page_count * page;
+    *externalBytes = (unsigned long long)info.external_page_count * page;
+    *compressorBytes = (unsigned long long)info.compressor_page_count * page;
+}
+
+// 进程 malloc 堆总占用(所有 zone size_in_use, 字节)
+// 用于区分"进程内 malloc/ObjC 对象泄漏" vs "系统侧 IO/GPU surface 累积":
+//   heap 涨而 external 不涨 → 进程内泄漏(对象/缓冲未释放)
+//   external 涨而 heap 稳  → 系统侧 createScreenIOSurface 未回收(与日志 71MB/h 最吻合)
+static unsigned long long TS_mallocInUse(void) {
+    malloc_statistics_t stats;
+    if (malloc_zone_statistics(malloc_default_zone(), &stats) == KERN_SUCCESS) {
+        return (unsigned long long)stats.size_in_use;
+    }
+    return 0;
+}
+
 - (void)_logMemoryDiag:(NSString *)tag {
     unsigned long long fp = TS_physFootprint();
-    [[TSLogStore shared] append:[NSString stringWithFormat:@"[内存] %@ footprint=%.1fMB %@",
-        tag, fp / 1024.0 / 1024.0, [[TSScreenCapture shared] statsLine]]];
+    unsigned long long internalBytes = 0, externalBytes = 0, compressorBytes = 0;
+    TS_vmBreakdown(&internalBytes, &externalBytes, &compressorBytes);
+    unsigned long long heap = TS_mallocInUse();
+    unsigned long long uptime = (unsigned long long)[NSProcessInfo processInfo].systemUptime;
+    [[TSLogStore shared] append:[NSString stringWithFormat:
+        @"[内存] %@ t=%.1fh footprint=%.1fMB heap=%.1fMB vm内部=%.1fMB 外部=%.1fMB 压缩=%.1fMB %@",
+        tag,
+        uptime / 3600.0,
+        fp / 1024.0 / 1024.0,
+        heap / 1024.0 / 1024.0,
+        internalBytes / 1024.0 / 1024.0,
+        externalBytes / 1024.0 / 1024.0,
+        compressorBytes / 1024.0 / 1024.0,
+        [[TSScreenCapture shared] statsLine]]];
 }
 
 - (void)_startMemoryDiag {
@@ -117,7 +162,9 @@ static unsigned long long TS_physFootprint(void) {
 }
 
 - (void)_scheduleMemoryDiag {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * 60 * NSEC_PER_SEC)),
+    // 每 1 分钟采样一次(原 5 分钟): 内存增长速率 71MB/h 时 5 分钟只涨 6MB,
+    // 采样间隔内统计/时间戳分辨率太低, 1 分钟能更早捕捉趋势与泄漏来源。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         [self _logMemoryDiag:@"采样"];
         [self _scheduleMemoryDiag];

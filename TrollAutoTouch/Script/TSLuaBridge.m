@@ -499,6 +499,7 @@ static void luaStopHook(lua_State *L, lua_Debug *ar) {
 /// 以最大频率反复截屏，把设备 CPU(全屏像素转储)打满导致整体卡顿"假死"。60ms≈16fps，
 /// 对找色脚本足够；脚本带 mSleep(≥100ms) 时不受影响。
 static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
+    [TSScreenCapture noteGrabScreenCall];
     // 优先复用 keep 缓存: screen.keep() 后多次 findColor/findColors/getColor 读取同一帧像素
     if ([[TSScreenCapture shared] getCachedPixels:pxOut width:wOut height:hOut]) {
         return YES;
@@ -509,6 +510,7 @@ static BOOL grabScreen(uint8_t **pxOut, int *wOut, int *hOut) {
     static int lastW = 0, lastH = 0;
     NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
     if (lastPx && lastW > 0 && lastH > 0 && (now - lastGrabAt) < 0.06) {
+        [TSScreenCapture noteGrabScreenThrottled];
         uint8_t *copy = malloc((size_t)lastW * (size_t)lastH * 4);
         if (copy) {
             memcpy(copy, lastPx, (size_t)lastW * (size_t)lastH * 4);
