@@ -95,11 +95,13 @@ static unsigned long long TS_physFootprint(void) {
     return 0;
 }
 
-// 进程 VM 细分: 返回 internal/external/compressor 页数 ×4096 字节
-//   internal  = 普通匿名内存(堆/malloc 之外的 VM, 含 autorelease 块、CG/图像缓存等)
-//   external  = IO/GPU 相关页(IOKit/IOSurface/IOAccelerator 映射 —— createScreenIOSurface
-//               系统侧 surface 若未回收, 主要体现为 external 增长)
-//   compressor= 已压缩内存页(内存压力时的压缩, 涨说明 dirty 内存持续产生)
+// 进程 VM 细分: 返回 internal/external/compressor 字节
+//   internal = 普通匿名内存(堆/malloc 之外的 VM, 含 autorelease 块、CG/图像缓存等)
+//   external = IO/GPU 相关内存(IOKit/IOSurface/IOAccelerator 映射 —— createScreenIOSurface
+//              系统侧 surface 若未回收, 主要体现为 external 增长)
+//   compressor= 已压缩内存(内存压力时的压缩, 涨说明 dirty 内存持续产生)
+// 注: iOS SDK 的 task_vm_info 仅含 rev1 字段(到 user_region_count),
+//     internal/external/compressed 本身即为字节数; rev2 的 *_page_count 字段 iOS SDK 不存在。
 static void TS_vmBreakdown(unsigned long long *internalBytes,
                            unsigned long long *externalBytes,
                            unsigned long long *compressorBytes) {
@@ -109,22 +111,20 @@ static void TS_vmBreakdown(unsigned long long *internalBytes,
         *internalBytes = *externalBytes = *compressorBytes = 0;
         return;
     }
-    const unsigned long long page = 4096;
-    *internalBytes = (unsigned long long)info.internal_page_count * page;
-    *externalBytes = (unsigned long long)info.external_page_count * page;
-    *compressorBytes = (unsigned long long)info.compressor_page_count * page;
+    *internalBytes = (unsigned long long)info.internal;
+    *externalBytes = (unsigned long long)info.external;
+    *compressorBytes = (unsigned long long)info.compressed;
 }
 
-// 进程 malloc 堆总占用(所有 zone size_in_use, 字节)
+// 进程 malloc 堆总占用(默认 zone size_in_use, 字节)
 // 用于区分"进程内 malloc/ObjC 对象泄漏" vs "系统侧 IO/GPU surface 累积":
 //   heap 涨而 external 不涨 → 进程内泄漏(对象/缓冲未释放)
 //   external 涨而 heap 稳  → 系统侧 createScreenIOSurface 未回收(与日志 71MB/h 最吻合)
 static unsigned long long TS_mallocInUse(void) {
     malloc_statistics_t stats;
-    if (malloc_zone_statistics(malloc_default_zone(), &stats) == KERN_SUCCESS) {
-        return (unsigned long long)stats.size_in_use;
-    }
-    return 0;
+    // malloc_zone_statistics 返回 void(无错误指示), 直接读取统计即可
+    malloc_zone_statistics(malloc_default_zone(), &stats);
+    return (unsigned long long)stats.size_in_use;
 }
 
 - (void)_logMemoryDiag:(NSString *)tag {
