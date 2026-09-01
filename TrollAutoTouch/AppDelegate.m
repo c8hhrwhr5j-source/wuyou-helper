@@ -19,11 +19,16 @@
 #import "Script/TSHTTPServer.h"
 #import "Common/TSPaths.h"
 #import "Common/TSLogStore.h"
+#import "Core/TSScreenCapture.h"
+#import <mach/mach.h>
 
 // TAS 服务开关 key (与 TSSettingsViewController 一致, 默认开)
 static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 @interface AppDelegate ()
+- (void)_logMemoryDiag:(NSString *)tag;
+- (void)_startMemoryDiag;
+- (void)_scheduleMemoryDiag;
 @end
 
 @implementation AppDelegate
@@ -71,8 +76,52 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // 这是 network-authentication 后台豁免的判定依据(对齐原版)。
     [TSNetworkAuth registerHotspotHelper];
 
+    // ── 内存诊断: 启动记录版本/机型 + 每 5 分钟采样 footprint + 截屏路径统计,
+    //    定位 iOS16 挂机十几小时后内存累积(Jetsam 杀后台)的来源 ──
+    [self _startMemoryDiag];
+
     NSLog(@"[QQ音乐] App 启动完成");
     return YES;
+}
+
+// 进程物理内存占用(phys_footprint, 字节)
+static unsigned long long TS_physFootprint(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &cnt) == KERN_SUCCESS) {
+        return (unsigned long long)info.phys_footprint;
+    }
+    return 0;
+}
+
+- (void)_logMemoryDiag:(NSString *)tag {
+    unsigned long long fp = TS_physFootprint();
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[内存] %@ footprint=%.1fMB %@",
+        tag, fp / 1024.0 / 1024.0, [[TSScreenCapture shared] statsLine]]];
+}
+
+- (void)_startMemoryDiag {
+    NSDictionary *infoDict = [NSBundle mainBundle].infoDictionary;
+    NSString *ver = infoDict[@"CFBundleShortVersionString"] ?: @"?";
+    NSString *build = infoDict[@"CFBundleVersion"] ?: @"?";
+    NSString *model = nil;
+    @try {
+        id m = [[UIDevice currentDevice] valueForKey:@"modelIdentifier"];
+        if ([m isKindOfClass:[NSString class]] && [m length]) { model = m; }
+    } @catch (NSException *e) {}
+    if (!model) { model = [[UIDevice currentDevice] model]; }
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[启动] v%@(b%@) iOS%@ %@",
+        ver, build, [UIDevice currentDevice].systemVersion, model]];
+    [self _logMemoryDiag:@"启动基线"];
+    [self _scheduleMemoryDiag];
+}
+
+- (void)_scheduleMemoryDiag {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * 60 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [self _logMemoryDiag:@"采样"];
+        [self _scheduleMemoryDiag];
+    });
 }
 
 // 把打包进 App 的内置脚本(bundle 的 lua/ 目录)同步到 /var/mobile/touch/lua/
@@ -162,7 +211,9 @@ handleEventsForBackgroundURLSession:(NSString *)identifier
 // iOS 16 上后台 app 被回收前系统常先发内存警告, 若日志停在内存警告之后
 // 基本可判定进程是被 Jetsam 回收(后台保活失效), 而非脚本报错。
 - (void)applicationDidReceiveMemoryWarning:(UIApplication *)application {
-    [[TSLogStore shared] append:@"[App] didReceiveMemoryWarning 收到内存警告!"];
+    unsigned long long fp = TS_physFootprint();
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[App] didReceiveMemoryWarning 收到内存警告! footprint=%.1fMB %@",
+        fp / 1024.0 / 1024.0, [[TSScreenCapture shared] statsLine]]];
 }
 
 - (void)applicationWillTerminate:(UIApplication *)application {

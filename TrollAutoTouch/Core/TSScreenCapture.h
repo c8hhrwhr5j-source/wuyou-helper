@@ -78,6 +78,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 截图链路诊断信息(供 HTTP /api/screencap-diag 使用, 便于排查各路径失败原因)
 - (NSDictionary *)diagnostics;
 
+/// 截屏路径统计摘要字符串(供内存诊断日志使用)
+- (NSString *)statsLine;
+
 /// keepScreen: 缓存上一次截屏像素(避免每次截屏，用于多色查找等场景)
 - (void)keepPixels;
 /// unkeepScreen: 释放缓存

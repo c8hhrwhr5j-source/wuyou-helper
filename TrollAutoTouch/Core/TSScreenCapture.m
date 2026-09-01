@@ -147,6 +147,18 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     IOSurfaceRef _renderServerSurface;
     int _renderServerSurfaceW;
     int _renderServerSurfaceH;
+    // 复用转储目标 surface / IOSurfaceAccelerator(首建后常驻): 避免 iOS16 高频截屏
+    // 每次新建全屏 GPU surface, 系统侧不立即回收导致挂机十几小时后内存累积被杀。
+    IOSurfaceRef _dumpDstSurface;
+    int _dumpDstSurfaceW;
+    int _dumpDstSurfaceH;
+    void *_dumpAccel;
+    // 截屏路径诊断计数(供 AppDelegate 周期写入 touch.log, 定位内存累积来源)
+    unsigned long long _statRenderServerOK, _statRenderServerFail;
+    unsigned long long _statRenderServerDirectOK, _statRenderServerDirectFail;
+    unsigned long long _statCreateUIScreenOK, _statCreateUIScreenFail;
+    unsigned long long _statGlobalOK, _statGlobalFail;
+    unsigned long long _statCacheOK, _statCacheFail;
 }
 @end
 
@@ -266,56 +278,79 @@ static void _logThrottled(NSString *fmt, ...) {
     // 约 18h 被杀; iOS 15 系统回收正常故无此问题)。自建 surface 由 renderFn 渲染,
     // lock 直读稳定, 且两 surface 同为 BGRA 无色彩转换差异。
     BOOL directBgra = (srcFmt == 0x42475241 /*BGRA*/ && directReadIfBgra);
-    if (!directBgra && accelCreateFn && accelTransferFn && createFn &&
-        accelCreateFn(kCFAllocatorDefault, 0, &accel) == KERN_SUCCESS && accel) {
-        CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        if (props) {
-            uint32_t bgra = 0x42475241; // 'BGRA'
-            // BytesPerRow 需按 IOSurfaceAlignProperty 对齐(TrollShot 做法), 否则 IOSurfaceCreate 可能失败
-            size_t (*alignPropFn)(CFStringRef, size_t) = dlsym(_iosurfaceHandle, "IOSurfaceAlignProperty");
-            size_t bytesPerRow = alignPropFn ? alignPropFn(CFSTR("BytesPerRow"), srcW * 4) : srcW * 4;
-            size_t allocSize = bytesPerRow * srcH;
-            // 数值统一 32 位 SInt32(与 TrollShot @(int) 一致):
-            // IOSurfaceCreate 对 CFNumber 字节宽度敏感, 用 64 位 long 会导致属性解析失败返回 NULL
-            int wl = (int)srcW, hl = (int)srcH;
-            int bprl = (int)bytesPerRow, allocl = (int)allocSize;
-            CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &wl);
-            CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &hl);
-            CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
-            CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bprl);
-            CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &allocl);
-            // 键名与原版 kIOSurface* 常量对应的字符串字面值一致
-            CFDictionarySetValue(props, CFSTR("Width"), wNum);
-            CFDictionarySetValue(props, CFSTR("Height"), hNum);
-            CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
-            CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
-            CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
-            // 对齐原版 HUDServices: 原版导入符号含 kIOSurfaceMemoryRegion(无 kIOSurfaceColorSpace)。
-            // GPU 内存区让 accelerator 可写目标 surface, 否则 IOSurfaceAcceleratorTransferSurface
-            // 在 iOS 16 上可能失败(实测 lastAccelOK=false 的疑点之一)。
-            CFDictionarySetValue(props, CFSTR("MemoryRegion"), CFSTR("PurpleGFXMemory"));
-            // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace
-            int bpe = 4;
-            CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
-            if (bpeNum) {
-                CFDictionarySetValue(props, CFSTR("BytesPerElement"), bpeNum);
-                CFRelease(bpeNum);
+    if (!directBgra && accelCreateFn && accelTransferFn && createFn) {
+        // 复用 IOSurfaceAccelerator(首建后常驻)与转储目标 surface(尺寸不变时复用):
+        // 除首次外不再创建任何 GPU surface, 从源头消除 iOS16 高频截屏下
+        // "创建-释放全屏 GPU surface"导致的系统侧内存持续累积。
+        @synchronized (self) {
+            if (_dumpAccel) {
+                accel = _dumpAccel;
+            } else if (accelCreateFn(kCFAllocatorDefault, 0, &_dumpAccel) == KERN_SUCCESS && _dumpAccel) {
+                accel = _dumpAccel;
             }
-            CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-            if (cs) {
-                CFPropertyListRef csProps = CGColorSpaceCopyPropertyList(cs);
-                CGColorSpaceRelease(cs);
-                if (csProps) {
-                    CFDictionarySetValue(props, CFSTR("ColorSpace"), csProps);
-                    CFRelease(csProps);
+        }
+        if (accel) {
+            if (_dumpDstSurface && _dumpDstSurfaceW == (int)srcW && _dumpDstSurfaceH == (int)srcH) {
+                dstSurface = (IOSurfaceRef)CFRetain(_dumpDstSurface);
+            } else {
+                CFMutableDictionaryRef props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                if (props) {
+                    uint32_t bgra = 0x42475241; // 'BGRA'
+                    // BytesPerRow 需按 IOSurfaceAlignProperty 对齐(TrollShot 做法), 否则 IOSurfaceCreate 可能失败
+                    size_t (*alignPropFn)(CFStringRef, size_t) = dlsym(_iosurfaceHandle, "IOSurfaceAlignProperty");
+                    size_t bytesPerRow = alignPropFn ? alignPropFn(CFSTR("BytesPerRow"), srcW * 4) : srcW * 4;
+                    size_t allocSize = bytesPerRow * srcH;
+                    // 数值统一 32 位 SInt32(与 TrollShot @(int) 一致):
+                    // IOSurfaceCreate 对 CFNumber 字节宽度敏感, 用 64 位 long 会导致属性解析失败返回 NULL
+                    int wl = (int)srcW, hl = (int)srcH;
+                    int bprl = (int)bytesPerRow, allocl = (int)allocSize;
+                    CFNumberRef wNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &wl);
+                    CFNumberRef hNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &hl);
+                    CFNumberRef fmtNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bgra);
+                    CFNumberRef bprNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &bprl);
+                    CFNumberRef allocNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &allocl);
+                    // 键名与原版 kIOSurface* 常量对应的字符串字面值一致
+                    CFDictionarySetValue(props, CFSTR("Width"), wNum);
+                    CFDictionarySetValue(props, CFSTR("Height"), hNum);
+                    CFDictionarySetValue(props, CFSTR("PixelFormat"), fmtNum);
+                    CFDictionarySetValue(props, CFSTR("BytesPerRow"), bprNum);
+                    CFDictionarySetValue(props, CFSTR("AllocSize"), allocNum);
+                    // 对齐原版 HUDServices: 原版导入符号含 kIOSurfaceMemoryRegion(无 kIOSurfaceColorSpace)。
+                    // GPU 内存区让 accelerator 可写目标 surface, 否则 IOSurfaceAcceleratorTransferSurface
+                    // 在 iOS 16 上可能失败(实测 lastAccelOK=false 的疑点之一)。
+                    CFDictionarySetValue(props, CFSTR("MemoryRegion"), CFSTR("PurpleGFXMemory"));
+                    // 对齐 TrollShot: BytesPerElement + sRGB ColorSpace
+                    int bpe = 4;
+                    CFNumberRef bpeNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bpe);
+                    if (bpeNum) {
+                        CFDictionarySetValue(props, CFSTR("BytesPerElement"), bpeNum);
+                        CFRelease(bpeNum);
+                    }
+                    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                    if (cs) {
+                        CFPropertyListRef csProps = CGColorSpaceCopyPropertyList(cs);
+                        CGColorSpaceRelease(cs);
+                        if (csProps) {
+                            CFDictionarySetValue(props, CFSTR("ColorSpace"), csProps);
+                            CFRelease(csProps);
+                        }
+                    }
+                    CFRelease(wNum); CFRelease(hNum); CFRelease(fmtNum);
+                    CFRelease(bprNum); CFRelease(allocNum);
+
+                    dstSurface = createFn(props);
+                    CFRelease(props);
+                }
+                if (dstSurface) {
+                    @synchronized (self) {
+                        if (_dumpDstSurface) { CFRelease(_dumpDstSurface); _dumpDstSurface = NULL; }
+                        _dumpDstSurface = (IOSurfaceRef)CFRetain(dstSurface);
+                        _dumpDstSurfaceW = (int)srcW;
+                        _dumpDstSurfaceH = (int)srcH;
+                    }
                 }
             }
-            CFRelease(wNum); CFRelease(hNum); CFRelease(fmtNum);
-            CFRelease(bprNum); CFRelease(allocNum);
-
-            dstSurface = createFn(props);
-            CFRelease(props);
         }
         if (dstSurface) {
             // 真实签名 7 参数(对齐 TrollShot/TrollVNC)
@@ -405,7 +440,6 @@ static void _logThrottled(NSString *fmt, ...) {
                         CGColorSpaceRelease(cs);
                         CGImageRelease(cg);
                         if (dstSurface) { CFRelease(dstSurface); }
-                        if (accel) { CFRelease(accel); }
                         *pixelsOut = cgOut;
                         *widthOut = (int)cw;
                         *heightOut = (int)ch;
@@ -429,7 +463,6 @@ static void _logThrottled(NSString *fmt, ...) {
     if (lk != KERN_SUCCESS) {
         NSLog(@"[TSScreenCapture] IOSurfaceLock 失败 kr=%d", (int)lk);
         if (dstSurface) { CFRelease(dstSurface); }
-        if (accel) { CFRelease(accel); }
         return NO;
     }
     size_t w = widthFn(readSurface);
@@ -439,7 +472,6 @@ static void _logThrottled(NSString *fmt, ...) {
     if (w == 0 || h == 0 || bpr < w * 4 || !base) {
         unlockFn(readSurface, 0, NULL);
         if (dstSurface) { CFRelease(dstSurface); }
-        if (accel) { CFRelease(accel); }
         return NO;
     }
 
@@ -447,7 +479,6 @@ static void _logThrottled(NSString *fmt, ...) {
     if (!out) {
         unlockFn(readSurface, 0, NULL);
         if (dstSurface) { CFRelease(dstSurface); }
-        if (accel) { CFRelease(accel); }
         return NO;
     }
 
@@ -602,7 +633,6 @@ static void _logThrottled(NSString *fmt, ...) {
                       out[(cy*w+cx)*4+0], out[(cy*w+cx)*4+1], out[(cy*w+cx)*4+2], out[(cy*w+cx)*4+3]];
     unlockFn(readSurface, 0, NULL);
     if (dstSurface) { CFRelease(dstSurface); }
-    if (accel) { CFRelease(accel); }
 
     *pixelsOut = out;
     *widthOut = (int)w;
@@ -1102,21 +1132,37 @@ static const char *_gsSurfaceKeys[] = {
             // surface 声明为 sRGB, WindowServer 渲染已完成色彩管理,
             // 像素即 sRGB 编码 —— 跳过 P3→sRGB 二次转换(iOS16+P3 屏发灰修复)
             uint8_t *px = NULL; int rw = 0, rh = 0;
-            if ([self _dumpIOSurface:src skipColorConvert:YES directReadIfBgra:YES pixelsOut:&px width:&rw height:&rh] && px) {
-                if (![self _isAllZeroPixels:px width:rw height:rh]) {
-                    _logThrottled(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
-                          rw, rh, displayNames[attempt]);
-                    self.lastError = nil;
-                    *pixelsOut = px; *widthOut = rw; *heightOut = rh;
-                    return YES;
-                }
-                TSSetLastError(@"路径2 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
-                NSLog(@"[TSScreenCapture] CARenderServer display=%s 取到空内容", displayNames[attempt]);
-                free(px);
-            } else {
-                TSSetLastError(@"路径2 CARenderServer: display=%s 读 surface 失败", displayNames[attempt]);
-                NSLog(@"[TSScreenCapture] CARenderServer display=%s 读 surface 失败", displayNames[attempt]);
+            // 优先直读(自建 BGRA surface, 零 GPU 分配); 失败/全空回退复用转储
+            // (accel+dstSurface 均已常驻复用, 也不创建新 GPU surface)。
+            // 两个读取端都失败才判为失败 —— 不再落回 createScreenIOSurface
+            // (iOS16 上该路径每次新建系统 GPU surface 且不随释放回收, 是累积源)。
+            BOOL dumpOK = [self _dumpIOSurface:src skipColorConvert:YES directReadIfBgra:YES
+                                       pixelsOut:&px width:&rw height:&rh] && px;
+            if (dumpOK && [self _isAllZeroPixels:px width:rw height:rh]) {
+                free(px); px = NULL; dumpOK = NO;
             }
+            if (!dumpOK) {
+                _statRenderServerDirectFail++;
+                dumpOK = [self _dumpIOSurface:src skipColorConvert:YES directReadIfBgra:NO
+                                      pixelsOut:&px width:&rw height:&rh] && px;
+                if (dumpOK && [self _isAllZeroPixels:px width:rw height:rh]) {
+                    free(px); px = NULL; dumpOK = NO;
+                }
+            } else {
+                _statRenderServerDirectOK++;
+            }
+            if (dumpOK) {
+                _statRenderServerOK++;
+                _logThrottled(@"[TSScreenCapture] CARenderServer 截屏成功 %dx%d (display=%s)",
+                      rw, rh, displayNames[attempt]);
+                self.lastError = nil;
+                *pixelsOut = px; *widthOut = rw; *heightOut = rh;
+                return YES;
+            }
+            _statRenderServerFail++;
+            if (px) { free(px); px = NULL; }
+            TSSetLastError(@"路径2 CARenderServer: display=%s 渲染结果全空(可能被 WindowServer 拒绝)", displayNames[attempt]);
+            NSLog(@"[TSScreenCapture] CARenderServer display=%s 读取失败(直读+转储均空)", displayNames[attempt]);
         }
 
         NSLog(@"[TSScreenCapture] CARenderServerRenderDisplay 两次渲染均取到空内容");
@@ -1479,11 +1525,14 @@ static const char *_gsSurfaceKeys[] = {
     // 0. UIScreen createScreenIOSurface(原版核心链路, 系统级全屏 surface, 与 App 前后台无关)
     //    对齐 AutoTouch: 不隐藏本 App 窗口(原版无此步骤), 每次截屏都重新创建 surface,
     //    读取走 _UICreateCGImageFromIOSurface 路径, 拿到的是系统当前帧(实时画面)。
-    BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
-    if (ok0) {
-        return YES;
+    //    ★iOS 16 跳过: 每次调用系统侧新建全屏 GPU surface, iOS16 下不随 CFRelease
+    //    及时回收, 高频截屏持续累积(旧注释已确认此问题); iOS15 系统回收正常保留。
+    if (!isIOS16OrLater) {
+        BOOL ok0 = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
+        if (ok0) { _statCreateUIScreenOK++; return YES; }
+        _statCreateUIScreenFail++;
     }
-    NSString *err0 = [self.lastError copy];
+    NSString *err0 = isIOS16OrLater ? nil : [self.lastError copy];
     // 1. CARenderServerRenderDisplay: TrollShot/TrollVNC 在后台/锁屏验证过的跨 App 截屏方案,
     //    走 WindowServer 渲染管线, 与 App 自身前后台无关。iOS 16 已在上面优先尝试。
     if (!isIOS16OrLater && [self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut]) {
@@ -1492,8 +1541,10 @@ static const char *_gsSurfaceKeys[] = {
     if (!errRS) { errRS = [self.lastError copy]; }
     // 2. IORegistry DisplaySurface + IOSurfaceLookup(全局显示缓冲, 不依赖前台)
     if ([self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut]) {
+        _statGlobalOK++;
         return YES;
     }
+    _statGlobalFail++;
     NSString *errGD = [self.lastError copy];
     // 3. 兜底: 读 UIScreen surface 缓存(可能含前台最后一帧, 不重新创建、不阻塞主线程)
     IOSurfaceRef cached = [self _getCachedScreenSurface];
@@ -1503,10 +1554,12 @@ static const char *_gsSurfaceKeys[] = {
                   && ![self _isAllZeroPixels:px width:w height:h];
         CFRelease(cached);
         if (ok) {
+            _statCacheOK++;
             self.lastError = nil;
             *pixelsOut = px; *widthOut = w; *heightOut = h;
             return YES;
         }
+        _statCacheFail++;
         if (px) { free(px); }
         [self _setCachedScreenSurface:NULL];
     }
@@ -1516,6 +1569,18 @@ static const char *_gsSurfaceKeys[] = {
 }
 
 #pragma mark - 截图链路诊断
+
+/// 截屏路径统计摘要(供 AppDelegate 周期写入 touch.log, 定位 iOS16 高频截屏内存累积来源)
+- (NSString *)statsLine {
+    return [NSString stringWithFormat:
+        @"[截屏] RenderServer 成功%llu/失败%llu(直读%llu/转储回退%llu) "
+        @"UIScreen 成功%llu/失败%llu 全局显示 成功%llu/失败%llu 缓存 成功%llu/失败%llu",
+        _statRenderServerOK, _statRenderServerFail,
+        _statRenderServerDirectOK, _statRenderServerDirectFail,
+        _statCreateUIScreenOK, _statCreateUIScreenFail,
+        _statGlobalOK, _statGlobalFail,
+        _statCacheOK, _statCacheFail];
+}
 
 - (NSDictionary *)diagnostics {
     NSMutableDictionary *diag = [NSMutableDictionary dictionary];
