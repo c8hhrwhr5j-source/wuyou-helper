@@ -176,11 +176,12 @@ CGImageRef _UICreateCGImageFromIOSurface(IOSurfaceRef surface) __attribute__((we
     unsigned long long _statDumpMallocBytes;       // _dumpIOSurface 累计 malloc 缓冲字节
     unsigned long long _statDumpMallocCount;       // _dumpIOSurface malloc 调用次数
 }
+@end
 
 // Lua 层 grabScreen 调用统计(static 计数器, 供类方法 +statsLine 读取)
+// 注意: 必须放在 @interface 之外(文件作用域), ObjC 不允许在类扩展内声明 static 变量。
 static unsigned long long s_statGrabScreenCalls = 0;   // grabScreen 总调用次数
 static unsigned long long s_statGrabThrottled = 0;     // grabScreen 60ms 限频跳过次数
-@end
 
 @implementation TSScreenCapture
 
