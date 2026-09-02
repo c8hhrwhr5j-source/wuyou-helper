@@ -913,6 +913,9 @@ static int l_screen_getColorRGB(lua_State *L) {
 ///   findImage(path, x, y, w, h)   区域, accuracy=0.8
 ///   findImage(path, accuracy, x, y, w, h)  区域+accuracy
 static int l_screen_findImage(lua_State *L) {
+    // @autoreleasepool: 同 findColor —— 模板匹配产生临时对象(TSColorResult/NSString 等),
+    // 挂机高频调用需每次 drain 防止 GCD block 池内无限累积
+    @autoreleasepool {
     const char *path = luaL_checkstring(L, 1);
     int top = lua_gettop(L);
     int next = 2;
@@ -937,10 +940,12 @@ static int l_screen_findImage(lua_State *L) {
     lua_pushnumber(L, pt.x);
     lua_pushnumber(L, pt.y);
     return 2;
+    }
 }
 
 /// 截屏保存: snapshot([path]) -> 完整路径 或 nil
 static int l_screen_snapshot(lua_State *L) {
+    @autoreleasepool {
     UIImage *img = [[TSScreenCapture shared] captureImage];
     if (!img) { lua_pushnil(L); return 1; }
     NSString *path;
@@ -956,16 +961,24 @@ static int l_screen_snapshot(lua_State *L) {
     if (!ok) { lua_pushnil(L); return 1; }
     lua_pushstring(L, path.UTF8String);
     return 1;
+    }
 }
 
 /// keepScreen(flag): true 缓存截屏, false 释放缓存 (与 screen.keep()/screen.unkeep() 等价)
+/// @autoreleasepool: 挂机主循环 rgbbj 常见 keepScreen(true)+keepScreen(false) 成对调用,
+/// 实测 ~17次/秒, 每次 keepPixels 都执行完整 captureScreenToRGBA(截屏+转储+色彩转换),
+/// 产生的 CGImage/CVPixelBuffer/NSData/NSDictionary 等 autoreleased 临时对象若不 drain
+/// 会在 GCD block 池中无限累积(日志实测 heap 以 ~1MB/min 线性增长, 脚本停止才释放)。
+/// 必须每次调用 drain —— 否则 1 小时泄漏 ~60MB, 数小时挂机被系统杀进程。
 static int l_screen_keepScreen(lua_State *L) {
+    @autoreleasepool {
     if (lua_toboolean(L, 1)) {
         [[TSScreenCapture shared] keepPixels];
     } else {
         [[TSScreenCapture shared] unkeepPixels];
     }
     return 0;
+    }
 }
 
 /// screen.keep(): 缓存当前屏幕像素。之后 findColor/findColors/getColor/findImage 直接复用缓存
@@ -973,19 +986,26 @@ static int l_screen_keepScreen(lua_State *L) {
 /// 注意: 缓存期间屏幕内容被"冻结"(读取的是缓存帧)，画面变化后须调用 screen.unkeep() 释放
 /// 或重新 screen.keep() 刷新缓存。
 static int l_screen_keep(lua_State *L) {
+    @autoreleasepool {
     [[TSScreenCapture shared] keepPixels];
     return 0;
+    }
 }
 
 /// screen.unkeep(): 释放 screen.keep() 缓存的屏幕像素，恢复每次实时截屏。
 static int l_screen_unkeep(lua_State *L) {
+    @autoreleasepool {
     [[TSScreenCapture shared] unkeepPixels];
     return 0;
+    }
 }
 
 #pragma mark - 触摸
 
 static int l_touch_tap(lua_State *L) {
+    // @autoreleasepool: 触摸注入内部经 NSInvocation/NSMethodSignature 调用 SpringBoard,
+    // 每次调用产生若干 autoreleased 对象, 挂机高频触摸需每次 drain
+    @autoreleasepool {
     TSHIDEventTouch *touch = [TSHIDEventTouch shared];
     if (touch.senderID == 0) {
         lua_log(@"[touch] 警告: senderID 未就绪(0), 注入事件可能被系统丢弃! 请先在设备上手动触摸一次屏幕后重跑脚本");
@@ -1003,6 +1023,7 @@ static int l_touch_tap(lua_State *L) {
              duration:dur
              pressure:pressure radius:radius];
     return 0;
+    }
 }
 
 static int l_touch_status(lua_State *L) {
@@ -1011,6 +1032,7 @@ static int l_touch_status(lua_State *L) {
 }
 
 static int l_touch_down(lua_State *L) {
+    @autoreleasepool {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
@@ -1021,9 +1043,11 @@ static int l_touch_down(lua_State *L) {
     [[TSHIDEventTouch shared] touchDownAtPoint:CGPointMake(sp.x / sc, sp.y / sc) index:index
                                       pressure:pressure radius:radius];
     return 0;
+    }
 }
 
 static int l_touch_move(lua_State *L) {
+    @autoreleasepool {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
@@ -1034,9 +1058,11 @@ static int l_touch_move(lua_State *L) {
     [[TSHIDEventTouch shared] touchMoveAtPoint:CGPointMake(sp.x / sc, sp.y / sc) index:index
                                       pressure:pressure radius:radius];
     return 0;
+    }
 }
 
 static int l_touch_up(lua_State *L) {
+    @autoreleasepool {
     NSInteger index = (NSInteger)luaL_checkinteger(L, 1);
     CGFloat x = (CGFloat)luaL_checknumber(L, 2);
     CGFloat y = (CGFloat)luaL_checknumber(L, 3);
@@ -1044,9 +1070,11 @@ static int l_touch_up(lua_State *L) {
     CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     [[TSHIDEventTouch shared] touchUpAtPoint:CGPointMake(sp.x / sc, sp.y / sc) index:index];
     return 0;
+    }
 }
 
 static int l_touch_swipe(lua_State *L) {
+    @autoreleasepool {
     CGFloat x1 = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y1 = (CGFloat)luaL_checknumber(L, 2);
     CGFloat x2 = (CGFloat)luaL_checknumber(L, 3);
@@ -1063,10 +1091,12 @@ static int l_touch_swipe(lua_State *L) {
                                     duration:dur steps:steps
                                     pressure:pressure radius:radius];
     return 0;
+    }
 }
 
 /// 多点轨迹: stroke({x1,y1, x2,y2, ...}, duration_ms)
 static int l_touch_stroke(lua_State *L) {
+    @autoreleasepool {
     if (!lua_istable(L, 1)) { luaL_error(L, "stroke 第一个参数必须是点表"); return 0; }
     NSTimeInterval total = (NSTimeInterval)luaL_optnumber(L, 2, 0.3);
     lua_len(L, 1);
@@ -1110,6 +1140,7 @@ static int l_touch_stroke(lua_State *L) {
     }
     [t touchUpAtPoint:CGPointMake(pts[(count - 1) * 2], pts[(count - 1) * 2 + 1]) index:0];
     return 0;
+    }
 }
 
 #pragma mark - 设备/系统
