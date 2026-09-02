@@ -27,7 +27,7 @@
 static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 @interface AppDelegate ()
-- (void)_logMemoryDiag:(NSString *)tag;
+- (void)_logMemoryDiag:(NSString *)tag includeStats:(BOOL)includeStats;
 - (void)_startMemoryDiag;
 - (void)_scheduleMemoryDiag;
 @end
@@ -127,22 +127,26 @@ static unsigned long long TS_mallocInUse(void) {
     return (unsigned long long)stats.size_in_use;
 }
 
-- (void)_logMemoryDiag:(NSString *)tag {
+- (void)_logMemoryDiag:(NSString *)tag includeStats:(BOOL)includeStats {
     unsigned long long fp = TS_physFootprint();
     unsigned long long internalBytes = 0, externalBytes = 0, compressorBytes = 0;
     TS_vmBreakdown(&internalBytes, &externalBytes, &compressorBytes);
     unsigned long long heap = TS_mallocInUse();
     unsigned long long uptime = (unsigned long long)[NSProcessInfo processInfo].systemUptime;
-    [[TSLogStore shared] append:[NSString stringWithFormat:
-        @"[内存] %@ t=%.1fh footprint=%.1fMB heap=%.1fMB vm内部=%.1fMB 外部=%.1fMB 压缩=%.1fMB %@",
+    NSString *line = [NSString stringWithFormat:
+        @"[内存] %@ t=%.1fh footprint=%.1fMB heap=%.1fMB vm内部=%.1fMB 外部=%.1fMB 压缩=%.1fMB",
         tag,
         uptime / 3600.0,
         fp / 1024.0 / 1024.0,
         heap / 1024.0 / 1024.0,
         internalBytes / 1024.0 / 1024.0,
         externalBytes / 1024.0 / 1024.0,
-        compressorBytes / 1024.0 / 1024.0,
-        [[TSScreenCapture shared] statsLine]]];
+        compressorBytes / 1024.0 / 1024.0];
+    if (includeStats) {
+        // 截屏链路统计每 10 分钟附一次: 24h 长跑观测与日志可读性兼顾
+        line = [line stringByAppendingFormat:@" %@", [[TSScreenCapture shared] statsLine]];
+    }
+    [[TSLogStore shared] append:line];
 }
 
 - (void)_startMemoryDiag {
@@ -157,16 +161,18 @@ static unsigned long long TS_mallocInUse(void) {
     if (!model) { model = [[UIDevice currentDevice] model]; }
     [[TSLogStore shared] append:[NSString stringWithFormat:@"[启动] v%@(b%@) iOS%@ %@",
         ver, build, [UIDevice currentDevice].systemVersion, model]];
-    [self _logMemoryDiag:@"启动基线"];
+    [self _logMemoryDiag:@"启动基线" includeStats:YES];
     [self _scheduleMemoryDiag];
 }
 
 - (void)_scheduleMemoryDiag {
-    // 每 1 分钟采样一次(原 5 分钟): 内存增长速率 71MB/h 时 5 分钟只涨 6MB,
-    // 采样间隔内统计/时间戳分辨率太低, 1 分钟能更早捕捉趋势与泄漏来源。
+    // 每 1 分钟: 精简内存采样(footprint/heap/VM 细分, 定位内存累积趋势)。
+    // 完整截屏链路统计每 10 分钟附一次(tick%10==0), 24h 长跑日志量可控可读。
+    static int tick = 0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        [self _logMemoryDiag:@"采样"];
+        tick++;
+        [self _logMemoryDiag:@"采样" includeStats:(tick % 10 == 0)];
         [self _scheduleMemoryDiag];
     });
 }
