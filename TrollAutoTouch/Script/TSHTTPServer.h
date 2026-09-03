@@ -27,6 +27,13 @@
 
 #import <Foundation/Foundation.h>
 
+// 冷启动远程控制接口端口。
+// 功能与原版(无忧/AutoGoRunner) 8989 的 /task 完全一致, 用独立端口避免与原版工具冲突:
+//   GET /task?cmd=start|stop|pause|resume   (start 可加 &file=xxx.lua 指定脚本, 默认当前选中/main.lua)
+//   GET /float?x=0|1&y=<物理像素>            (移动/隐藏悬浮球)
+// 如需更换端口改这里即可(勿与主服务器 8080 重复, 改后重新打包生效)。
+#define TS_COLD_CONTROL_PORT 8686
+
 // 脚本网页设置 UI: 网页点"开始运行"后发出, userInfo: {"name":脚本名}
 FOUNDATION_EXPORT NSNotificationName const TSScriptUIRunRequestNotification;
 

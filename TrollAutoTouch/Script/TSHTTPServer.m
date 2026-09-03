@@ -897,8 +897,21 @@ static NSData *WSTextFrame(NSString *text) {
             }
             [TSPaths ensureDirectoriesExist];
             NSString *targetPath = [TSPaths pathForLua:file];
+            BOOL isDir = NO;
+            if (![[NSFileManager defaultManager] fileExistsAtPath:targetPath isDirectory:&isDir]) {
+                // 文件不存在: 记录到系统日志便于排查(客户端仍会收到 ok 响应)
+                [[TSLogStore shared] append:[NSString stringWithFormat:
+                    @"[HTTP] /task start 失败: 脚本不存在 %@", targetPath]];
+                return;
+            }
+            // UI 存在(delegate 已设置)时走 delegate 以便日志回显到界面;
+            // 无 UI(冷启动/后台拉起)时由服务器直接驱动引擎启动, 保证后台可用。
             if ([self.delegate respondsToSelector:@selector(webDidReceiveScriptPath:)]) {
                 [self.delegate webDidReceiveScriptPath:targetPath];
+            } else if (isDir) {
+                [[TSLuaBridge shared] runProject:targetPath];
+            } else {
+                [[TSLuaBridge shared] runFile:targetPath];
             }
         } else if ([cmd isEqualToString:@"stop"]) {
             // 无条件同时停 Lua 与 DSL 引擎, 不依赖 delegate 是否存在

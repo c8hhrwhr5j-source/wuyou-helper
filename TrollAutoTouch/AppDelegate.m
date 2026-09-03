@@ -15,6 +15,7 @@
 #import "Core/TSNetworkAuth.h"
 #import "Core/TSLicense.h"
 #import "Core/TSTrialManager.h"
+#import "Core/TSToolExecutor.h"
 #import "Script/TSLuaBridge.h"
 #import "Script/TSHTTPServer.h"
 #import "Common/TSPaths.h"
@@ -29,6 +30,8 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 @interface AppDelegate ()
 - (void)_logMemoryDiag:(NSString *)tag;
 - (void)_startMemoryDiag;
+- (void)_startControlServer;
+@property (nonatomic, strong, nullable) TSHTTPServer *controlServer;
 @end
 
 @implementation AppDelegate
@@ -50,6 +53,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     self.window.rootViewController = [[MainTabBarController alloc] init];
     [self.window makeKeyAndVisible];
     [self _startCoreServices];
+    [self _startControlServer];
 
     // ── 卡密: 已激活无限制; 未激活设备每次启动获得 15 分钟试用窗口,
     //    到期强制停止脚本并阻止新脚本 (可在 设置-卡密 中输入卡密激活) ──
@@ -215,6 +219,30 @@ static unsigned long long TS_mallocInUse(void) {
             });
         }
     }
+}
+
+// ── 冷启动远程控制接口 (端口 TS_COLD_CONTROL_PORT, 默认 8686) ──
+// 对齐原版(无忧/AutoGoRunner) 8989 的 /task 远程控制, 独立端口避免与原版工具冲突:
+//   GET /task?cmd=start|stop|pause|resume  → 启停/暂停/恢复脚本
+//   GET /float?x=0|1&y=<物理像素>           → 移动悬浮球
+// 随 App 启动常驻(不依赖调试按钮/TAS 开关), 后台挂机时局域网设备也可随时控制脚本。
+- (void)_startControlServer {
+    if (!_controlServer) {
+        _controlServer = [[TSHTTPServer alloc] initWithPort:TS_COLD_CONTROL_PORT];
+        // 不设 delegate: /task 的 start/stop/pause/resume 由 TSHTTPServer 内部
+        // 直接驱动 TSLuaBridge/TSScriptEngine, 无 UI 冷启动路径同样可用。
+    }
+    if (_controlServer.isRunning) return;
+    if (![_controlServer start]) {
+        [[TSLogStore shared] append:[NSString stringWithFormat:
+            @"[HTTP] 远程控制接口启动失败(端口 %d 可能被占用)", TS_COLD_CONTROL_PORT]];
+        return;
+    }
+    NSString *ip = [[TSToolExecutor shared] wifiIPAddress];
+    if (ip.length == 0) ip = @"<设备IP>";
+    [[TSLogStore shared] append:[NSString stringWithFormat:
+        @"[HTTP] 远程控制接口已开启 → http://%@:%d/task?cmd=start|stop|pause|resume",
+        ip, TS_COLD_CONTROL_PORT]];
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {

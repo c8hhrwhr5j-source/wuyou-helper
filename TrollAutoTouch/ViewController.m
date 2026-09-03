@@ -36,8 +36,6 @@
     // 到 _logFull 并刷新 logView, 避免每条日志 O(n) 拼接刷爆主线程。
     NSMutableString *_logBuffer;
     NSMutableString *_logFull;
-    // 冷启动控制接口服务器 (独立端口 8686, 提供 /task 与 /float, 避免与原版工具冲突)
-    TSHTTPServer *_coldStartServer;
 }
 
 // "暂停 Lua"按钮的暂停/继续状态 (音量键面板也会同步更新它)
@@ -348,22 +346,14 @@ static BOOL _luaPausedByButton = NO;
         [self _log:[NSString stringWithFormat:@"Web 服务器已启动 → http://%@:%d", wifiIP ?: @"localhost", port]];
         [self _log:@"浏览器访问可远程控制设备"];
     }
-    // 冷启动控制接口: 独立端口 8686 (/task?cmd=... 与 /float?x=...&y=...)
-    if (!_coldStartServer) {
-        _coldStartServer = [[TSHTTPServer alloc] initWithPort:8686];
-        _coldStartServer.delegate = self;
-    }
-    if (![_coldStartServer isRunning]) {
-        [_coldStartServer start];
-        [self _log:@"冷启动接口已启动 → http://127.0.0.1:8686 (/task /float)"];
-    }
+    // 冷启动远程控制接口(/task /float)已由 AppDelegate 随启动常驻(端口 TS_COLD_CONTROL_PORT),
+    // 无需在此重复创建。控制 URL: http://<设备IP>:8686/task?cmd=start|stop|pause|resume
+    [self _log:[NSString stringWithFormat:@"远程控制接口: http://<设备IP>:%d/task?cmd=start|stop|pause|resume", TS_COLD_CONTROL_PORT]];
 }
 
 - (void)_stopServer {
     [[TSHTTPServer shared] stop];
-    if ([_coldStartServer isRunning]) {
-        [_coldStartServer stop];
-    }
+    // 冷启动远程控制接口由 AppDelegate 管理(随 App 常驻), 这里只停主服务 8080
     [self _log:@"Web 服务器已停止"];
 }
 
