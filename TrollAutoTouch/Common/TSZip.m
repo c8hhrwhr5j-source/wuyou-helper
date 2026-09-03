@@ -39,7 +39,11 @@ static BOOL ts_validEntryName(NSString *name) {
 @implementation TSZip
 
 + (BOOL)unzipData:(NSData *)data toDirectory:(NSString *)destDir error:(NSString *_Nullable *_Nullable)error {
+    // 注意: ARC 下 goto 不能跳过 __strong 变量的初始化,
+    // 因此所有强引用局部变量必须在本方法最前面声明。
     NSString *errMsg = nil;
+    NSMutableArray<NSDictionary *> *files = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
     const uint8_t *d = data.bytes;
     NSUInteger len = data.length;
 
@@ -68,7 +72,6 @@ static BOOL ts_validEntryName(NSString *name) {
 
     // ── 2. 解析中央目录(先全量校验, 再落地, 避免半途写坏目标目录) ──
     NSUInteger p = cdOffset;
-    NSMutableArray<NSDictionary *> *files = [NSMutableArray array];
     uint64_t totalUncompressed = 0;
 
     for (uint32_t e = 0; e < totalEntries; e++) {
@@ -112,7 +115,6 @@ static BOOL ts_validEntryName(NSString *name) {
     }
 
     // ── 3. 逐个落地 ──
-    NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:destDir]) {
         if (![fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:nil]) {
             errMsg = @"创建目标目录失败"; goto done;
