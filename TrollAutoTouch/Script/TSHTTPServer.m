@@ -409,7 +409,16 @@ static NSData *WSTextFrame(NSString *text) {
 - (void)serveControlPanel:(int)clientFd {
     NSString *html = [self controlPanelHTML];
     NSData *body = [html dataUsingEncoding:NSUTF8StringEncoding];
-    NSData *resp = HTTPResponse(200, @"OK", @"text/html; charset=utf-8", body, @{@"Cache-Control": @"no-cache"});
+    // 附带设备名响应头, 供中控扫描时在设备列表显示 "IP (设备名)"
+    NSString *devName = [[TSDeviceInfo shared] deviceName] ?: @"";
+    // 响应头值不允许含 CR/LF, 防止异常设备名破坏 HTTP 头
+    devName = [devName stringByReplacingOccurrencesOfString:@"\r\n" withString:@" "];
+    devName = [devName stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    devName = [devName stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    NSData *resp = HTTPResponse(200, @"OK", @"text/html; charset=utf-8", body, @{
+        @"Cache-Control": @"no-cache",
+        @"X-Device-Name": devName,
+    });
     [self sendAndClose:clientFd data:resp];
 }
 
