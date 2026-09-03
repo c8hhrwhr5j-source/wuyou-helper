@@ -13,6 +13,7 @@
 #import "TSHIDEventTouch.h"
 #import "TSScriptEngine.h"
 #import "TSPaths.h"
+#import "TSZip.h"
 #import "TSLogStore.h"
 #import "TSLuaBridge.h"
 #import "TSHUDWindow.h"
@@ -270,15 +271,21 @@ static NSData *WSTextFrame(NSString *text) {
 
         [buffer appendBytes:buf length:n];
 
-        // 检查是否 WebSocket 升级
-        NSString *head = [[NSString alloc] initWithData:buffer encoding:NSUTF8StringEncoding];
-        if ([head containsString:@"Upgrade: websocket"]) {
-            [self handleWSUpgrade:clientFd request:head source:readSource];
-            return;
-        }
+        // 请求体可能是任意二进制(.tep 项目包等)，不能把整个 buffer 转 UTF8 解码，
+        // 只在原始字节里找 "请求头结束" 标记，头部(纯 ASCII)单独解码做完整性判断。
+        NSData *headerEndMark = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+        NSRange headerEnd = [buffer rangeOfData:headerEndMark options:0 range:NSMakeRange(0, buffer.length)];
+        if (headerEnd.location != NSNotFound) {
+            NSData *headData = [buffer subdataWithRange:NSMakeRange(0, headerEnd.location)];
+            NSString *head = [[NSString alloc] initWithData:headData encoding:NSUTF8StringEncoding];
 
-        // 检查 HTTP 请求是否完整
-        if ([head containsString:@"\r\n\r\n"]) {
+            // 检查是否 WebSocket 升级
+            if ([head containsString:@"Upgrade: websocket"]) {
+                [self handleWSUpgrade:clientFd request:head source:readSource];
+                return;
+            }
+
+            // 检查 HTTP 请求是否完整
             NSInteger contentLength = 0;
             NSRange clRange = [head rangeOfString:@"Content-Length: "];
             if (clRange.location != NSNotFound) {
@@ -289,8 +296,7 @@ static NSData *WSTextFrame(NSString *text) {
                 }
                 contentLength = [clStr integerValue];
             }
-            NSRange hEnd = [head rangeOfString:@"\r\n\r\n"];
-            NSUInteger bodyStart = hEnd.location + hEnd.length;
+            NSUInteger bodyStart = headerEnd.location + headerEnd.length;
             if (buffer.length >= bodyStart + contentLength) {
                 [self handleHTTP:clientFd data:buffer source:readSource];
                 buffer = [NSMutableData data];
@@ -319,7 +325,16 @@ static NSData *WSTextFrame(NSString *text) {
 #pragma mark - HTTP 路由
 
 - (void)handleHTTP:(int)clientFd data:(NSData *)data source:(dispatch_source_t)readSource {
-    NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    // body 可能是任意二进制(.tep 项目包)，不能整包转 UTF8。只解码请求头(纯 ASCII)，
+    // 请求体按字节边界从 NSData 上直接切片，保证二进制完好。
+    NSData *headerEndMark = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSRange hEnd = [data rangeOfData:headerEndMark options:0 range:NSMakeRange(0, data.length)];
+    if (hEnd.location == NSNotFound) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
+        return;
+    }
+    NSData *headData = [data subdataWithRange:NSMakeRange(0, hEnd.location)];
+    NSString *raw = [[NSString alloc] initWithData:headData encoding:NSUTF8StringEncoding];
     if (!raw) { [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]]; return; }
 
     NSArray *lines = [raw componentsSeparatedByString:@"\r\n"];
@@ -340,10 +355,9 @@ static NSData *WSTextFrame(NSString *text) {
         path = [path substringToIndex:qRange.location];
     }
 
-    // 解析请求体
-    NSRange hEnd = [raw rangeOfString:@"\r\n\r\n"];
+    // 解析请求体(原始字节切片, 头结束位置 hEnd 已在上面算好)
     NSData *body = nil;
-    if (hEnd.location != NSNotFound && hEnd.location + 4 < data.length) {
+    if (hEnd.location + 4 < data.length) {
         body = [data subdataWithRange:NSMakeRange(hEnd.location + 4, data.length - hEnd.location - 4)];
     }
 
@@ -383,6 +397,8 @@ static NSData *WSTextFrame(NSString *text) {
         [self handleFloat:clientFd query:query];
     } else if ([path isEqualToString:@"/api/upload"] && [method isEqualToString:@"POST"]) {
         [self handleUpload:clientFd body:body];
+    } else if ([path isEqualToString:@"/api/project"] && [method isEqualToString:@"POST"]) {
+        [self handleProjectImport:clientFd query:query body:body];
     } else if ([path isEqualToString:@"/api/key"] && [method isEqualToString:@"POST"]) {
         [self handleKey:clientFd body:body];
     } else if ([path isEqualToString:@"/api/text"] && [method isEqualToString:@"POST"]) {
@@ -971,6 +987,69 @@ static NSData *WSTextFrame(NSString *text) {
     BOOL ok = [content writeToFile:targetPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     NSLog(@"[HTTP] 上传脚本: %@ → %@ (%@)", filename, targetPath, ok ? @"成功" : @"失败");
     [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @(ok), @"path": targetPath}]];
+}
+
+// 推送整个项目(.tep): POST /api/project?name=<项目名>&run=0|1, body 为 zip 原始字节
+// 解包到 /var/mobile/touch/lua/<name>/, run=1 时解包后自动运行
+- (void)handleProjectImport:(int)clientFd query:(NSString *)query body:(NSData *)body {
+    NSDictionary *params = [self parseQueryParams:query ?: @""];
+    // parseQueryParams 已做 URL 解码
+    NSString *name = [params[@"name"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    // 安全: 项目名仅允许落在 lua 根目录下的一级目录名(字母/数字/_/-)
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"];
+    BOOL nameOk = (name.length > 0 && name.length <= 64);
+    if (nameOk) {
+        for (NSUInteger ci = 0; ci < name.length; ci++) {
+            if (![allowed characterIsMember:[name characterAtIndex:ci]]) { nameOk = NO; break; }
+        }
+    }
+    if (!nameOk) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"name 无效"]];
+        return;
+    }
+    // 保留目录: 不允许项目名占用(否则会误删 lua/ui 等系统目录)
+    if ([name isEqualToString:@"ui"] || [name isEqualToString:@"www"]) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"name 为保留目录名"]];
+        return;
+    }
+    if (!body || body.length < 22) {
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少项目数据(.tep)"]];
+        return;
+    }
+
+    [TSPaths ensureDirectoriesExist];
+    NSString *baseDir = [TSPaths luaDir];
+    NSString *projectDir = [baseDir stringByAppendingPathComponent:name];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    // 覆盖式部署: 先删旧目录, 避免残留旧文件
+    [fm removeItemAtPath:projectDir error:nil];
+    [fm createDirectoryAtPath:projectDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    NSString *errMsg = nil;
+    BOOL ok = [TSZip unzipData:body toDirectory:projectDir error:&errMsg];
+    if (!ok) {
+        [fm removeItemAtPath:projectDir error:nil];  // 失败清理, 不留半成品
+        NSLog(@"[HTTP] 推送项目失败: %@ → %@", name, errMsg ?: @"?");
+        [self sendAndClose:clientFd data:[self errorResponse:400 msg:errMsg ?: @"解包失败"]];
+        return;
+    }
+
+    BOOL shouldRun = [params[@"run"] isEqualToString:@"1"];
+    NSLog(@"[HTTP] 推送项目: %@ → %@ (%lu 字节, run=%d)",
+          name, projectDir, (unsigned long)body.length, shouldRun);
+    if (shouldRun) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TSLuaBridge *lua = [TSLuaBridge shared];
+            // 若已有脚本在跑, 先停再跑新项目
+            if (lua.isRunning) {
+                [lua stop];
+            }
+            [lua runProject:projectDir];
+        });
+    }
+    [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @YES, @"name": name, @"path": projectDir, @"run": @(shouldRun)}]];
 }
 
 - (void)handleKey:(int)clientFd body:(NSData *)body {
