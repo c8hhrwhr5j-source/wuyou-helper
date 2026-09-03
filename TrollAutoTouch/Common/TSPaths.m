@@ -24,8 +24,12 @@
     return [@"/var/mobile/touch" stringByAppendingPathComponent:@"res"];
 }
 
++ (NSString *)runtimeDir {
+    return [@"/var/mobile/touch" stringByAppendingPathComponent:@"runtime"];
+}
+
 + (void)ensureDirectoriesExist {
-    NSArray *dirs = @[ self.rootDir, self.luaDir, self.logDir, self.resDir ];
+    NSArray *dirs = @[ self.rootDir, self.luaDir, self.logDir, self.resDir, self.runtimeDir ];
     for (NSString *d in dirs) {
         struct stat st;
         if (stat(d.UTF8String, &st) != 0) {

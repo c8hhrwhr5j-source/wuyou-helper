@@ -334,32 +334,38 @@ static void _tsWriteATPlist(BOOL enabled) {
 
 #pragma mark - 屏幕锁定 / 解锁
 
-// 屏幕锁定状态 Darwin 通知 (SpringBoard 维护此状态值, 锁定=1 解锁=0)
-// 使用 notify_register_check 注册后可通过 notify_check 查询最近状态值
+// 屏幕锁定状态 Darwin 通知 (SpringBoard 维护此状态值: 1=锁定 0=解锁)
 static const char *const kScreenLockDarwinNotification =
     "com.apple.springboard.lockstate";
 
-- (BOOL)isScreenLocked {
-    // notify_check 读取上次通知触发的状态值; 注册即检查是否被触发过
-    int token = 0;
-    uint32_t status = notify_register_check(kScreenLockDarwinNotification, &token);
-    if (status != NOTIFY_STATUS_OK) {
-        // 注册失败时回退到 IOService 查询 (IOPMAssertion)
-        return NO;
-    }
-    int triggered = 0;
-    notify_check(token, &triggered);
-    notify_cancel(token);
+// 一次性注册 lockstate 的 dispatch 观察者，获得本进程对该通知的合法 token。
+// 之后 isScreenLocked 一律用 notify_get_state(token) 读取 SpringBoard 维护的最新状态值。
+// 注意: notify_get_state 的第一个参数是 int token, 绝不能把通知名字符串当 token 传,
+// 那会拿到无效 token (旧实现因此状态恒为脏值/注册即失效, 导致 isScreenLocked 恒为真)。
+static int g_screenLockToken = 0;
+static void _tsEnsureLockStateListener(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        uint32_t s = notify_register_dispatch(kScreenLockDarwinNotification, &g_screenLockToken,
+                                              dispatch_get_main_queue(),
+                                              ^(int token __unused) {
+            // 回调本身不需要做缓存: 状态随时用 notify_get_state(token) 读最新值即可,
+            // 即使 app 挂起期间错过中间事件也不受影响。
+        });
+        if (s != NOTIFY_STATUS_OK) g_screenLockToken = 0;
+    });
+}
 
-    // lockstate 通知最后一次投递的时间决定了 triggered 状态
-    // 但更可靠的是 notify_get_state, SpringBoard 会维护这个 int 值
-    uint64_t state = 0;
-    status = notify_get_state(kScreenLockDarwinNotification, &state);
-    if (status == NOTIFY_STATUS_OK) {
-        return state != 0;
+- (BOOL)isScreenLocked {
+    _tsEnsureLockStateListener();
+    if (g_screenLockToken != 0) {
+        uint64_t state = 0;
+        if (notify_get_state(g_screenLockToken, &state) == NOTIFY_STATUS_OK) {
+            return state != 0;
+        }
     }
-    // 退路: 触发过视为锁定状态
-    return triggered != 0;
+    // 注册/读取失败时兜底: 保守认为"未锁定", 避免挂机脚本误判锁屏而反复发送 Home 键。
+    return NO;
 }
 
 - (BOOL)unlockScreen {

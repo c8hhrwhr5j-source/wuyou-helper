@@ -996,15 +996,16 @@ static NSData *WSTextFrame(NSString *text) {
     // parseQueryParams 已做 URL 解码
     NSString *name = [params[@"name"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
-    // 安全: 项目名仅允许落在 lua 根目录下的一级目录名(字母/数字/_/-)
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
-                               @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"];
+    // 安全校验: 允许中文等 Unicode 项目名(如"梦幻西游"), 但必须是安全的单级目录名:
+    // 不含路径分隔符/控制字符, 不以 "." 开头(避免隐藏目录), 长度 <= 64
     BOOL nameOk = (name.length > 0 && name.length <= 64);
     if (nameOk) {
         for (NSUInteger ci = 0; ci < name.length; ci++) {
-            if (![allowed characterIsMember:[name characterAtIndex:ci]]) { nameOk = NO; break; }
+            unichar c = [name characterAtIndex:ci];
+            if (c < 0x20 || c == '/' || c == '\\' || c == ':' || c == '~') { nameOk = NO; break; }
         }
     }
+    if (nameOk && [name hasPrefix:@"."]) nameOk = NO;
     if (!nameOk) {
         [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"name 无效"]];
         return;

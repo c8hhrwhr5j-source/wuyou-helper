@@ -23,6 +23,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)logDir;
 /// 资源目录   /var/mobile/touch/res
 + (NSString *)resDir;
+/// 运行目录   /var/mobile/touch/runtime (加密项目(.tas)解密后的临时运行目录, 不列入脚本列表)
++ (NSString *)runtimeDir;
 
 /// 确保所有目录存在（首次启动时创建）
 + (void)ensureDirectoriesExist;

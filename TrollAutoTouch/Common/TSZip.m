@@ -36,6 +36,55 @@ static BOOL ts_validEntryName(NSString *name) {
     return YES;
 }
 
+// ── ZIP 打包(method 0 stored)所需的小端写入 / 时间戳 / 收集辅助 ──
+static inline void ts_w16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+static inline void ts_w32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+// NSDate → DOS 时间/日期 (ZIP 头用)
+static void ts_dosDateTime(NSDate *date, uint16_t *dosTime, uint16_t *dosDate) {
+    NSDateComponents *c = [[NSCalendar currentCalendar]
+        components:NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
+                   NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitSecond
+          fromDate:(date ?: [NSDate date])];
+    NSInteger y = c.year;
+    if (y < 1980) y = 1980;
+    if (y > 2107) y = 2107;
+    if (dosTime) *dosTime = (uint16_t)((c.hour << 11) | (c.minute << 5) | (c.second >> 1));
+    if (dosDate) *dosDate = (uint16_t)((((y - 1980) & 0x7F) << 9) | (c.month << 5) | c.day);
+}
+
+// 递归收集目录下所有文件 → {name(相对路径), data, mtime}
+static void ts_collectDirFiles(NSFileManager *fm, NSString *dir, NSString *root,
+                               NSMutableArray<NSDictionary *> *out) {
+    NSArray *names = [fm contentsOfDirectoryAtPath:dir error:nil];
+    NSString *rootPrefix = [root stringByAppendingString:@"/"];
+    for (NSString *name in names) {
+        if ([name hasPrefix:@"."]) continue;                      // 隐藏文件/.git 等不入包
+        if ([name isEqualToString:@"Thumbs.db"] || [name isEqualToString:@"desktop.ini"]) continue;
+        NSString *full = [dir stringByAppendingPathComponent:name];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
+        if (isDir) { ts_collectDirFiles(fm, full, root, out); continue; }
+        NSData *d = [NSData dataWithContentsOfFile:full];
+        if (!d) continue;
+        NSString *rel = [full hasPrefix:rootPrefix] ? [full substringFromIndex:rootPrefix.length] : name;
+        NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
+        [out addObject:@{
+            @"name"  : rel,
+            @"data"  : d,
+            @"mtime" : attr[NSFileModificationDate] ?: [NSDate date],
+        }];
+    }
+}
+
 @implementation TSZip
 
 + (BOOL)unzipData:(NSData *)data toDirectory:(NSString *)destDir error:(NSString *_Nullable *_Nullable)error {
@@ -193,6 +242,105 @@ static BOOL ts_validEntryName(NSString *name) {
 done:
     if (error && errMsg) *error = errMsg;
     return errMsg == nil;
+}
+
++ (nullable NSData *)zipDataFromDirectory:(NSString *)dir error:(NSString *_Nullable *_Nullable)error {
+    // 注意: ARC 下 goto 不能跳过 __strong 变量的初始化,
+    // 因此所有强引用局部变量必须在本方法最前面声明。
+    NSString *errMsg = nil;
+    NSData *result = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSDictionary *> *files = nil;
+    NSMutableData *local = nil;     // 各文件本地头+数据
+    NSMutableData *central = nil;   // 中央目录
+    NSMutableData *zip = nil;
+    uint32_t offset = 0;
+
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
+        errMsg = @"目录不存在或不是文件夹";
+        goto done;
+    }
+
+    files = [NSMutableArray array];
+    ts_collectDirFiles(fm, dir, dir, files);
+    if (files.count == 0) {
+        errMsg = @"目录中没有可打包的文件";
+        goto done;
+    }
+    if (files.count > kMaxEntryCount) {
+        errMsg = @"文件数超过上限, 无法打包";
+        goto done;
+    }
+
+    local = [NSMutableData data];
+    central = [NSMutableData data];
+
+    for (NSDictionary *f in files) {
+        NSData *d = f[@"data"];
+        NSData *nameBytes = [f[@"name"] dataUsingEncoding:NSUTF8StringEncoding];
+        if (!nameBytes) { errMsg = @"文件名编码失败"; goto done; }
+        uLong crc = crc32(0L, d.bytes, (uInt)d.length);
+        uint16_t dosT = 0, dosD = 0;
+        ts_dosDateTime(f[@"mtime"], &dosT, &dosD);
+
+        uint8_t lh[30];
+        ts_w32(lh,      0x04034b50);
+        ts_w16(lh + 4,  20);          // version needed
+        ts_w16(lh + 6,  0x0800);      // UTF-8 文件名标志
+        ts_w16(lh + 8,  0);           // method 0 = stored
+        ts_w16(lh + 10, dosT);
+        ts_w16(lh + 12, dosD);
+        ts_w32(lh + 14, (uint32_t)crc);
+        ts_w32(lh + 18, (uint32_t)d.length);   // compressed = original (stored)
+        ts_w32(lh + 22, (uint32_t)d.length);
+        ts_w16(lh + 26, (uint16_t)nameBytes.length);
+        ts_w16(lh + 28, 0);
+        [local appendBytes:lh length:30];
+        [local appendData:nameBytes];
+        [local appendData:d];
+
+        uint8_t cd[46];
+        ts_w32(cd,      0x02014b50);
+        ts_w16(cd + 4,  20);          // version made by
+        ts_w16(cd + 6,  20);
+        ts_w16(cd + 8,  0x0800);
+        ts_w16(cd + 10, 0);           // method 0
+        ts_w16(cd + 12, dosT);
+        ts_w16(cd + 14, dosD);
+        ts_w32(cd + 16, (uint32_t)crc);
+        ts_w32(cd + 20, (uint32_t)d.length);
+        ts_w32(cd + 24, (uint32_t)d.length);
+        ts_w16(cd + 28, (uint16_t)nameBytes.length);
+        ts_w16(cd + 30, 0);           // extra len
+        ts_w16(cd + 32, 0);           // comment len
+        ts_w16(cd + 34, 0);           // disk start
+        ts_w16(cd + 36, 0);           // internal attrs
+        ts_w32(cd + 38, 0);           // external attrs
+        ts_w32(cd + 42, offset);
+        [central appendBytes:cd length:46];
+        [central appendData:nameBytes];
+
+        offset += 30 + (uint32_t)nameBytes.length + (uint32_t)d.length;
+    }
+
+    zip = [local mutableCopy];
+    [zip appendData:central];
+    uint8_t eocd[22];
+    ts_w32(eocd, 0x06054b50);
+    ts_w16(eocd + 4,  0);                              // disk number
+    ts_w16(eocd + 6,  0);                              // central dir disk
+    ts_w16(eocd + 8,  (uint16_t)files.count);          // entries this disk
+    ts_w16(eocd + 10, (uint16_t)files.count);          // total entries
+    ts_w32(eocd + 12, (uint32_t)central.length);       // central dir size
+    ts_w32(eocd + 16, offset);                         // central dir offset
+    ts_w16(eocd + 20, 0);                              // comment len
+    [zip appendBytes:eocd length:22];
+    result = zip;
+
+done:
+    if (error && errMsg) *error = errMsg;
+    return result;
 }
 
 @end

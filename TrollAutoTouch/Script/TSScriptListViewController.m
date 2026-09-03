@@ -12,6 +12,7 @@
 #import "../Common/TSPaths.h"
 #import "TSLuaBridge.h"
 #import "TSScriptCipher.h"
+#import "../Common/TSZip.h"
 #import "TSScriptEditorViewController.h"
 #import "../HUD/TSHUDHost.h"
 
@@ -239,6 +240,55 @@
     [self presentViewController:confirm animated:YES completion:nil];
 }
 
+// ─────────────────────── 项目整包加密 (.tas) ───────────────────────
+// 加密项目 = 把整个项目目录(含图片/资源/子文件夹)打包 → 单个 "TAP1" 加密文件。
+// 加密后原明文目录被移除; 运行时引擎会自动解密还原出目录结构,
+// 图片/资源仍按脚本里的正常路径读取, 仅源码不可见。
+- (void)_encryptProject:(TSFileEntry *)e {
+    NSString *newName = [e.name stringByAppendingString:@".tas"];
+    NSString *newPath = [TSPaths pathForLua:newName];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:newPath]) {
+        [self _alert:@"加密失败" msg:@"同名 .tas 文件已存在"];
+        return;
+    }
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"加密项目"
+        message:[NSString stringWithFormat:@"将「%@」整个项目目录打包加密为 %@？\n\n加密后原文件夹(含全部 .lua 源码)会被移除，图片/资源/子目录全部打进包内；\n运行该加密包时会自动还原目录结构，图片/资源仍按正常路径读取。",
+                e.name, newName]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"加密并删除原目录"
+                                                 style:UIAlertActionStyleDestructive
+                                               handler:^(UIAlertAction *a) {
+        // 1) 目录 → zip (保留子目录结构)
+        NSString *zipErr = nil;
+        NSData *zip = [TSZip zipDataFromDirectory:e.path error:&zipErr];
+        if (!zip) {
+            [self _alert:@"加密失败" msg:zipErr ?: @"项目打包失败"];
+            return;
+        }
+        // 2) zip → 加密内容
+        NSString *cipher = [TSScriptCipher encryptProjectData:zip];
+        if (!cipher) {
+            [self _alert:@"加密失败" msg:@"生成加密包失败"];
+            return;
+        }
+        // 3) 先写 .tas, 成功后再删原目录 (避免写失败丢数据)
+        if (![[TSToolExecutor shared] writeTextFile:newPath content:cipher]) {
+            [self _alert:@"加密失败" msg:@"写入 .tas 文件失败"];
+            return;
+        }
+        // 4) 删除原明文目录, 并同步清除选中状态
+        if ([[TSScriptListViewController selectedScriptName] isEqualToString:e.name]) {
+            [TSScriptListViewController setSelectedScriptName:@""];
+        }
+        [[TSToolExecutor shared] removeItem:e.path];
+        [self _reload];
+        [[TSHUDHost shared] showToast:[NSString stringWithFormat:@"已加密为 %@，原目录已移除", newName]
+                             duration:1.6 hidden:NO];
+    }]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:confirm animated:YES completion:nil];
+}
+
 #pragma mark - TableView
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
@@ -375,6 +425,13 @@
     } else {
         [sheet addAction:[UIAlertAction actionWithTitle:@"▶ 执行" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [self _runScript:e];
+        }]];
+    }
+
+    // 项目目录: 整包加密 (运行中不可加密)
+    if (isDir && !isThisRunning) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"🔒 加密项目" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            [self _encryptProject:e];
         }]];
     }
 

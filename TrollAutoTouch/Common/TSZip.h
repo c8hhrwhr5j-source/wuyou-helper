@@ -17,6 +17,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 成功返回 YES; 失败返回 NO 并通过 error 输出原因(可为 nil)。
 + (BOOL)unzipData:(NSData *)data toDirectory:(NSString *)destDir error:(NSString *_Nullable *_Nullable)error;
 
+/// 把目录(含子目录)打包成标准 zip 数据(method 0 stored, UTF-8 文件名)。
+/// 与扩展端 packer 产出的 .tep 规范一致, 可用本类 unzipData: 还原。
+/// 隐藏文件(. 开头)/常见垃圾文件不入包; 失败返回 nil 并通过 error 输出原因(可为 nil)。
++ (nullable NSData *)zipDataFromDirectory:(NSString *)dir error:(NSString *_Nullable *_Nullable)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

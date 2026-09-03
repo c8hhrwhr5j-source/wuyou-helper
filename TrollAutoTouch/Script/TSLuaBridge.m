@@ -52,6 +52,7 @@ NSNotificationName const TSLuaPauseStateChangedNotification = @"TSLuaPauseStateC
 #import "TSDeviceInfo.h"
 #import "TSOCREngine.h"
 #import "../Common/TSPaths.h"
+#import "../Common/TSZip.h"
 #import "../Core/TSVolumeKeyMonitor.h"
 #import "../Core/TSHUDService.h"
 #import "../HUD/TSHUDHost.h"
@@ -83,6 +84,10 @@ static volatile BOOL _pauseRequested = NO;
 - (void)_injectSettingsTable:(lua_State *)L scriptPath:(NSString *)path;
 // App 内音量键控制菜单(注入失败兜底), 脚本结束时需自动关闭
 @property (nonatomic, weak) UIAlertController *volumeMenuAlert;
+- (void)_runEncryptedProjectPackageAtPath:(NSString *)path content:(NSString *)content;
+// 整包加密项目(.tas)运行时, runningPath 用 .tas 的逻辑路径(而非解压目录里的入口文件),
+// 保证脚本列表该 .tas 行能正常显示"运行中"并可一键停止。
+@property (nonatomic, copy, nullable) NSString *activeEncryptedPackagePath;
 @end
 
 @implementation TSLuaBridge {
@@ -2653,6 +2658,10 @@ static void lua_register_all(lua_State *L) {
             }
             code = plain;
             lua_log([NSString stringWithFormat:@"[Lua] 运行加密脚本(.tas): %@", path.lastPathComponent]);
+        } else if ([TSScriptCipher isProjectPackageContent:code]) {
+            // 整包加密的项目包(.tas): 解密解包后按项目方式运行
+            [self _runEncryptedProjectPackageAtPath:path content:code];
+            return;
         }
         [self _execute:code filePath:path];
     });
@@ -2686,6 +2695,79 @@ static void lua_register_all(lua_State *L) {
         // 执行, 传入项目目录作为第二个参数
         [self _executeProject:code entryFile:entryFile projectDir:dirPath];
     });
+}
+
+// ─────────────────────── 整包加密项目(.tas)运行 ───────────────────────
+// 整包加密的项目 .tas 内容为 "TAP1"+加密zip:
+//   解密 → 解包到 /var/mobile/touch/runtime/<项目名>/ → 按项目方式运行。
+// 图片/资源/子目录随包还原, 脚本里一切按原相对路径读取的代码无需改动。
+// 解包目录带签名标记(.tas_source.sig), 只有加密包被替换时才重新解包,
+// 因此脚本运行时写入目录的数据文件在多次运行之间可以保留。
+- (void)_runEncryptedProjectPackageAtPath:(NSString *)path content:(NSString *)content {
+    NSData *zip = [TSScriptCipher decryptProjectData:content];
+    if (!zip) {
+        lua_log([NSString stringWithFormat:@"[Lua] 加密项目解密失败: %@", path]);
+        return;
+    }
+
+    NSString *base = path.lastPathComponent.stringByDeletingPathExtension;
+    if (!base.length) base = @"project";
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *runtimeRoot = [TSPaths runtimeDir];   // /var/mobile/touch/runtime (不入脚本列表)
+    if (![fm fileExistsAtPath:runtimeRoot]) {
+        NSError *e = nil;
+        if (![fm createDirectoryAtPath:runtimeRoot withIntermediateDirectories:YES attributes:nil error:&e]) {
+            lua_log([NSString stringWithFormat:@"[Lua] 创建运行目录失败: %@", runtimeRoot]);
+            return;
+        }
+    }
+    NSString *projectDir = [runtimeRoot stringByAppendingPathComponent:base];
+
+    // 签名 = 加密包 大小+修改时间; 匹配则复用已解包目录(保留运行时数据), 否则重新解包
+    NSDictionary *attr = [fm attributesOfItemAtPath:path error:nil];
+    NSString *sig = [NSString stringWithFormat:@"%lld-%.0f",
+                     (long long)attr.fileSize,
+                     [[attr fileModificationDate] timeIntervalSince1970]];
+    NSString *sigPath = [projectDir stringByAppendingPathComponent:@".tas_source.sig"];
+    NSString *oldSig = [NSString stringWithContentsOfFile:sigPath encoding:NSUTF8StringEncoding error:nil];
+    BOOL needUnpack = ![fm fileExistsAtPath:projectDir] || ![oldSig isEqualToString:sig];
+
+    if (needUnpack) {
+        if ([fm fileExistsAtPath:projectDir]) {
+            [fm removeItemAtPath:projectDir error:nil];
+        }
+        NSError *e = nil;
+        if (![fm createDirectoryAtPath:projectDir withIntermediateDirectories:YES attributes:nil error:&e]) {
+            lua_log([NSString stringWithFormat:@"[Lua] 创建项目运行目录失败: %@", projectDir]);
+            return;
+        }
+        NSString *unzipErr = nil;
+        if (![TSZip unzipData:zip toDirectory:projectDir error:&unzipErr]) {
+            lua_log([NSString stringWithFormat:@"[Lua] 加密项目解压失败: %@", unzipErr ?: @"未知错误"]);
+            return;
+        }
+        [sig writeToFile:sigPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        lua_log([NSString stringWithFormat:@"[Lua] 加密项目已还原: %@", projectDir]);
+    }
+
+    NSString *entryFile = [self _findEntryPointInDirectory:projectDir];
+    if (!entryFile) {
+        lua_log([NSString stringWithFormat:@"[Lua] 加密项目包内未找到 .lua 入口: %@", path.lastPathComponent]);
+        return;
+    }
+    NSError *err = nil;
+    NSString *code = [NSString stringWithContentsOfFile:entryFile encoding:NSUTF8StringEncoding error:&err];
+    if (err || !code) {
+        lua_log([NSString stringWithFormat:@"[Lua] 读取项目入口文件失败: %@", entryFile]);
+        return;
+    }
+
+    lua_log([NSString stringWithFormat:@"[Lua] 运行加密项目(.tas): %@ (入口: %@)",
+             path.lastPathComponent, entryFile.lastPathComponent]);
+    self.activeEncryptedPackagePath = path;   // 让脚本列表对该 .tas 行显示"运行中"
+    [self _executeProject:code entryFile:entryFile projectDir:projectDir];
+    self.activeEncryptedPackagePath = nil;
 }
 
 // 在目录中查找 Lua 入口文件
@@ -2941,7 +3023,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     _stopRequested = NO;
     _pauseRequested = NO;
     self.isPaused = NO;
-    self.runningPath = entryFile;
+    self.runningPath = self.activeEncryptedPackagePath ?: entryFile;
     self.isRunning = YES;
 
     // 预热 HUD + 保活 (与 _execute 相同)
