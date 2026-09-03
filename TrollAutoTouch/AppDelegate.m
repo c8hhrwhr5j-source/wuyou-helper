@@ -44,6 +44,10 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // ── 确保目录存在 ──
     [TSPaths ensureDirectoriesExist];
 
+    // ── 冷启动清空 runtime: 清除加密项目(.tas)上次运行留下的临时资源目录,
+    //    以及旧版本曾解密滞留的明文残留, 保证设备上不长期保留任何解密产物 ──
+    [TSPaths cleanupRuntimeDirectory];
+
     // ── 同步内置脚本到脚本目录(不覆盖用户已有文件) ──
     [self _syncBuiltinScripts];
 

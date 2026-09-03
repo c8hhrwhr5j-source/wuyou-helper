@@ -88,7 +88,97 @@ static volatile BOOL _pauseRequested = NO;
 // 整包加密项目(.tas)运行时, runningPath 用 .tas 的逻辑路径(而非解压目录里的入口文件),
 // 保证脚本列表该 .tas 行能正常显示"运行中"并可一键停止。
 @property (nonatomic, copy, nullable) NSString *activeEncryptedPackagePath;
+// ── 整包加密项目(.tas)安全运行上下文(仅在 _luaQueue 上读写)──
+// encryptedLuaSources: 包内全部 .lua 源码(相对路径→数据), 只驻内存、绝不写盘;
+// encryptedRunDir:     存放图片/音频等非源码资源的一次性临时目录, 运行结束整体删除。
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, NSData *> *encryptedLuaSources;
+@property (nonatomic, copy, nullable) NSString *encryptedRunDir;
 @end
+
+// ── 加密项目虚拟源码表: 按相对路径取数据, iOS 文件系统大小写不敏感, 先精确后忽略大小写 ──
+static NSData *ts_lookupLuaSource(NSDictionary<NSString *, NSData *> *map, NSString *rel) {
+    if (!map || !rel.length) return nil;
+    NSData *d = map[rel];
+    if (d) return d;
+    for (NSString *key in map) {
+        if ([key caseInsensitiveCompare:rel] == NSOrderedSame) return map[key];
+    }
+    return nil;
+}
+
+// 给加密项目临时资源目录拼绝对逻辑路径(仅用于 Lua chunk 名/报错显示, 磁盘上该 .lua 并不存在)
+static NSString *ts_encryptedChunkName(NSString *rel) {
+    NSString *runDir = [TSLuaBridge shared].encryptedRunDir;
+    return runDir.length
+        ? [NSString stringWithFormat:@"@%@", [runDir stringByAppendingPathComponent:rel]]
+        : [NSString stringWithFormat:@"@%@", rel];
+}
+
+// _TS_VFS(rel, mode?, env?): 从内存源码表加载 .lua。
+//   命中且加载成功 → chunk 函数; 命中但加载失败 → nil, err;
+//   未命中 → nil(无第二返回值, 由 Lua shim 回落到磁盘)。
+static int l_ts_vfs_load(lua_State *L) {
+    @autoreleasepool {
+        const char *relC = luaL_checkstring(L, 1);
+        if (!relC) { lua_pushnil(L); return 1; }
+        NSString *rel = [NSString stringWithUTF8String:relC];
+        NSData *data = ts_lookupLuaSource([TSLuaBridge shared].encryptedLuaSources, rel);
+        if (!data) { lua_pushnil(L); return 1; }
+
+        const char *mode = luaL_optstring(L, 2, "bt");
+        int rc = luaL_loadbufferx(L, data.bytes, data.length,
+                                  ts_encryptedChunkName(rel).UTF8String, mode);
+        if (rc != LUA_OK) {
+            // 栈顶为错误字符串 → 转成 (nil, err)
+            lua_pushnil(L);
+            lua_insert(L, -2);
+            return 2;
+        }
+        // 支持 loadfile(path, mode, env) 里的 env (第 3 参数)
+        if (!lua_isnoneornil(L, 3)) {
+            lua_pushvalue(L, 3);
+            lua_setupvalue(L, -2, 1);   // 给 chunk 设置 _ENV
+        }
+        return 1;
+    }
+}
+
+// require 内存 searcher: 模块名 → 相对路径 (a.b → a/b.lua / a/b/init.lua),
+// 命中则从内存加载; 未命中返回错误字符串交后续 searcher 处理(与磁盘明文项目行为一致)。
+static int l_ts_searcher_virtual(lua_State *L) {
+    @autoreleasepool {
+        const char *nameC = luaL_checkstring(L, 1);
+        NSString *slashed = [[NSString stringWithUTF8String:nameC]
+                                stringByReplacingOccurrencesOfString:@"." withString:@"/"];
+        slashed = [slashed stringByTrimmingCharactersInSet:
+                   [NSCharacterSet characterSetWithCharactersInString:@" /"]];
+        if (!slashed.length) {
+            lua_pushfstring(L, "\n\tnil module name in encrypted project");
+            return 1;
+        }
+        NSArray<NSString *> *candidates = @[
+            [slashed stringByAppendingString:@".lua"],
+            [slashed stringByAppendingString:@"/init.lua"],
+        ];
+        NSDictionary<NSString *, NSData *> *map = [TSLuaBridge shared].encryptedLuaSources;
+        for (NSString *rel in candidates) {
+            NSData *data = ts_lookupLuaSource(map, rel);
+            if (!data) continue;
+            int rc = luaL_loadbufferx(L, data.bytes, data.length,
+                                      ts_encryptedChunkName(rel).UTF8String, "bt");
+            if (rc != LUA_OK) {
+                // 弹出 loadbuffer 失败产生的错误串, 避免 luaL_error 抛出时栈上残留
+                const char *loadErr = lua_tostring(L, -1);
+                lua_pop(L, 1);
+                return luaL_error(L, "error loading module '%s' from encrypted source:\n\t%s",
+                                  nameC, loadErr ? loadErr : "unknown");
+            }
+            return 1;   // 返回 loader 函数
+        }
+        lua_pushfstring(L, "\n\tno file in encrypted project for module '%s'", nameC);
+        return 1;
+    }
+}
 
 @implementation TSLuaBridge {
     dispatch_queue_t _luaQueue;
@@ -2699,10 +2789,10 @@ static void lua_register_all(lua_State *L) {
 
 // ─────────────────────── 整包加密项目(.tas)运行 ───────────────────────
 // 整包加密的项目 .tas 内容为 "TAP1"+加密zip:
-//   解密 → 解包到 /var/mobile/touch/runtime/<项目名>/ → 按项目方式运行。
-// 图片/资源/子目录随包还原, 脚本里一切按原相对路径读取的代码无需改动。
-// 解包目录带签名标记(.tas_source.sig), 只有加密包被替换时才重新解包,
-// 因此脚本运行时写入目录的数据文件在多次运行之间可以保留。
+//   解密 → .lua 源码只进内存(encryptedLuaSources)、绝不写盘明文;
+//   图片/音频等非源码资源 → 一次性临时目录 runtime/<名>.run-<UUID>/, 供原生 API 读取;
+//   入口/require/loadfile/dofile 读取项目内 .lua 全部走内存虚拟文件系统(_TS_VFS)。
+// 运行结束(正常/报错/停止/崩溃后冷启动)即整体删除临时目录 —— 加密包永远不产生磁盘明文。
 - (void)_runEncryptedProjectPackageAtPath:(NSString *)path content:(NSString *)content {
     NSData *zip = [TSScriptCipher decryptProjectData:content];
     if (!zip) {
@@ -2722,52 +2812,73 @@ static void lua_register_all(lua_State *L) {
             return;
         }
     }
-    NSString *projectDir = [runtimeRoot stringByAppendingPathComponent:base];
 
-    // 签名 = 加密包 大小+修改时间; 匹配则复用已解包目录(保留运行时数据), 否则重新解包
-    NSDictionary *attr = [fm attributesOfItemAtPath:path error:nil];
-    NSString *sig = [NSString stringWithFormat:@"%lld-%.0f",
-                     (long long)attr.fileSize,
-                     [[attr fileModificationDate] timeIntervalSince1970]];
-    NSString *sigPath = [projectDir stringByAppendingPathComponent:@".tas_source.sig"];
-    NSString *oldSig = [NSString stringWithContentsOfFile:sigPath encoding:NSUTF8StringEncoding error:nil];
-    BOOL needUnpack = ![fm fileExistsAtPath:projectDir] || ![oldSig isEqualToString:sig];
-
-    if (needUnpack) {
-        if ([fm fileExistsAtPath:projectDir]) {
-            [fm removeItemAtPath:projectDir error:nil];
-        }
-        NSError *e = nil;
-        if (![fm createDirectoryAtPath:projectDir withIntermediateDirectories:YES attributes:nil error:&e]) {
-            lua_log([NSString stringWithFormat:@"[Lua] 创建项目运行目录失败: %@", projectDir]);
-            return;
-        }
-        NSString *unzipErr = nil;
-        if (![TSZip unzipData:zip toDirectory:projectDir error:&unzipErr]) {
-            lua_log([NSString stringWithFormat:@"[Lua] 加密项目解压失败: %@", unzipErr ?: @"未知错误"]);
-            return;
-        }
-        [sig writeToFile:sigPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        lua_log([NSString stringWithFormat:@"[Lua] 加密项目已还原: %@", projectDir]);
+    // ── 安全运行策略(不再整包明文还原到固定目录!) ──
+    // 每次运行都新建一次性临时目录 <base>.run-<UUID>, 结束后整体删除:
+    //   1) 包内全部 .lua 源码只解到内存(encryptedLuaSources), 绝不 writeToFile;
+    //   2) 图片/音频等非源码资源落盘到该临时目录, 供原生图像/音频 API 直接读取;
+    //   3) 运行结束时(正常/报错/停止/异常) _executeProject 的 finally 统一删除临时目录;
+    //   4) App 冷启动还会清空 runtime 目录兜底(清除崩溃残留与旧版本明文遗留)。
+    // 旧版"签名目录复用保留运行数据"机制因此废弃——换取源码绝不明文留盘。
+    NSString *runDir = [runtimeRoot stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.run-%@", base, [[NSUUID UUID] UUIDString]]];
+    NSError *e = nil;
+    if (![fm createDirectoryAtPath:runDir withIntermediateDirectories:YES attributes:nil error:&e]) {
+        lua_log([NSString stringWithFormat:@"[Lua] 创建临时运行目录失败: %@", runDir]);
+        return;
     }
 
-    NSString *entryFile = [self _findEntryPointInDirectory:projectDir];
-    if (!entryFile) {
+    // 解压: .lua → 内存表; 其余资源 → 临时目录(此刻起磁盘上不可能出现任何 .lua 明文)
+    NSString *unzipErr = nil;
+    NSDictionary<NSString *, NSData *> *luaSources = [TSZip unzipData:zip toDirectory:runDir
+        entriesMatching:^BOOL(NSString *name) {
+            return [name.pathExtension.lowercaseString isEqualToString:@"lua"];
+        } error:&unzipErr];
+    if (!luaSources) {
+        [fm removeItemAtPath:runDir error:nil];
+        lua_log([NSString stringWithFormat:@"[Lua] 加密项目解压失败: %@", unzipErr ?: @"未知错误"]);
+        return;
+    }
+
+    // 在内存源码表中定位入口(runDir 磁盘上没有任何 .lua)
+    NSString *entryRel = [self _entryRelativePathInLuaSources:luaSources];
+    if (!entryRel) {
+        [fm removeItemAtPath:runDir error:nil];
         lua_log([NSString stringWithFormat:@"[Lua] 加密项目包内未找到 .lua 入口: %@", path.lastPathComponent]);
         return;
     }
-    NSError *err = nil;
-    NSString *code = [NSString stringWithContentsOfFile:entryFile encoding:NSUTF8StringEncoding error:&err];
-    if (err || !code) {
-        lua_log([NSString stringWithFormat:@"[Lua] 读取项目入口文件失败: %@", entryFile]);
+    NSData *entryData = ts_lookupLuaSource(luaSources, entryRel);
+    NSString *code = [[NSString alloc] initWithData:entryData encoding:NSUTF8StringEncoding];
+    if (!code.length) {
+        [fm removeItemAtPath:runDir error:nil];
+        lua_log([NSString stringWithFormat:@"[Lua] 加密项目入口内容为空: %@", entryRel]);
         return;
     }
 
-    lua_log([NSString stringWithFormat:@"[Lua] 运行加密项目(.tas): %@ (入口: %@)",
-             path.lastPathComponent, entryFile.lastPathComponent]);
+    // 逻辑入口路径(仅用于 _SCRIPT_PATH_/报错定位; 磁盘上不存在, 由内存 VFS 接管)
+    NSString *entryFile = [runDir stringByAppendingPathComponent:entryRel];
+
+    // 建立虚拟源码上下文; _executeProject 结束后在 finally 中自动清理并删除 runDir
+    self.encryptedLuaSources = luaSources;
+    self.encryptedRunDir = runDir;
+    lua_log([NSString stringWithFormat:@"[Lua] 运行加密项目(.tas): %@ (入口: %@, 源码仅驻内存不落盘)",
+             path.lastPathComponent, entryRel]);
     self.activeEncryptedPackagePath = path;   // 让脚本列表对该 .tas 行显示"运行中"
-    [self _executeProject:code entryFile:entryFile projectDir:projectDir];
+    [self _executeProject:code entryFile:entryFile projectDir:runDir];
     self.activeEncryptedPackagePath = nil;
+}
+
+// 在加密包内存源码表中查找 Lua 入口(相对路径)。与磁盘版 _findEntryPointInDirectory 优先级一致。
+- (NSString *)_entryRelativePathInLuaSources:(NSDictionary<NSString *, NSData *> *)luaSources {
+    NSArray<NSString *> *preferred = @[@"main.lua", @"init.lua", @"index.lua", @"app.lua"];
+    for (NSString *name in preferred) {
+        if (ts_lookupLuaSource(luaSources, name)) return name;
+    }
+    NSArray<NSString *> *all = [luaSources.allKeys filteredArrayUsingPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(NSString *key, NSDictionary<NSString *, id> *b) {
+            return [key.pathExtension.lowercaseString isEqualToString:@"lua"];
+        }]];
+    return [all sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)].firstObject;
 }
 
 // 在目录中查找 Lua 入口文件
@@ -3020,6 +3131,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 //   - Lua package.path 包含项目目录 (支持 require())
 //   - 自定义 dofile/loadfile 可解析相对路径
 - (void)_executeProject:(NSString *)code entryFile:(NSString *)entryFile projectDir:(NSString *)projectDir {
+    // 整包加密项目(.tas): 内存源码表 + 一次性临时资源目录须在正常结束/报错/异常时统一清理。
+    // 用 @try/@finally 保证即使中途 return(如语法错误)也绝不让解密产物残留在磁盘。
+    @try {
     _stopRequested = NO;
     _pauseRequested = NO;
     self.isPaused = NO;
@@ -3082,6 +3196,10 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     // 设置 settings (项目级)
     [self _injectSettingsTable:L scriptPath:projectDir];
 
+    // 整包加密项目(.tas): 安装内存虚拟文件系统 —— 入口代码已在内存,
+    // require/loadfile/dofile 读取项目内 .lua 时优先从内存源码表加载, 磁盘无明文
+    [self _installEncryptedProjectVFS:L];
+
     // 执行脚本
     const char *utf8Code = code.UTF8String;
     int ret = luaL_loadbuffer(L, utf8Code, strlen(utf8Code),
@@ -3122,6 +3240,94 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         }
     });
     lua_log(@"[Lua] 项目执行结束");
+    } @finally {
+        // 正常结束/运行错误/语法错误/异常统一走这里: 清理加密项目临时目录与内存源码表
+        [self _cleanupEncryptedVirtualContext];
+    }
+}
+
+// 整包加密项目(.tas)虚拟源码加载环境:
+//   1) 全局 _TS_VFS(rel, mode?, env?) —— 从内存源码表加载 .lua, 供 shim 与入口使用;
+//   2) package.searchers 第 2 位插入内存 searcher —— require() 优先命中包内 .lua;
+//   3) Lua shim 覆写全局 loadfile/dofile —— 路径位于加密项目临时目录时先查内存源码,
+//      未命中再回落磁盘(与明文项目的磁盘行为保持一致, 避免回归)。
+- (void)_installEncryptedProjectVFS:(lua_State *)L {
+    if (!self.encryptedLuaSources.count) return;   // 明文项目/单脚本不受影响
+
+    // 1) 内存源码加载函数
+    lua_pushcfunction(L, l_ts_vfs_load);
+    lua_setglobal(L, "_TS_VFS");
+
+    // 2) require 内存 searcher: 置于第 2 位(preload 之后、磁盘 Lua loader 之前)
+    lua_getglobal(L, "package");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "searchers");
+        if (lua_istable(L, -1)) {
+            int n = (int)lua_rawlen(L, -1);
+            for (int i = n; i >= 2; i--) {
+                lua_rawgeti(L, -1, i);       // 取 searchers[i]
+                lua_rawseti(L, -2, i + 1);   // → searchers[i+1]
+            }
+            lua_pushcfunction(L, l_ts_searcher_virtual);
+            lua_rawseti(L, -2, 2);
+        }
+        lua_pop(L, 1);   // searchers
+    }
+    lua_pop(L, 1);       // package
+
+    // 3) 覆写 loadfile/dofile
+    static const char *kShim =
+        "local ok, err = pcall(function()\n"
+        "  local _proj = _PROJECT_DIR_\n"
+        "  local _origLoadfile, _origDofile = loadfile, dofile\n"
+        "  local function _tsRel(p)\n"
+        "    if type(p) ~= 'string' or p == '' then return nil end\n"
+        "    if p:sub(1,1) ~= '/' then return p end          -- 相对路径按项目根解析\n"
+        "    if p:sub(1,#_proj) ~= _proj then return nil end -- 其它绝对路径不接管\n"
+        "    local rest = p:sub(#_proj+1)\n"
+        "    if rest == '' or rest:sub(1,1) ~= '/' then return nil end\n"
+        "    return rest:sub(2)\n"
+        "  end\n"
+        "  loadfile = function(path, mode, env)\n"
+        "    local rel = _tsRel(path)\n"
+        "    if rel then\n"
+        "      local f, e = _TS_VFS(rel, mode, env)\n"
+        "      if f then return f end\n"
+        "      if e then return nil, e end\n"
+        "    end\n"
+        "    return _origLoadfile(path, mode, env)\n"
+        "  end\n"
+        "  dofile = function(path)\n"
+        "    local f, e = loadfile(path)\n"
+        "    if not f then error(e or 'cannot open file', 0) end\n"
+        "    return f()\n"
+        "  end\n"
+        "end)\n"
+        "if not ok then\n"
+        "  print('[Lua] encrypted VFS shim init failed: ' .. tostring(err))\n"
+        "end\n";
+    if (luaL_loadbuffer(L, kShim, strlen(kShim), "=(encrypted-vfs-shim)") == LUA_OK) {
+        if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            lua_log([NSString stringWithFormat:@"[Lua] 加密项目内存文件系统初始化失败: %s",
+                     lua_tostring(L, -1)]);
+            lua_pop(L, 1);
+        }
+    } else {
+        lua_pop(L, 1);
+    }
+}
+
+// 加密项目运行上下文清理: 删除一次性临时资源目录并释放内存源码表。
+// 由 _executeProject 的 @finally 统一调用; App 冷启动兜底见 [TSPaths cleanupRuntimeDirectory]。
+- (void)_cleanupEncryptedVirtualContext {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (self.encryptedRunDir.length && [fm fileExistsAtPath:self.encryptedRunDir]) {
+        [fm removeItemAtPath:self.encryptedRunDir error:nil];
+        lua_log([NSString stringWithFormat:@"[Lua] 加密项目临时资源目录已清理 (%@)",
+                 self.encryptedRunDir.lastPathComponent]);
+    }
+    self.encryptedRunDir = nil;
+    self.encryptedLuaSources = nil;
 }
 
 // 音量键被按下 (TSVolumeKeyMonitor 监听回调, 任意线程 → 转主线程):

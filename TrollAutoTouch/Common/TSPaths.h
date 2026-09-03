@@ -23,11 +23,17 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)logDir;
 /// 资源目录   /var/mobile/touch/res
 + (NSString *)resDir;
-/// 运行目录   /var/mobile/touch/runtime (加密项目(.tas)解密后的临时运行目录, 不列入脚本列表)
+/// 运行目录   /var/mobile/touch/runtime
+/// 仅供"整包加密项目(.tas)"运行时存放一次性临时资源(图片/音频等非源码)。
+/// 其中的 .lua 源码只驻内存、绝不写入该目录; 运行结束即整体删除, App 冷启动再兜底清空。
 + (NSString *)runtimeDir;
 
 /// 确保所有目录存在（首次启动时创建）
 + (void)ensureDirectoriesExist;
+
+/// 清空 runtime 目录下的全部内容(加密项目临时运行残留)。
+/// 在 App 冷启动时调用, 防止异常退出/崩溃留下上次解密的临时资源, 同时清除旧版本遗留的明文。
++ (void)cleanupRuntimeDirectory;
 
 /// 完整路径拼接
 + (NSString *)pathForLua:(NSString *)name;

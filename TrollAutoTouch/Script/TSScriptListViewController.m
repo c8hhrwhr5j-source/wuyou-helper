@@ -252,7 +252,7 @@
         return;
     }
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"加密项目"
-        message:[NSString stringWithFormat:@"将「%@」整个项目目录打包加密为 %@？\n\n加密后原文件夹(含全部 .lua 源码)会被移除，图片/资源/子目录全部打进包内；\n运行该加密包时会自动还原目录结构，图片/资源仍按正常路径读取。",
+        message:[NSString stringWithFormat:@"将「%@」整个项目目录打包加密为 %@？\n\n加密后原文件夹(含全部 .lua 源码)会被移除，图片/资源/子目录全部打进包内。\n运行该加密包时 .lua 源码只在内存中直接执行、绝不写入磁盘明文；图片/资源解到一次性临时目录、运行结束自动清除。",
                 e.name, newName]
         preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"加密并删除原目录"

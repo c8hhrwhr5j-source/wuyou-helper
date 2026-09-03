@@ -87,11 +87,17 @@ static void ts_collectDirFiles(NSFileManager *fm, NSString *dir, NSString *root,
 
 @implementation TSZip
 
-+ (BOOL)unzipData:(NSData *)data toDirectory:(NSString *)destDir error:(NSString *_Nullable *_Nullable)error {
+// 通用解压核心: match 非空时, 命中条目只解到内存返回、不落盘;
+// match 为空则全部落盘。成功返回命中条目表(可为空), 失败返回 nil。
++ (nullable NSDictionary<NSString *, NSData *> *)unzipData:(NSData *)data
+                                               toDirectory:(NSString *)destDir
+                                            entriesMatching:(nullable BOOL (^)(NSString *name))match
+                                                      error:(NSString *_Nullable *_Nullable)error {
     // 注意: ARC 下 goto 不能跳过 __strong 变量的初始化,
     // 因此所有强引用局部变量必须在本方法最前面声明。
     NSString *errMsg = nil;
     NSMutableArray<NSDictionary *> *files = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSData *> *memoryFiles = [NSMutableDictionary dictionary];
     NSFileManager *fm = [NSFileManager defaultManager];
     const uint8_t *d = data.bytes;
     NSUInteger len = data.length;
@@ -232,6 +238,11 @@ static void ts_collectDirFiles(NSFileManager *fm, NSString *dir, NSString *root,
                     uLong check = crc32(0L, out.bytes, (uInt)out.length);
                     if ((uint32_t)check != crc) { errMsg = [NSString stringWithFormat:@"CRC 校验失败: %@", name]; goto done; }
                 }
+                // 命中 match 的条目只进内存返回、不写盘(用于 .lua 源码, 防止明文泄漏到文件系统)
+                if (match && match(name)) {
+                    if (out.length) [memoryFiles setObject:out forKey:name];
+                    continue;   // 已到最后一个路径分量, 跳过落盘
+                }
                 if (![out writeToFile:dest atomically:YES]) {
                     errMsg = [NSString stringWithFormat:@"写入文件失败: %@", dest]; goto done;
                 }
@@ -241,7 +252,13 @@ static void ts_collectDirFiles(NSFileManager *fm, NSString *dir, NSString *root,
 
 done:
     if (error && errMsg) *error = errMsg;
-    return errMsg == nil;
+    if (errMsg) return nil;
+    return memoryFiles;
+}
+
++ (BOOL)unzipData:(NSData *)data toDirectory:(NSString *)destDir error:(NSString *_Nullable *_Nullable)error {
+    // match=nil → 全部落盘, 行为与旧版一致
+    return [self unzipData:data toDirectory:destDir entriesMatching:nil error:error] != nil;
 }
 
 + (nullable NSData *)zipDataFromDirectory:(NSString *)dir error:(NSString *_Nullable *_Nullable)error {

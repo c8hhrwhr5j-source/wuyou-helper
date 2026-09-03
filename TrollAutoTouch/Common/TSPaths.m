@@ -50,6 +50,16 @@
     return [self.resDir stringByAppendingPathComponent:name];
 }
 
++ (void)cleanupRuntimeDirectory {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = self.runtimeDir;
+    if (![fm fileExistsAtPath:dir]) return;
+    NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+    for (NSString *item in items) {
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:item] error:nil];
+    }
+}
+
 @end
 
 #pragma mark - Colors
