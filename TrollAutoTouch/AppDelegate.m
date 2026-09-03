@@ -27,9 +27,8 @@
 static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 @interface AppDelegate ()
-- (void)_logMemoryDiag:(NSString *)tag includeStats:(BOOL)includeStats;
+- (void)_logMemoryDiag:(NSString *)tag;
 - (void)_startMemoryDiag;
-- (void)_scheduleMemoryDiag;
 @end
 
 @implementation AppDelegate
@@ -77,8 +76,10 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     // 这是 network-authentication 后台豁免的判定依据(对齐原版)。
     [TSNetworkAuth registerHotspotHelper];
 
-    // ── 内存诊断: 启动记录版本/机型 + 每 1 分钟采样 footprint/heap/VM 细分
-    //    + 截屏路径统计, 定位 iOS16 挂机十几小时后内存累积(Jetsam 杀后台)的来源 ──
+    // ── 启动记录版本/机型 + 一次内存基线 ──
+    // (曾为定位 iOS16 挂机内存累积加过每 1 分钟周期采样; 20h 长跑实测稳定后
+    //  2026-09-03 移除周期采样以消除 touch.log 噪音; 异常时
+    //  didReceiveMemoryWarning 仍会带完整截屏统计记录) ──
     [self _startMemoryDiag];
 
     NSLog(@"[QQ音乐] App 启动完成");
@@ -127,13 +128,13 @@ static unsigned long long TS_mallocInUse(void) {
     return (unsigned long long)stats.size_in_use;
 }
 
-- (void)_logMemoryDiag:(NSString *)tag includeStats:(BOOL)includeStats {
+- (void)_logMemoryDiag:(NSString *)tag {
     unsigned long long fp = TS_physFootprint();
     unsigned long long internalBytes = 0, externalBytes = 0, compressorBytes = 0;
     TS_vmBreakdown(&internalBytes, &externalBytes, &compressorBytes);
     unsigned long long heap = TS_mallocInUse();
     unsigned long long uptime = (unsigned long long)[NSProcessInfo processInfo].systemUptime;
-    NSString *line = [NSString stringWithFormat:
+    [[TSLogStore shared] append:[NSString stringWithFormat:
         @"[内存] %@ t=%.1fh footprint=%.1fMB heap=%.1fMB vm内部=%.1fMB 外部=%.1fMB 压缩=%.1fMB",
         tag,
         uptime / 3600.0,
@@ -141,12 +142,7 @@ static unsigned long long TS_mallocInUse(void) {
         heap / 1024.0 / 1024.0,
         internalBytes / 1024.0 / 1024.0,
         externalBytes / 1024.0 / 1024.0,
-        compressorBytes / 1024.0 / 1024.0];
-    if (includeStats) {
-        // 截屏链路统计每 10 分钟附一次: 24h 长跑观测与日志可读性兼顾
-        line = [line stringByAppendingFormat:@" %@", [[TSScreenCapture shared] statsLine]];
-    }
-    [[TSLogStore shared] append:line];
+        compressorBytes / 1024.0 / 1024.0]];
 }
 
 - (void)_startMemoryDiag {
@@ -161,20 +157,8 @@ static unsigned long long TS_mallocInUse(void) {
     if (!model) { model = [[UIDevice currentDevice] model]; }
     [[TSLogStore shared] append:[NSString stringWithFormat:@"[启动] v%@(b%@) iOS%@ %@",
         ver, build, [UIDevice currentDevice].systemVersion, model]];
-    [self _logMemoryDiag:@"启动基线" includeStats:YES];
-    [self _scheduleMemoryDiag];
-}
-
-- (void)_scheduleMemoryDiag {
-    // 每 1 分钟: 精简内存采样(footprint/heap/VM 细分, 定位内存累积趋势)。
-    // 完整截屏链路统计每 10 分钟附一次(tick%10==0), 24h 长跑日志量可控可读。
-    static int tick = 0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        tick++;
-        [self _logMemoryDiag:@"采样" includeStats:(tick % 10 == 0)];
-        [self _scheduleMemoryDiag];
-    });
+    // 仅启动时记录一次精简内存基线(不再周期采样)
+    [self _logMemoryDiag:@"启动基线"];
 }
 
 // 把打包进 App 的内置脚本(bundle 的 lua/ 目录)同步到 /var/mobile/touch/lua/
