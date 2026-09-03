@@ -132,6 +132,12 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
                                                  selector:@selector(_onLuaStateChanged:)
                                                      name:TSLuaRunningStateChangedNotification
                                                    object:nil];
+        // 暂停/恢复状态 (中控/8686、音量键菜单等走 TSLuaBridge pause/resume 的路径
+        // 不会经过 _tapPause:, 需靠此通知把边框同步成暂停色)
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(_onPauseStateChanged:)
+                                                     name:TSLuaPauseStateChangedNotification
+                                                   object:nil];
         // app 前后台切换: 后台时把悬浮球托管到系统层(跨应用可见), 前台时交还 app 内
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(_appDidEnterBackground:)
@@ -453,6 +459,27 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
         _scriptRunning = NO;
         _paused = NO;
     }
+    [self _refreshButtons];
+}
+
+// 暂停/恢复状态通知 (TSLuaBridge pause/resume 发出, 可能来自非主线程)。
+// 手动点悬浮球暂停按钮走 _tapPause: 本地翻转; 中控/8686 /task?cmd=pause、
+// 音量键菜单等路径只调 TSLuaBridge pause/resume, 必须靠此通知驱动边框颜色。
+- (void)_onPauseStateChanged:(NSNotification *)note {
+    BOOL paused = [note.userInfo[@"paused"] boolValue];
+    if ([NSThread isMainThread]) {
+        [self _applyPauseState:paused];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _applyPauseState:paused];
+        });
+    }
+}
+
+- (void)_applyPauseState:(BOOL)paused {
+    // 仅脚本运行中暂停态才有意义; 未运行时忽略(边框保持灰色, 由 running 通知管理)
+    if (!_scriptRunning) return;
+    _paused = paused;
     [self _refreshButtons];
 }
 

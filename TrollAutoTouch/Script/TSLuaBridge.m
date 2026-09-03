@@ -30,6 +30,7 @@
 #import <mach/mach.h>
 
 NSNotificationName const TSLuaRunningStateChangedNotification = @"TSLuaRunningStateChanged";
+NSNotificationName const TSLuaPauseStateChangedNotification = @"TSLuaPauseStateChanged";
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
@@ -2738,6 +2739,10 @@ static void lua_register_all(lua_State *L) {
     self.isPaused = YES;
     // 补发未抬起的触摸, 避免脚本停在拖动/按下中途留下"幽灵手指"
     [[TSHIDEventTouch shared] releaseAllTouches];
+    // 通知悬浮球等 UI 同步暂停态(边框变暂停色): 中控/8686、音量键菜单均只走这里
+    [[NSNotificationCenter defaultCenter] postNotificationName:TSLuaPauseStateChangedNotification
+                                                        object:self
+                                                      userInfo:@{@"paused": @(YES)}];
     lua_log(@"[Lua] 脚本已暂停 (再次按音量键可继续/停止)");
 }
 
@@ -2745,6 +2750,10 @@ static void lua_register_all(lua_State *L) {
 - (void)resume {
     _pauseRequested = NO;
     self.isPaused = NO;
+    // 通知悬浮球等 UI 同步恢复态(边框回运行色)
+    [[NSNotificationCenter defaultCenter] postNotificationName:TSLuaPauseStateChangedNotification
+                                                        object:self
+                                                      userInfo:@{@"paused": @(NO)}];
     lua_log(@"[Lua] 脚本已继续");
 }
 

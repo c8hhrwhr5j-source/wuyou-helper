@@ -26,6 +26,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 脚本运行状态变化通知（userInfo: @{@"running": @(BOOL), @"path": NSString?}）
 FOUNDATION_EXPORT NSNotificationName const TSLuaRunningStateChangedNotification;
 
+/// 脚本暂停/恢复状态变化通知（userInfo: @{@"paused": @(BOOL)}）
+/// 由 TSLuaBridge pause/resume 发出。悬浮球边框等 UI 需借此同步暂停态:
+/// 手动点悬浮球按钮由 HUD 本地翻转, 而中控/8686、音量键菜单等路径只调
+/// TSLuaBridge pause/resume, 不经过 HUD, 必须靠此通知驱动边框颜色。
+FOUNDATION_EXPORT NSNotificationName const TSLuaPauseStateChangedNotification;
+
 @interface TSLuaBridge : NSObject
 
 + (instancetype)shared;
