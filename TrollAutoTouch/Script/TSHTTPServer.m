@@ -404,12 +404,11 @@ static NSData *WSTextFrame(NSString *text) {
     } else if ([path isEqualToString:@"/api/text"] && [method isEqualToString:@"POST"]) {
         [self handleText:clientFd body:body];
     } else if ([path hasPrefix:@"/api/log"]) {
-        // /api/log 带 query 参数，需先剥掉 ?xxx 再精确匹配路由
-        NSString *pureLogPath = path;
-        NSRange logQ = [path rangeOfString:@"?"];
-        if (logQ.location != NSNotFound) pureLogPath = [path substringToIndex:logQ.location];
-        if ([pureLogPath isEqualToString:@"/api/log"] && [method isEqualToString:@"GET"]) {
-            [self serveLog:clientFd path:path];
+        // 顶部已统一把 query 从 path 剥离并存入 query 变量；
+        // 此前误把纯 path(无 query) 传给 serveLog，导致 file/after 永远解析为空、
+        // file 恒退回 debug.log（扩展请求 touch.log 却收到 debug.log）。须传 query。
+        if ([path isEqualToString:@"/api/log"] && [method isEqualToString:@"GET"]) {
+            [self serveLog:clientFd query:query];
         } else {
             [self sendAndClose:clientFd data:[self errorResponse:404 msg:@"Not Found"]];
         }
@@ -657,10 +656,8 @@ static NSData *WSTextFrame(NSString *text) {
     [self sendAndClose:clientFd data:[self errorResponse:404 msg:@"Not Found"]];
 }
 
-- (NSString *)queryValueForPath:(NSString *)path key:(NSString *)key {
-    NSRange q = [path rangeOfString:@"?"];
-    if (q.location == NSNotFound) return nil;
-    NSString *query = [path substringFromIndex:q.location + 1];
+// 从 query string("a=b&c=d"，不含前导 '?') 中取值；找不到返回 nil。
+- (NSString *)queryValue:(NSString *)query key:(NSString *)key {
     for (NSString *pair in [query componentsSeparatedByString:@"&"]) {
         NSArray *kv = [pair componentsSeparatedByString:@"="];
         if (kv.count == 2 && [kv[0] isEqualToString:key]) {
@@ -668,6 +665,13 @@ static NSData *WSTextFrame(NSString *text) {
         }
     }
     return nil;
+}
+
+- (NSString *)queryValueForPath:(NSString *)path key:(NSString *)key {
+    NSRange q = [path rangeOfString:@"?"];
+    if (q.location == NSNotFound) return nil;
+    NSString *query = [path substringFromIndex:q.location + 1];
+    return [self queryValue:query key:key];
 }
 
 // API: GET /api/log?file=debug.log&after=<游标>
@@ -678,15 +682,16 @@ static NSData *WSTextFrame(NSString *text) {
 //   lines     本次新增的行（可能为空）
 //   nextIndex 当前日志总行数，下次请求把它作为 after 传回
 //   cleared   内存日志被清空或游标失效(被截断)时为 true，客户端应全量替换显示
-- (void)serveLog:(int)clientFd path:(NSString *)fullPath {
-    NSString *file = [self queryValueForPath:fullPath key:@"file"];
+// 注意: query 为 handleHTTP 剥离后的查询串(不含前导 '?')。
+- (void)serveLog:(int)clientFd query:(NSString *)query {
+    NSString *file = [self queryValue:query key:@"file"];
     if (file.length == 0) file = @"debug.log";
     // 只允许读取两类日志文件，防止路径注入
     if (![file isEqualToString:@"debug.log"] && ![file isEqualToString:@"touch.log"]) {
         [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"Bad Request"]];
         return;
     }
-    NSInteger after = [[self queryValueForPath:fullPath key:@"after"] integerValue];
+    NSInteger after = [[self queryValue:query key:@"after"] integerValue];
     if (after < 0) after = 0;
 
     NSArray<NSString *> *all = [[TSLogStore shared] logsForFile:file];
