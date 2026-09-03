@@ -1046,10 +1046,12 @@ function main()
     while true do
         sleep(100)
         appsl()
+		--log("1")
 		if os.time() - xfq >= 120 then
 			sys.setFloatBallPoint(27, 1309)   -- 把悬浮球移动到 (1300, 720)
 			xfq = os.time()
 		end
+		--log("2")
 		if rgbbj("附近下") then
 			if rgbbj("沃玛森林") then
 				if rgbbj("自动战斗") or rgbbj("自动战斗上") or rgbbj("自动战斗下") then
@@ -1098,19 +1100,23 @@ function main()
 			end
 
 		end
+		--log("3")
 		if rgbbj("每日礼包")  then
             click(1169,85,1193,109)--关闭每日礼包限时活动
             sleep(1000)	
         end
+		--log("4")
 		if rgbbj("新每日签到") then
 			click(1130,47,1153,70) -- 关闭
             sleep(1000)
 		end
+		--log("5")
 		if rgbbj("挂机奖励") then
             click(613, 517, 719, 542)	-- 免费领取	
             sleep(1000)
             click(1245,344,1301,363) -- 点击自动战斗
         end	
+		--log("6")
 		if rgbbj("提示") or rgbbj("小提示框") or rgbbj("焰火提示") then	
             click(738,473,805,502) -- 取消
             sleep(1000)						
@@ -1119,7 +1125,9 @@ function main()
             click(640,661,696,709) -- 把设置收回去
             sleep(1000)
         end	
+		--log("7")
 		XDZB_ZXLB()--新的装备or在线礼包
+		--log("8")
 		--[[
 		if rgbbj("附近下") then
 			if ocr(126,2,281,35,"我们与你",1) then

@@ -376,10 +376,11 @@ static NSData *WSTextFrame(NSString *text) {
         [self handleStop:clientFd];
     } else if ([path hasPrefix:@"/task"]) {
         // 冷启动控制接口: /task?cmd=start|stop|pause|resume  (独立端口 8686)
-        [self handleTask:clientFd path:path];
+        // 注意: 顶部已剥离 query, 需把 query 原样传给处理器解析 cmd
+        [self handleTask:clientFd query:query];
     } else if ([path hasPrefix:@"/float"]) {
         // 冷启动悬浮球接口: /float?x=0|1&y=<物理像素>, y<0 隐藏
-        [self handleFloat:clientFd path:path];
+        [self handleFloat:clientFd query:query];
     } else if ([path isEqualToString:@"/api/upload"] && [method isEqualToString:@"POST"]) {
         [self handleUpload:clientFd body:body];
     } else if ([path isEqualToString:@"/api/key"] && [method isEqualToString:@"POST"]) {
@@ -877,8 +878,8 @@ static NSData *WSTextFrame(NSString *text) {
 
 // GET /task?cmd=start|stop|pause|resume
 // 可选: &file=main.lua 指定启动的脚本文件名 (默认 main.lua)
-- (void)handleTask:(int)clientFd path:(NSString *)path {
-    NSDictionary *params = [self queryParamsFromPath:path];
+- (void)handleTask:(int)clientFd query:(NSString *)query {
+    NSDictionary *params = [self parseQueryParams:query ?: @""];
     NSString *cmd = params[@"cmd"];
     if (cmd.length == 0) {
         [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 cmd 参数"]];
@@ -931,8 +932,8 @@ static NSData *WSTextFrame(NSString *text) {
 
 // GET /float?x=0|1&y=<物理像素垂直位置>
 // x=0 靠左, x=1 靠右; y<0 表示把悬浮球移到屏幕外隐藏
-- (void)handleFloat:(int)clientFd path:(NSString *)path {
-    NSDictionary *params = [self queryParamsFromPath:path];
+- (void)handleFloat:(int)clientFd query:(NSString *)query {
+    NSDictionary *params = [self parseQueryParams:query ?: @""];
     NSInteger side = [params[@"x"] integerValue];
     CGFloat yPx = [params[@"y"] doubleValue];
     [[TSHUDWindow shared] moveBallToSide:side verticalPx:yPx];
