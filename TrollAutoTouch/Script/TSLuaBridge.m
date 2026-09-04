@@ -398,6 +398,18 @@ static void tsRotateOffsets(NSMutableArray<NSDictionary *> *offsets, NSInteger f
         offsets[i] = @{@"x": @(nx), @"y": @(ny), @"color": o[@"color"]};
     }
 }
+// 视觉扫描方向(用户传入的 dir, 按脚本坐标系: 0=左上起/1=右上起/2=左下起/3=右下起)
+// -> 竖屏 buffer 扫描方向(TSColorFinder direction)。
+// rect/偏移点都旋转到了竖屏 buffer, 若 dir 不旋转, 横屏(init 1/2)下扫描起始角会与脚本
+// 视觉方向错位 90°。注意 90° 旋转含行列互换, 本映射保证"起始角"与脚本坐标系一致
+// (扫描轨迹仍按 buffer 行主序, 与竖屏非严格逐格等价, 对"找第一个"用法起始角对了即够)。
+//   竖屏(0): 恒等;  home右(1): {0,1,2,3}->{1,3,0,2};  home左(2): {0,1,2,3}->{2,0,3,1}
+static int tsMapVisualDirToBufferDir(int dir, NSInteger orientation) {
+    if (orientation == 0 || dir < 0 || dir > 3) return dir;
+    static const int homeRight[] = {1, 3, 0, 2};   // home 在右(1)
+    static const int homeLeft[]  = {2, 0, 3, 1};   // home 在左(2)
+    return (orientation == 1) ? homeRight[dir] : homeLeft[dir];
+}
 // buffer(竖屏物理方向, 像素) -> 脚本坐标系(像素): findColor/findColors/findImage/OCR 返回值用,
 // 否则 init(1) 下拿到的是截屏缓冲坐标, 直接 click 会二次错位。
 static CGPoint tsBufferToScriptPoint(CGPoint p) {
@@ -845,7 +857,8 @@ static int l_screen_findColor(lua_State *L) {
 ///     colorsStr 颜色模板字符串: "主色,dx,dy,颜色,dx,dy,颜色,..." 主色在前,
 ///     之后每 3 项一组 {dx, dy, color} 为偏移点; 颜色支持 "RRGGBB-偏色" 后缀(逐通道容差)
 ///     匹配为 AutoGo 逐通道偏色判定: |R1-R2|<=tolR && |G1-G2|<=tolG && |B1-B2|<=tolB
-///     x2/y2 为 0 表示使用屏幕最大宽高; dir 为扫描方向(0~3)
+///     x2/y2 为 0 表示使用屏幕最大宽高; dir 为脚本坐标系扫描方向(0~3, 0=左上起),
+//     引擎内部自动按 screen.init 方向映射到竖屏 buffer, 横屏下起始角语义不变
 static int l_screen_findColors(lua_State *L) {
     // @autoreleasepool: 见 l_screen_findColor —— 挂机脚本每 100ms 调用的
     // 高频找色必须每次 drain, 否则临时对象在 GCD block 的池里无限累积。
@@ -906,6 +919,7 @@ static int l_screen_findColors(lua_State *L) {
 
     rect = tsScriptToActualRect(rect);   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     tsRotateOffsets(offsets, s_scriptOrientation);  // 偏移点同步旋转, 否则横屏下方向错位
+    dir = tsMapVisualDirToBufferDir(dir, s_scriptOrientation);  // 起始角同步旋转, 否则横屏下 dir 与脚本视觉方向错位
     uint8_t *px = NULL; int w = 0, h = 0;
     if (!grabScreen(&px, &w, &h)) {
         NSString *err = [TSScreenCapture shared].lastError;
