@@ -1,0 +1,5 @@
+Non-fat file: build/Payload/TrollAutoTouch.app/TrollAutoTouch is architecture: arm64
+build/Payload/TrollAutoTouch.app/TrollAutoTouch: Mach-O 64-bit executable arm64
+--- load commands ---
+            cmd LC_DYLD_INFO_ONLY
+--- entitlements (ldid -e) ---
