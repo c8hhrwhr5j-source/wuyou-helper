@@ -452,7 +452,11 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     Boolean range, touch;
     switch (phase) {
         case TSTouchPhaseBegan:
-            eventMask = kIOHIDDigitizerEventTouch;  // 2
+            // ZXTouch generateChildEventTouchDown 同款: 按下掩码 = Range|Touch (0x3)。
+            // 缺少 Range(1<<0) 位时系统不认为手指已进入"在屏"连续流, 导致后续
+            // Position 型 move 事件无法关联拖动, 表现为 swipe 只有按下/抬起、
+            // 效果近似"在终点位置点了一下"。tap 不受影响(无需中间 move)。
+            eventMask = kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch;  // 3
             range = true; touch = true;
             break;
         case TSTouchPhaseMoved:

@@ -776,7 +776,7 @@ touchUp(1, 280, 380)
 ### 5.3 滑动 `swipe`
 
 ```lua
-swipe(x1, y1, x2, y2)                -- 默认 duration=0.3s, steps=20
+swipe(x1, y1, x2, y2)                -- 默认 duration=300ms，步数按 60Hz 自动计算
 swipe(x1, y1, x2, y2, 500)          -- 耗时 500ms
 swipe(160, 300, 160, 100, 500)      -- 向上滑 500ms
 swipe(100, 200, 200, 200, 200, 10)  -- 向右滑 200ms，10 步采样
@@ -785,8 +785,8 @@ swipe(100, 200, 200, 200, 200, 10)  -- 向右滑 200ms，10 步采样
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `x1, y1, x2, y2` | number | 必填 | 起点 / 终点 |
-| `duration` | number | `0.3` | 时长（秒） |
-| `steps` | number | `20` | 采样步数 |
+| `duration` | number | `300` | 时长（毫秒），与 DSL `swipe`、原版 TouchScript 一致 |
+| `steps` | number | `自动` | 采样步数；省略时按 `时长(秒)×60` 自动计算（≈60Hz） |
 | `pressure` | number | `1.0` | 压力值 |
 | `radius` | number | `0` | 触摸半径 |
 

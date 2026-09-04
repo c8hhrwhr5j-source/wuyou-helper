@@ -1175,10 +1175,21 @@ static int l_touch_swipe(lua_State *L) {
     CGFloat y1 = (CGFloat)luaL_checknumber(L, 2);
     CGFloat x2 = (CGFloat)luaL_checknumber(L, 3);
     CGFloat y2 = (CGFloat)luaL_checknumber(L, 4);
-    NSTimeInterval dur = (NSTimeInterval)luaL_optnumber(L, 5, 0.3);
-    NSInteger steps = (NSInteger)luaL_optinteger(L, 6, 20);
+    // duration 单位: 毫秒 (与 DSL 引擎 cmdSwipe / 原版 TouchScript / demo.lua 一致),
+    // 默认 300ms。此前误按"秒"处理且步数固定 20, 传 1000 会被当作 1000 秒, 完全失真。
+    NSTimeInterval durMS = (NSTimeInterval)luaL_optnumber(L, 5, 300);
+    NSInteger steps = (NSInteger)luaL_optinteger(L, 6, 0);
     CGFloat pressure = (CGFloat)luaL_optnumber(L, 7, 1.0);
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 8, 0);
+    NSTimeInterval dur = durMS / 1000.0;
+    if (dur <= 0) dur = 0.3;
+    // 未显式指定步数时按 60Hz 采样(同 DSL 引擎 cmdSwipe: MAX(2, dur*60)),
+    // 使每步间隔≈16.7ms, 贴近真实手指; 固定 20 步对长滑动过粗(每步跳几十像素)。
+    if (steps < 2) steps = MAX(2, (NSInteger)(dur * 60.0));
+    uint64_t sid = [[TSHIDEventTouch shared] senderID];
+    lua_log([NSString stringWithFormat:@"[触摸] swipe (%.0f,%.0f) -> (%.0f,%.0f), %.0fms, %ld 步%@",
+             x1, y1, x2, y2, durMS, (long)steps,
+             (sid == 0 ? @" [警告: senderID 未就绪, 请先在设备上手动触摸一次屏幕再运行]" : @"")]);
     CGFloat sc = touchScale();
     CGPoint sp1 = tsScriptToActualPoint(CGPointMake(x1, y1));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
     CGPoint sp2 = tsScriptToActualPoint(CGPointMake(x2, y2));
