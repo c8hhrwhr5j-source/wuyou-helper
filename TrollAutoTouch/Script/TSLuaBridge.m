@@ -444,6 +444,50 @@ static UIImage *tsRotateToScriptOrientation(UIImage *img) {
     return out;
 }
 
+// 按字体颜色做 OCR 掩膜: 命中目标色(±逐通道容差)的像素涂黑当作文字,
+// 其余像素涂白当作背景。经此处理后 Vision 只输出该色系的文字。
+// 图像尺寸保持不变(与截屏同一像素格式 RGBA), 返回坐标/区域语义零影响。
+static UIImage *tsColorMaskImage(UIImage *img, int color,
+                                 uint8_t tolR, uint8_t tolG, uint8_t tolB) {
+    if (!img) return nil;
+    CGImageRef cg = img.CGImage;
+    if (!cg) return nil;
+    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+    if (w == 0 || h == 0) return nil;
+
+    uint8_t *px = malloc(w * h * 4);
+    if (!px) return nil;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, w * 4, cs,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(px); return nil; }
+    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
+
+    int tR = (color >> 16) & 0xFF, tG = (color >> 8) & 0xFF, tB = color & 0xFF;
+    uint8_t *p = px;
+    for (size_t y = 0; y < h; y++) {
+        for (size_t x = 0; x < w; x++, p += 4) {
+            int dr = p[0] - tR; if (dr < 0) dr = -dr;
+            int dg = p[1] - tG; if (dg < 0) dg = -dg;
+            int db = p[2] - tB; if (db < 0) db = -db;
+            if (dr <= tolR && dg <= tolG && db <= tolB) {
+                p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 255;      // 目标色 → 文字(黑)
+            } else {
+                p[0] = 255; p[1] = 255; p[2] = 255; p[3] = 255; // 其它 → 背景(白)
+            }
+        }
+    }
+
+    CGImageRef outCG = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    free(px);
+    if (!outCG) return nil;
+    UIImage *out = [UIImage imageWithCGImage:outCG];
+    CGImageRelease(outCG);
+    return out;
+}
+
 #pragma mark - Lua 工具
 
 static int l_global_print(lua_State *L) {
@@ -1819,8 +1863,11 @@ static void pushOCRResults(lua_State *L, NSArray<TSOCRResult *> *results, BOOL s
     }
 }
 
-/// screen.paddleOcr([x1, y1, x2, y2]) → 文本数组
+/// screen.paddleOcr([x1, y1, x2, y2][, color]) → 文本数组
 /// 全屏/区域 OCR, 默认中英文, 返回 {string, x, y, w, h, confidence} 列表
+/// color(可选, 第5参): 按字体颜色过滤后再识别, 只输出该色系的文字。
+///   格式 "RRGGBB" / "#RRGGBB" / "0xRRGGBB" / "RRGGBB-偏色"(6位hex, 每通道容差, 同找色),
+///   例: paddleOcr(0,0,540,300, "563A24-303030") → 只识别接近 0x563A24±0x303030 的文字。
 static int l_screen_paddleOcr(lua_State *L) {
     // @autoreleasepool: 同 findText, OCR 每次创建全屏 UIImage + 识别结果,
     // 每次 drain 防止挂机脚本内存累积
@@ -1832,6 +1879,14 @@ static int l_screen_paddleOcr(lua_State *L) {
         CGFloat x2 = (CGFloat)luaL_checknumber(L, 3);
         CGFloat y2 = (CGFloat)luaL_checknumber(L, 4);
         region = CGRectMake(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    // 第5参: 可选颜色规格(带偏色), 省略 = 普通 OCR, 完全向后兼容
+    NSString *colorSpec = nil;
+    if (lua_gettop(L) >= 5 && lua_type(L, 5) == LUA_TSTRING) {
+        size_t clen = 0;
+        const char *cs = luaL_checklstring(L, 5, &clen);
+        colorSpec = [[NSString alloc] initWithBytes:cs length:clen encoding:NSUTF8StringEncoding];
     }
 
     UIImage *img = [[TSScreenCapture shared] captureImage];
@@ -1846,6 +1901,19 @@ static int l_screen_paddleOcr(lua_State *L) {
     } else if (!CGRectIsEmpty(region)) {
         // 竖屏: 脚本坐标 == buffer 坐标, 恒等变换。
         region = tsScriptToActualRect(region);
+    }
+
+    if (colorSpec.length > 0) {
+        if (!tsIsHexColor(colorSpec)) {
+            lua_log([NSString stringWithFormat:@"[OCR] 非法颜色规格: %@ (应为 RRGGBB 或 RRGGBB-偏色)", colorSpec]);
+            lua_pushnil(L);
+            return 1;
+        }
+        int color = 0; uint8_t tR = 0, tG = 0, tB = 0;
+        // sim=1 → 无偏色后缀时容差为 0(精确色), 有偏色时容差 = 偏色原值(与找色模块语义一致)
+        tsParseColorSpec(colorSpec, 1.0, &color, &tR, &tG, &tB);
+        img = tsColorMaskImage(img, color, tR, tG, tB);
+        if (!img) { lua_pushnil(L); return 1; }
     }
 
     NSArray<TSOCRResult *> *results = [[TSOCREngine shared] recognize:img inRegion:region];

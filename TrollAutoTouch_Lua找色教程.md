@@ -428,8 +428,9 @@ if ok then logStr("加载完成!") end
 #### 调用形式
 
 ```lua
-screen.paddleOcr()                     -- 全屏识别
-screen.paddleOcr(x1, y1, x2, y2)       -- 区域识别
+screen.paddleOcr()                                  -- 全屏识别
+screen.paddleOcr(x1, y1, x2, y2)                    -- 区域识别
+screen.paddleOcr(x1, y1, x2, y2, "563A24-303030")   -- 区域识别, 只识别指定颜色的文字
 ```
 
 > ⚠️ **参数是区域左上角 + 右下角（对角点），不是"宽高"！**
@@ -442,6 +443,21 @@ screen.paddleOcr(x1, y1, x2, y2)       -- 区域识别
 |---|---|---|
 | `x1, y1` | number | 可选，区域左上角，默认 `0, 0` |
 | `x2, y2` | number | 可选，区域右下角，默认屏幕右下角 |
+| `color` | string | 可选（第 5 参），按**字体颜色**过滤后再识别，只输出该色系的文字。省略 = 普通 OCR（全部颜色） |
+
+#### 颜色过滤 `color`（可选）
+
+- 格式与找色一致：`"RRGGBB"` / `"#RRGGBB"` / `"0xRRGGBB"` / `"RRGGBB-偏色"`，偏色为 6 位 hex（每通道独立容差，同 `findColor`）。
+- 识别前会把截屏里**不在该颜色±容差范围内**的像素涂白丢弃，只把目标色像素当文字喂给 OCR，因此返回结果里不会混入其它颜色的文字。
+- 适合"同屏多色文字只要一种色"的场景（如只认黄色任务文字、红色红点数字），也能顺带滤掉水印/灰色置灰按钮的干扰。
+
+```lua
+-- 只识别接近 0x563A24 ± 0x303030（每通道 ±0x30=48）的文字
+local result = screen.paddleOcr(0, 0, 540, 300, "563A24-303030")
+for _, v in ipairs(result) do
+    print(v.string, v.x, v.y)
+end
+```
 
 #### 返回值
 
@@ -1859,7 +1875,7 @@ end
 | `getColor(x, y)` | 取色 → 0xRRGGBB |
 | `screen.getColorRGB(x, y)` | 取色 RGB 分量 → r, g, b（0~255） |
 | `findText(text)` | OCR 找文字 → x,y / nil |
-| `screen.paddleOcr([x1,y1,x2,y2])` | 屏幕 OCR（默认中英文） → 文本数组 |
+| `screen.paddleOcr([x1,y1,x2,y2][, color])` | 屏幕 OCR（默认中英文） → 文本数组；`color` 为可选颜色过滤 `"RRGGBB-偏色"` |
 | `screen.visionOcr([lang][,x1,y1,x2,y2])` | 屏幕 OCR（多语言） → 文本数组 |
 
 ### 截屏与缓存
