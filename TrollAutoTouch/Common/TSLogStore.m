@@ -38,6 +38,8 @@ static NSDateFormatter *LogTimeFormatter(void) {
     NSMutableArray<NSString *> *_debugLogs;        // 脚本主动日志(debug.log 来源)
     NSMutableArray<NSString *> *_filePending;      // 待写 touch.log 的日志行(锁保护)
     NSMutableArray<NSString *> *_debugPending;     // 待写 debug.log 的日志行(锁保护)
+    NSInteger _touchSeqTotal;                      // touch.log 来源已分配行号总数(单调递增)
+    NSInteger _debugSeqTotal;                      // debug.log 来源已分配行号总数(单调递增)
 }
 
 + (instancetype)shared {
@@ -66,11 +68,16 @@ static NSDateFormatter *LogTimeFormatter(void) {
 /// 两个日志文件分别加载到对应来源数组, 并合并进 _logs。
 - (void)_loadHistoryFromFile {
     [TSPaths ensureDirectoriesExist];
-    [self _loadFile:self.logFilePath into:_touchLogs];
-    [self _loadFile:self.debugLogFilePath into:_debugLogs];
+    [self _loadFile:self.logFilePath into:_touchLogs seq:&_touchSeqTotal];
+    [self _loadFile:self.debugLogFilePath into:_debugLogs seq:&_debugSeqTotal];
 }
 
-- (void)_loadFile:(NSString *)path into:(NSMutableArray<NSString *> *)source {
+/// 从磁盘文件加载历史日志到内存来源数组，并按行顺序分配行号(0 起递增)。
+/// 行号按"读到的总行数"累计(超上限淘汰头部后行号不回收)，
+/// 因此数组第 0 行对应行号 = seqTotal - 数组当前行数。
+- (void)_loadFile:(NSString *)path
+             into:(NSMutableArray<NSString *> *)source
+              seq:(NSInteger *)seqPtr {
     NSString *content = [NSString stringWithContentsOfFile:path
                                                   encoding:NSUTF8StringEncoding
                                                      error:nil];
@@ -81,6 +88,7 @@ static NSDateFormatter *LogTimeFormatter(void) {
             if (line.length == 0) continue;
             [source addObject:line];
             [_logs addObject:line];
+            (*seqPtr) += 1;   // 每读入一行分配一个新行号
             if (source.count > kMaxLogCount) {
                 [source removeObjectsInRange:NSMakeRange(0, source.count - kMaxLogCount)];
             }
@@ -115,6 +123,54 @@ static NSDateFormatter *LogTimeFormatter(void) {
     }
 }
 
+- (NSInteger)logSeqTotalForFile:(NSString *)fileName {
+    @synchronized (self) {
+        if ([fileName isEqualToString:@"debug.log"]) return _debugSeqTotal;
+        return _touchSeqTotal;
+    }
+}
+
+// 行号游标增量查询(供 /api/log)：
+// 内存数组保留 [seqStart, seqTotal) 行号区间内的日志，seqStart = seqTotal - 行数。
+// 行号不在数组区间(被淘汰/清空/客户端超前)时 cleared=YES 并返回全量，由客户端替换显示。
+- (NSArray<NSString *> *)logsForFile:(NSString *)fileName
+                              after:(NSInteger)after
+                            cleared:(BOOL *)cleared
+                         nextIndex:(NSInteger *)nextIndex {
+    @synchronized (self) {
+        BOOL isDebug = [fileName isEqualToString:@"debug.log"];
+        NSMutableArray<NSString *> *source = isDebug ? _debugLogs : _touchLogs;
+        NSInteger seqTotal = isDebug ? _debugSeqTotal : _touchSeqTotal;
+        NSInteger count = (NSInteger)source.count;
+        NSInteger seqStart = seqTotal - count;   // 数组第 0 行对应的行号
+        if (cleared) *cleared = NO;
+        if (nextIndex) *nextIndex = seqTotal;
+
+        if (count == 0) {
+            // 空：日志被清空过(或从未产生)。客户端曾持有旧游标 → 标记 cleared。
+            if (cleared) *cleared = (after > 0);
+            return @[];
+        }
+        if (after > seqTotal) {
+            // 客户端行号超前：设备重启/清空后行号重新累计 → 返回全量校正
+            if (cleared) *cleared = YES;
+            return [source copy];
+        }
+        if (after == seqTotal) {
+            return @[];   // 客户端已是最新，无新增
+        }
+        if (after < seqStart) {
+            // 客户端游标行已被淘汰 → 全量替换，避免"下标/行号停在容量上限"后永不更新
+            if (cleared) *cleared = YES;
+            return [source copy];
+        }
+        // seqStart <= after < seqTotal: 返回 (after - seqStart) 起的新增行
+        NSInteger offset = after - seqStart;
+        return [source subarrayWithRange:NSMakeRange((NSUInteger)offset,
+                                                     (NSUInteger)(count - offset))];
+    }
+}
+
 // 默认入口: 程序自身产生的日志 → touch.log
 - (void)append:(NSString *)message {
     [self append:message toFile:@"touch.log"];
@@ -140,6 +196,11 @@ static NSDateFormatter *LogTimeFormatter(void) {
         }
         // 来源分离: debug.log → 脚本日志数组, 其余 → 程序自身日志数组
         NSMutableArray *sourceLogs = [fileName isEqualToString:@"debug.log"] ? _debugLogs : _touchLogs;
+        if (fileName.length > 0 && [fileName isEqualToString:@"debug.log"]) {
+            _debugSeqTotal += 1;   // 新日志获得行号 = 递增后的行号总数
+        } else {
+            _touchSeqTotal += 1;
+        }
         [sourceLogs addObject:line];
         if (sourceLogs.count > kMaxLogCount) {
             [sourceLogs removeObjectsInRange:NSMakeRange(0, sourceLogs.count - kMaxLogCount)];
@@ -163,6 +224,8 @@ static NSDateFormatter *LogTimeFormatter(void) {
         [_debugLogs removeAllObjects];
         [_filePending removeAllObjects];
         [_debugPending removeAllObjects];
+        _touchSeqTotal = 0;   // 行号随清空归零，客户端游标将失效(cleared)由全量替换校正
+        _debugSeqTotal = 0;
         [[NSFileManager defaultManager] removeItemAtPath:self.logFilePath error:nil];
         [[NSFileManager defaultManager] removeItemAtPath:self.debugLogFilePath error:nil];
     }

@@ -26,6 +26,23 @@ NS_ASSUME_NONNULL_BEGIN
 /// 供设置页"查看脚本日志"/"查看系统日志"按来源分别展示。
 - (NSArray<NSString *> *)logsForFile:(NSString *)fileName;
 
+/// 某来源日志的"行号游标体系"最新值(单调递增)。
+/// 每来源每条日志获得一个自增行号(0 起)；内存只保留最新 2000 行，
+/// 更早的行被淘汰但行号继续增长，故以"行号"而非"数组下标"做增量游标，
+/// 可避免日志满 2000 条后下标停在 2000、新日志永远无法被增量拉取的 bug。
+- (NSInteger)logSeqTotalForFile:(NSString *)fileName;
+
+/// 增量拉取某来源日志（供 HTTP /api/log 使用）：
+///   after     客户端已知的最新行号(上次返回的 nextIndex)，首次传 0
+///   cleared   出参；YES = 游标行已被淘汰 / 日志被清空 / 客户端行号超前，
+///             此时返回全量内存日志，客户端应整体替换显示
+///   nextIndex 出参；该来源当前最新行号，下次请求应作为 after 传回
+///   @return   after 之后新增的行（cleared 时返回全量；无新增返回空数组）
+- (NSArray<NSString *> *)logsForFile:(NSString *)fileName
+                              after:(NSInteger)after
+                            cleared:(BOOL *)cleared
+                         nextIndex:(NSInteger *)nextIndex;
+
 /// 程序自身日志文件完整路径 /var/mobile/touch/log/touch.log
 @property (nonatomic, readonly) NSString *logFilePath;
 
