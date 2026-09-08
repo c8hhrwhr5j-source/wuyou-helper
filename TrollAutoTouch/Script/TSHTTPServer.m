@@ -403,6 +403,9 @@ static NSData *WSTextFrame(NSString *text) {
         [self handleKey:clientFd body:body];
     } else if ([path isEqualToString:@"/api/text"] && [method isEqualToString:@"POST"]) {
         [self handleText:clientFd body:body];
+    } else if ([path isEqualToString:@"/api/data"] && [method isEqualToString:@"GET"]) {
+        // 中控读取设备数据文件: /api/data → res/data.txt (账号数据 JSON 数组)
+        [self serveDataFile:clientFd];
     } else if ([path hasPrefix:@"/api/log"]) {
         // 顶部已统一把 query 从 path 剥离并存入 query 变量；
         // 此前误把纯 path(无 query) 传给 serveLog，导致 file/after 永远解析为空、
@@ -714,6 +717,58 @@ static NSData *WSTextFrame(NSString *text) {
         @"nextIndex": @(count),
         @"cleared": @(cleared),
     }]];
+}
+
+// API: GET /api/data
+// 返回设备 res 目录下的 data.txt（多账号数据 JSON 数组），供中控/工具读取汇总。
+// 只读不写；文件缺失/空/损坏均不破坏原文件，只返回对应 error 标记。
+// 响应:
+//   ok      请求本身是否成功(恒为 YES)
+//   exists  data.txt 是否存在
+//   records JSON 数组, 数组元素为账号对象(如 {JianChaXiaoQu,JianChaJiaoSeMingZi,...})
+//   count   记录数
+//   error   nil / "notfound" / "empty" / "parseerror" / "notarray"
+- (void)serveDataFile:(int)clientFd {
+    NSString *path = [TSPaths pathForRes:@"data.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableDictionary *resp = [@{@"ok": @YES,
+                                   @"file": @"data.txt",
+                                   @"path": path,
+                                   @"exists": @NO,
+                                   @"records": @[],
+                                   @"count": @0,
+                                   @"error": @"notfound"} mutableCopy];
+    if (![fm fileExistsAtPath:path]) {
+        [self sendAndClose:clientFd data:[self jsonResponse:resp]];
+        return;
+    }
+    NSData *raw = [NSData dataWithContentsOfFile:path];
+    NSString *text = [[NSString alloc] initWithData:raw encoding:NSUTF8StringEncoding];
+    if (text.length == 0) {
+        resp[@"exists"] = @YES;
+        resp[@"error"] = @"empty";
+        [self sendAndClose:clientFd data:[self jsonResponse:resp]];
+        return;
+    }
+    NSError *err = nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:raw options:0 error:&err];
+    if (err) {
+        resp[@"exists"] = @YES;
+        resp[@"error"] = @"parseerror";
+        [self sendAndClose:clientFd data:[self jsonResponse:resp]];
+        return;
+    }
+    if (![obj isKindOfClass:[NSArray class]]) {
+        resp[@"exists"] = @YES;
+        resp[@"error"] = @"notarray";
+        [self sendAndClose:clientFd data:[self jsonResponse:resp]];
+        return;
+    }
+    resp[@"exists"] = @YES;
+    resp[@"records"] = obj;
+    resp[@"count"] = @([obj count]);
+    resp[@"error"] = [NSNull null];
+    [self sendAndClose:clientFd data:[self jsonResponse:resp]];
 }
 
 - (void)serveScreenshot:(int)clientFd query:(NSString *)query {

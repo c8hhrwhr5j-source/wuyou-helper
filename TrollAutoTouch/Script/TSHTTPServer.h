@@ -22,6 +22,7 @@
 //    GET  /float?x=0|1&y=<物理像素>           → 移动悬浮球 (x=0 左/1 右, y<0 隐藏)
 //    GET  /api/device          → 设备信息
 //    GET  /api/log?file=debug.log&after=N → 增量读取设备日志
+//    GET  /api/data            → 读取 res/data.txt (账号数据 JSON 数组, 供中控汇总展示)
 //    WS   /ws                  → WebSocket 双向控制通道
 //
 
