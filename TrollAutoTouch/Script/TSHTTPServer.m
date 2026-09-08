@@ -1033,8 +1033,7 @@ static NSData *WSTextFrame(NSString *text) {
     }
     NSString *filename = json[@"filename"];
     NSString *content = json[@"content"];
-    // 安全: 只允许保存到 lua 根目录, 禁止子路径/路径穿越
-    if (filename.length == 0 || [filename containsString:@"/"] || [filename containsString:@".."]) {
+    if (filename.length == 0 || [filename containsString:@".."]) {
         [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"filename 无效"]];
         return;
     }
@@ -1042,10 +1041,25 @@ static NSData *WSTextFrame(NSString *text) {
         [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 content"]];
         return;
     }
+    // 解析目标目录与 basename: 默认写 lua 根目录, 允许 "res/" 前缀写入 res/ (如 res/config.txt)
+    NSString *targetPath = nil;
+    if ([filename hasPrefix:@"res/"]) {
+        NSString *sub = [filename substringFromIndex:4];
+        if (sub.length == 0 || [sub containsString:@"/"]) {
+            [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"filename 无效"]];
+            return;
+        }
+        targetPath = [TSPaths pathForRes:sub];
+    } else {
+        if ([filename containsString:@"/"]) {
+            [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"filename 无效"]];
+            return;
+        }
+        targetPath = [TSPaths pathForLua:filename];
+    }
     [TSPaths ensureDirectoriesExist];
-    NSString *targetPath = [TSPaths pathForLua:filename];
     BOOL ok = [content writeToFile:targetPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    NSLog(@"[HTTP] 上传脚本: %@ → %@ (%@)", filename, targetPath, ok ? @"成功" : @"失败");
+    NSLog(@"[HTTP] 上传文件: %@ → %@ (%@)", filename, targetPath, ok ? @"成功" : @"失败");
     [self sendAndClose:clientFd data:[self jsonResponse:@{@"ok": @(ok), @"path": targetPath}]];
 }
 
