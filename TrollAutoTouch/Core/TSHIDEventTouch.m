@@ -16,11 +16,12 @@
 //    的真实原因是当时 senderID 未就绪 / entitlements 不齐，而非机制本身。
 //
 //  当前架构（本类）双通道, 依次尝试:
-//    1. [第一通道] app 进程内 IOHID 直发 (ZXTouch 同款: parent digitizer +
-//       child finger 事件 + IOHIDEventSetSenderID + IOHIDEventSystemClientDispatchEvent)。
+//    1. [第一通道] app 进程内 IOHID 直发: parent digitizer(Hand 容器) +
+//       child finger(18 参 WithQuality) + IOHIDEventSetSenderID +
+//       IOHIDEventSystemClientDispatchEvent。
 //       需要 entitlements: com.apple.backboard.client +
 //       com.apple.private.hid.client.event-dispatch (TrollAutoTouch.entitlements 已含)
-//       以及有效 senderID (默认固定触屏值 0x8000000800, 见 _setupSenderID)。
+//       以及有效 senderID (固定 0x8000000817319371, 见 _setupSenderID)。
 //    2. [兜底] 本应用点击 fallback (借鉴 无忧辅助触控 TouchSimulation 三重策略):
 //       直发不可用时, 不再丢弃点击:
 //         a. AX (Accessibility): AXUIElementCopyElementAtPosition + AXPress,
@@ -31,15 +32,22 @@
 //   已确认在 iOS 15.5+ TrollStore 2.x 下因无法获得 platform 身份而不可行,
 //   相关代码已整体移除, 不再尝试注入。)
 //
-//  senderID 策略 (2026-09-11 修正 "点击不生效 / 需手动触摸屏幕 / 重启多次无效"):
-//    1. 默认使用固定触屏 senderID 0x8000000800 (原版 HUDServices / ZXTouch 同款伪装值):
-//       立即可以直发, **不需要任何真实手指触摸**, 设备重启后依然有效;
-//    2. 若历史上监听到过"真实 senderID"并已持久化, 则优先复用真实值;
-//    3. 启动时仍挂一个短暂监听做自动纠错: 系统一旦产生 digitizer 事件, 若真实值与
-//       当前使用值不同(固定值在本机被拒 / 保存值过期), 立即覆盖并重新持久化, 随后释放监听。
-//  旧实现"设备重启(uptime 回退)即丢弃保存值、重新等真实触摸"是点击失效根因:
-//  senderID 是触屏服务的稳定标识, 重启不变; 而脚本挂机时无人触摸屏幕, 该路径永远
-//  拿不到值 → 直发失效 → 落到只对本 app 有效的 AX/进程内兜底 → 点击无反应。
+//  ===== 2026-09-11 定案: "点击不生效"的两个根因 =====
+//  (反汇编原版 TrollAutoScript 2.3.6 的 HUDServices arm64 二进制后逐字段对照得到)
+//
+//  根因 1 — 事件构造不完整(旧实现是网上流传的 ZXTouch 简版, 与原版有多处实质差异):
+//     父事件 index 99(应 0)、子事件 identity 3(应 2)、子事件用 13 参简版(原版 18 参
+//     WithQuality)、掩码缺 0x800/0x40 位(原版 down=0x803/move=0x844/up=0x803)、
+//     父事件 0xb0007 被写死 0x23(应 0x863/0x844/0x823)、抬指时仍报 range/touch=1
+//     (系统状态机残留幽灵手指)、setter 没带 options 0xF0000000。
+//     详见 _dispatchIOHIDTouchAtPoint: 的逐条注释。
+//
+//  根因 2 — senderID 策略跑偏:
+//     原版二进制里连 IOHIDEventGetSenderID 符号都没有 —— 它**从不**读取本机真实
+//     senderID, 而是把 0x8000000817319371 / (子事件)+1 写死。旧实现却优先用
+//     "枚举到的 digitizer 服务 registryID"(0x10000069B), 还挂了监听把真实触摸值
+//     覆盖回直发值并持久化。日志显示 0x10000069B 直发毫无反应, 覆盖后连固定值也丢了。
+//     现在固定值恒为直发值, 监听只做记录(见 TSHIDSenderIDCallback)。
 //
 
 #import "TSHIDEventTouch.h"
@@ -62,8 +70,21 @@ typedef uint32_t IOHIDEventType;
 #define kIOHIDDigitizerEventRange      (1 << 0)
 #define kIOHIDDigitizerEventTouch      (1 << 1)
 #define kIOHIDDigitizerEventPosition   (1 << 2)
-// 注: identity 位 (1<<5=0x20) 未单列宏, 它含于直发时父事件的掩码 0xb0007=0x23
-//     (0x23 = 1|2|32), 见 _dispatchIOHIDTouchAtPoint:。
+#define kIOHIDDigitizerEventIdentity   (1 << 5)   // 0x20
+#define kIOHIDDigitizerEventAttribute  (1 << 6)   // 0x40
+// 位 11 (0x800): 逆向原版 HUDServices 发现**每个** digitizer 掩码都恒带该位
+// (父/子、down/move/up 全部包含), 旧实现(ZXTouch 简版)完全没有这一位。
+// 私有头里 0x800 对应 kIOHIDDigitizerEventFromCorner, 这里按位号命名以免误判语义。
+#define kIOHIDDigitizerEventBit11      (1 << 11)  // 0x800
+
+// 原版逐相位使用的掩码 (逆向 2.3.6 region@0x1000617b4 / 0x10020e170 得到, 逐位还原):
+//   子事件(finger): down = 0x803, move = 0x844, up = 0x803
+//   父事件(0xb0007): down = 0x863(= 0x60|0x823), move = 0x844, up = 0x823
+#define kTSMaskChildDown  (kIOHIDDigitizerEventBit11 | kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch)                                  // 0x803
+#define kTSMaskChildMove  (kIOHIDDigitizerEventBit11 | kIOHIDDigitizerEventAttribute | kIOHIDDigitizerEventPosition)                           // 0x844
+#define kTSMaskParentDown (kIOHIDDigitizerEventAttribute | kIOHIDDigitizerEventIdentity | kTSMaskChildDown)                                    // 0x863
+#define kTSMaskParentMove kTSMaskChildMove                                                                                                     // 0x844
+#define kTSMaskParentUp   (kIOHIDDigitizerEventBit11 | kIOHIDDigitizerEventIdentity | kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch)   // 0x823
 
 // IOHIDDigitizerTransducerType (iOS 13+ 私有头 IOHIDEventTypes.h)
 #define kIOHIDDigitizerTransducerTypeFinger   2   // 单根手指
@@ -75,7 +96,37 @@ static NSString * const kSenderIDDefaultsKey        = @"TSHIDSenderID";
 // 默认(伪装)触屏 senderID —— 原版 TrollAutoScript HUDServices / ZXTouch 同款固定值。
 // 伪装成系统触摸屏设备使 backboardd 接受直发事件; 因为它是常量, 直发链路不依赖
 // 任何真实手指触摸, 也不受设备重启影响 (这是原版"随时可点"的根本原因)。
-static const uint64_t kTSHIDSenderIDDefault = 0x8000000800ULL;
+//
+// 2026-09-11 逆向确认: 原版 HUDServices 2.3.6 **从不**读取本机真实 senderID
+// (二进制里连 IOHIDEventGetSenderID 这个符号都没导入), 而是把这两个常量直接写死:
+//   父事件(Hand 容器)  = 0x8000000817319371
+//   子事件(手指)       = 父值 + 1 = 0x8000000817319372
+// 也就是说"监听真实触摸值/枚举服务 registryID"这条路线在原版里根本不存在,
+// 真正被 backboardd 受理的是这对固定值。此前用 0x8000000800 或本机枚举到的
+// registryID(0x10000069B) 直发均无反应, 与此一致。
+static const uint64_t kTSHIDSenderIDDefault      = 0x8000000817319371ULL;   // 原版父事件值
+static const uint64_t kTSHIDSenderIDChildOffset  = 1ULL;                   // 子事件 = 父值 + 1
+
+// 原版给所有 ...WithOptions 私有 setter / AppendEvent 传的第 4/3 个参数(常量)。
+// 逆向 region@0x10020e050 / 0x1000617xx 均为 `mov w3, #-0x10000000` (= 0xF0000000),
+// 是 Apple 私有注入路径使用的选项位; 直发被 backboardd 受理与否可能与此有关,
+// 因此逐字对齐原版, 不要图省事传 0。
+static const IOHIDEventOptionBits kTSHIDEventOptions = 0xF0000000u;
+
+// senderID 持久化: 必须用 NSNumber(整数) 而不是 double ——
+// 0x8000000817319371 需要 64 位有效位, double 只有 53 位, 存取会静默改变低位。
+// (旧版本用 setDouble: 写入, 这里兼容读取旧的 double 值。)
+static uint64_t TSHIDLoadSavedSenderID(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:kSenderIDDefaultsKey];
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v unsignedLongLongValue];
+    return 0;
+}
+
+static void TSHIDStoreSenderID(uint64_t v) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:@(v) forKey:kSenderIDDefaultsKey];
+    [ud synchronize];
+}
 
 // 保存值的合理性判断: 真实 senderID 是 64 位设备标识(常见 0x80000008xx / 0x1000000xx,
 // 量级 >= 2^32); 历史版本曾误把"开机 Unix 时间戳"(约 1.6e9~4.1e9)写进该键, 这里排除,
@@ -243,6 +294,15 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, IOHIDFloat value);
 extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
 
+// 私有字段写入 (带 options) —— 原版 HUDServices 实际使用的版本:
+//   IOHIDEventSetIntegerValueWithOptions(event, field, value, options)
+//   IOHIDEventSetFloatValueWithOptions(event, field, value, options)
+// 原版把 options 恒定为 0xF0000000 (见 kTSHIDEventOptions)。
+extern void IOHIDEventSetIntegerValueWithOptions(IOHIDEventRef event, uint32_t field,
+                                                 int value, IOHIDEventOptionBits options);
+extern void IOHIDEventSetFloatValueWithOptions(IOHIDEventRef event, uint32_t field,
+                                               IOHIDFloat value, IOHIDEventOptionBits options);
+
 // ---------- IOHIDEventField 数字位字段常量 (IOKit 私有头 IOHIDEventTypes.h) ----------
 // 位 20-31: 类别, 低 16 位: 字段序号。digitizer 类别 = 0x000b。
 #define kIOHIDEventFieldDigitizerX             0x000b0001
@@ -317,21 +377,21 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
         return;
     }
 
+    // 观察-only(2026-09-11 修正): 真实触摸的 senderID 只记录, **不再自动覆盖**生效值。
+    // 逆向原版确认: 原版 HUDServices 从不使用本机真实 registryID 直发, 而是把
+    // 0x8000000817319371 写死在代码里。历史实现"监听到真实值就覆盖并持久化"会把
+    // 原版已验证可用的固定值替换成直发无反应的 registryID(日志里的 0x10000069B),
+    // 这是"重启几次后 / 挂机中点击失效"的直接原因之一。
+    // 需要真实值时请用 touch.watch / touch.candidates 显式取用。
     if (sid != s_senderID) {
-        // 真实值与当前使用值不同(当前多为默认固定值, 或保存值已过期)
-        // → 真实值优先: 覆盖并持久化, 供下次启动直接复用。
-        s_senderID = sid;
-        s_senderIDSource = TSSenderIDSourceLive;
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setDouble:(double)sid forKey:kSenderIDDefaultsKey];
-        [ud synchronize];
-        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID: 0x%llX (已覆盖并持久化)", sid);
-        // 通知 Lua 桥接层，让"已获取 senderID"直接显示在脚本日志中
+        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID=0x%llX; 当前直发用 0x%llX, 保持不纠正(原版固定值优先)",
+                     sid, (unsigned long long)s_senderID);
+        // 仍是"拿到了真实 senderID"这一事实, 通知 Lua 桥接层做日志展示(不改变直发值)
         [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
                                                             object:nil
                                                           userInfo:@{@"senderID": @(sid)}];
     } else {
-        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID 0x%llX, 与当前使用值一致, 无需纠正", sid);
+        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID 0x%llX, 与当前直发值一致", sid);
     }
 
     // 已确认一次真实触摸值 → 监听使命完成, 释放监听 client(省掉每次系统触摸事件的回调检查)。
@@ -544,25 +604,29 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     return candidates.count > 0 ? [candidates[0][@"rid"] unsignedLongLongValue] : 0;
 }
 
-/// 候选列表: 优先用本机枚举到的 digitizer 服务; 枚举不到时退化为"保存值 + 固定伪装值"。
-/// 脚本可用它逐个试, 找出本机真正被受理的那一个(见 touch_selftest.lua)。
+/// 候选列表 (按"最可能可用"排序):
+///   1. 原版 HUDServices 写死的固定值 0x8000000817319371 —— 已知可用的首选;
+///   2. 保存值(历史显式选过的);
+///   3. 本机枚举到的 digitizer 服务 registryID(仅供参考/排查)。
+/// 脚本可用它逐个试(见 touch_selftest.lua)。
 - (NSArray<NSDictionary *> *)senderIDCandidates {
     if (self.digitizerServices.count == 0) {
         [self _probeSenderIDWithClient];   // 刷新一次(可能之前 client 还没建好)
     }
     NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+    // 1. 原版固定值永远排第一
+    [out addObject:@{@"value": @(kTSHIDSenderIDDefault), @"usage": @(-1),
+                     @"product": @"原版 HUDServices 固定值", @"transport": @""}];
+    // 2. 历史保存值
+    uint64_t saved = TSHIDLoadSavedSenderID();
+    if (saved != 0 && saved != kTSHIDSenderIDDefault) {
+        [out addObject:@{@"value": @(saved), @"usage": @(-1),
+                         @"product": @"保存值", @"transport": @""}];
+    }
+    // 3. 本机枚举到的 digitizer 服务
     for (NSDictionary *d in self.digitizerServices) {
         [out addObject:@{@"value": d[@"rid"] ?: @(0), @"usage": d[@"usage"] ?: @(-1),
                          @"product": d[@"product"] ?: @"", @"transport": d[@"transport"] ?: @""}];
-    }
-    if (out.count == 0) {
-        uint64_t saved = (uint64_t)[[NSUserDefaults standardUserDefaults] doubleForKey:kSenderIDDefaultsKey];
-        if (saved != 0) {
-            [out addObject:@{@"value": @(saved), @"usage": @(-1),
-                             @"product": @"保存值", @"transport": @""}];
-        }
-        [out addObject:@{@"value": @(kTSHIDSenderIDDefault), @"usage": @(-1),
-                         @"product": @"固定伪装值", @"transport": @""}];
     }
     return out;
 }
@@ -576,10 +640,8 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     NSDictionary *d = list[index];
     uint64_t v = [d[@"value"] unsignedLongLongValue];
     s_senderID = v;
-    s_senderIDSource = TSSenderIDSourceProbed;
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setDouble:(double)v forKey:kSenderIDDefaultsKey];
-    [ud synchronize];
+    s_senderIDSource = (v == kTSHIDSenderIDDefault) ? TSSenderIDSourceDefault : TSSenderIDSourceProbed;
+    TSHIDStoreSenderID(v);
     TS_TOUCH_LOG(@"启用候选 %ld/%lu: senderID=0x%llX (usage=0x%lX %@/%@), 已持久化",
                  (long)(index + 1), (unsigned long)list.count, v,
                  [d[@"usage"] longValue], d[@"product"], d[@"transport"]);
@@ -629,50 +691,36 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     return got;
 }
 
-/// 初始化 senderID。优先级(高 → 低):
-///   1. 主动枚举本机 digitizer 服务的真实 senderID(免触摸, 不受历史脏数据影响);
-///   2. NSUserDefaults 历史保存值;
-///   3. 固定伪装值 0x8000000800(原版 HUDServices 同款)。
-/// 之后仍挂一个短暂监听做自动纠错(见 TSHIDSenderIDCallback): 系统产生真实 digitizer
-/// 事件后复核当前值, 确认后释放监听 client。
+/// 初始化 senderID。
+///
+/// 2026-09-11 逆向定案: **直发就使用原版 HUDServices 写死的固定值
+/// 0x8000000817319371**(子事件用 +1)。原版二进制里根本没有 IOHIDEventGetSenderID
+/// 这个符号, 也就是说它从不读取本机真实 senderID —— 这条链路既不依赖真实触摸,
+/// 也不用管设备重启/历史脏数据。
+/// 本机枚举值/历史保存值现在只作为诊断信息与 self-test 候选, 不再自动生效
+/// (此前的"枚举值优先 → 监听到真实值就覆盖"正是点击失效的根因之一)。
 - (void)_setupSenderID {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
-    BOOL savedPlausible = (saved != 0 && TSHIDIsPlausibleSenderID(saved));
+    s_senderID = kTSHIDSenderIDDefault;
+    s_senderIDSource = TSSenderIDSourceDefault;
 
+    // 诊断: 顺带记录本机枚举结果与历史保存值, 方便 self-test 里逐候选对比
+    uint64_t saved  = TSHIDLoadSavedSenderID();
     uint64_t probed = [self _probeSenderIDWithClient];
 
-    if (TSHIDIsPlausibleSenderID(probed)) {
-        // 探测到本机 digitizer 服务 → 用它的 registryID 作为当前值, 但【不覆盖保存值】:
-        // 保存值可能是"真实手指触摸"学到的(见 touch.watch / 监听回调), 是另一个独立线索,
-        // 覆盖掉就再也找不回真实值了。哪个对由 touch_selftest.lua 逐候选实测决定。
-        s_senderID = probed;
-        s_senderIDSource = TSSenderIDSourceProbed;
-        TS_TOUCH_LOG(@"采用服务枚举 senderID: 0x%llX (保存值 0x%llX 保留备用, 未覆盖)",
-                     probed, saved);
-    } else if (savedPlausible) {
-        // 探测不到(部分系统版本不开放服务枚举) → 退回历史保存值
-        s_senderID = saved;
-        s_senderIDSource = TSSenderIDSourceSaved;
-        TS_TOUCH_LOG(@"未探测到 digitizer 服务, 复用已保存 senderID: 0x%llX", saved);
-    } else {
-        s_senderID = kTSHIDSenderIDDefault;
-        s_senderIDSource = TSSenderIDSourceDefault;
-        TS_TOUCH_LOG(@"无探测值也无保存值, 使用固定伪装 senderID: 0x%llX", s_senderID);
-    }
+    TS_TOUCH_LOG(@"直发: client=%@ senderID=0x%llX(来源=%@) 通道=%@; 本机枚举=0x%llX 历史保存=0x%llX(仅供参考, 不参与直发)",
+                 _client ? @"OK" : @"NULL", (unsigned long long)s_senderID,
+                 TSSenderIDSourceName(s_senderIDSource), TSChannelName(_channel),
+                 (unsigned long long)probed, (unsigned long long)saved);
 
-    // 监听纠错: 与直发是否就绪无关, 真实值一旦可用就覆盖, 确认后释放监听 client。
+    // 真实触摸监听: 仅观察/记录(见 TSHIDSenderIDCallback), 不再覆盖直发值。
     _senderIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (!_senderIDClient) {
         TS_TOUCH_LOG(@"创建 senderID 监听 client 失败 (不影响已就绪的直发)");
         return;
     }
     IOHIDEventSystemClientScheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-    // target 传 self: 回调确认真实值后经 _releaseSenderIDClient 注销回调并释放 client
+    // target 传 self: 回调记录真实值后经 _releaseSenderIDClient 注销回调并释放 client
     IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, (__bridge void *)self, NULL);
-    TS_TOUCH_LOG(@"直发: client=%@ senderID=0x%llX(来源=%@) 通道=%@; 后台监听真实值用于自动纠错",
-                 _client ? @"OK" : @"NULL", (unsigned long long)s_senderID,
-                 TSSenderIDSourceName(s_senderIDSource), TSChannelName(_channel));
 }
 
 /// senderID 已获取后调用：注销回调、解除 runloop 调度并释放监听 client。
@@ -751,12 +799,32 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     }
 }
 
-/// app 进程内 IOHID 直发 (ZXTouch performTouchFromRawData 同款实现)。
-/// 构造一个 parent digitizer 事件 (Hand 容器) + 一个 child finger 事件,
-/// 设置 senderID 后由 IOHIDEventSystemClientDispatchEvent 直发 backboardd。
-/// 坐标归一化: 输入为逻辑点坐标, 除以屏幕 bounds 得到 0~1 比例 (ZXTouch 同款)。
-/// 注意: pressure/radius 为 API 兼容占位 (Lua 层 touchDownAtPoint: 签名透传),
-/// 事件构造使用已验证的固定值 (tipPressure=0, radius=0.04), 暂未映射。
+/// app 进程内 IOHID 直发 —— 逐字段对齐原版 TrollAutoScript HUDServices 2.3.6。
+///
+/// 2026-09-11 逆向原版 arm64 二进制 (region@0x10020df54 / 0x1000616d0) 得到的
+/// 确切构造流程 (每一步都与旧实现有实质差异, 旧实现是网上流传的 ZXTouch 简版):
+///   1. 父事件 IOHIDEventCreateDigitizerEvent(type=3, **index=0**, identity=1,
+///      eventMask=0, buttonMask=0, 坐标/压力全 0, range=0, touch=0, options=0)
+///      → 旧实现 index=99 (父容器 index 错位会让系统认不出这是"整只手"容器)
+///   2. 父事件私有字段 (WithOptions, options 恒为 0xF0000000):
+///        0xb0019 = 1 , 0x4 = 1
+///      → 旧实现用无 options 的 setter, 缺少 options 位
+///   3. **先给父事件写 senderID**, 再建子事件
+///   4. 子事件用 18 参 FingerEventWithQuality: index=0, **identity=2**,
+///      eventMask = 0x803(down)/0x844(move)/0x803(up),
+///      x,y = 归一化坐标, z/tipPressure/twist = 0,
+///      minorRadius/majorRadius/quality/density = 0, irregularity = 1.0，
+///      range = touch = (up 时为 0, 其余为 1)
+///      → 旧实现用 13 参简版 + identity=3 + 掩码 0x3/0x4, 缺 0x800 与 0x40 位
+///   5. 子事件私有字段 0xb001a = 0 (原版约等于 0), 再 AppendEvent(parent, child,
+///      0xF0000000), 然后**给子事件写 senderID = 父值+1**
+///   6. 父事件 0xb0007 = 掩码 (down 0x863 / move 0x844 / up 0x823),
+///      0xb0008 = 0xb0009 = range 标志 (up 为 0)
+///      → 旧实现固定写死 0x23/1/1, 抬指时仍报"在屏", 系统状态机残留幽灵手指
+///   7. 最后再写一次父事件 senderID 并 DispatchEvent
+///
+/// 坐标归一化: 输入为逻辑点坐标, 除以屏幕 bounds 得到 0~1 比例 (原版一致)。
+/// 注意: pressure/radius 为 API 兼容占位 (Lua 层签名透传), 未映射进事件。
 - (void)_dispatchIOHIDTouchAtPoint:(CGPoint)point
                              index:(uint32_t)index
                              phase:(TSTouchPhase)phase
@@ -771,67 +839,70 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     CGFloat nx = screen.width  > 0 ? (point.x / screen.width)  : 0;
     CGFloat ny = screen.height > 0 ? (point.y / screen.height) : 0;
 
-    // parent: Hand 容器事件 (ZXTouch 参数逐一对齐)
+    // ── 逐相位掩码 (原版取值, 见文件上方 kTSMask* 宏) ──
+    uint32_t childMask, parentMask;
+    Boolean rangeTouch;
+    switch (phase) {
+        case TSTouchPhaseBegan:
+            childMask = kTSMaskChildDown; parentMask = kTSMaskParentDown; rangeTouch = true;
+            break;
+        case TSTouchPhaseMoved:
+            childMask = kTSMaskChildMove; parentMask = kTSMaskParentMove; rangeTouch = true;
+            break;
+        case TSTouchPhaseEnded:
+        default:
+            // 抬指: range/touch 必须为 0, 否则系统认为手指仍在屏上。
+            childMask = kTSMaskChildDown; parentMask = kTSMaskParentUp; rangeTouch = false;
+            break;
+    }
+
+    // ── 1. 父事件: Hand 容器 (index=0, identity=1, 其余全 0) ──
     IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
         kCFAllocatorDefault, mach_absolute_time(),
-        3,      // kIOHIDDigitizerTransducerTypeHand
-        99,     // 父容器固定 index (ZXTouch 同款)
-        1,      // identity
-        0, 0,   // eventMask, buttonMask
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f,  // x, y, z, tipPressure, barrelPressure
-        0, 0,   // range, touch
-        0);     // options
+        kIOHIDDigitizerTransducerTypeHand,  // type = 3
+        0,                                  // index (原版为 0, 不是 ZXTouch 的 99)
+        1,                                  // identity
+        0, 0,                               // eventMask, buttonMask
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f,       // x, y, z, tipPressure, barrelPressure
+        0, 0,                               // range, touch
+        0);                                 // options
     if (!parent) {
         NSLog(@"[TSHIDEventTouch] 直发失败: 创建 parent 事件失败");
         return;
     }
-    IOHIDEventSetIntegerValue(parent, 0xb0019, 1);  // parent flags
-    IOHIDEventSetIntegerValue(parent, 0x4, 1);      // parent flags
+    IOHIDEventSetIntegerValueWithOptions(parent, 0xb0019, 1, kTSHIDEventOptions);
+    IOHIDEventSetIntegerValueWithOptions(parent, 0x4, 1, kTSHIDEventOptions);
+    // 原版顺序: 父事件先写 senderID, 再构造子事件
+    IOHIDEventSetSenderID(parent, s_senderID);
 
-    // child: 单根手指子事件 (ZXTouch 同款 13 参)
-    uint32_t eventMask;
-    Boolean range, touch;
-    switch (phase) {
-        case TSTouchPhaseBegan:
-            // ZXTouch generateChildEventTouchDown 同款: 按下掩码 = Range|Touch (0x3)。
-            // 缺少 Range(1<<0) 位时系统不认为手指已进入"在屏"连续流, 导致后续
-            // Position 型 move 事件无法关联拖动, 表现为 swipe 只有按下/抬起、
-            // 效果近似"在终点位置点了一下"。tap 不受影响(无需中间 move)。
-            eventMask = kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch;  // 3
-            range = true; touch = true;
-            break;
-        case TSTouchPhaseMoved:
-            eventMask = kIOHIDDigitizerEventPosition;  // 4
-            range = true; touch = true;
-            break;
-        case TSTouchPhaseEnded:
-        default:
-            eventMask = kIOHIDDigitizerEventTouch;  // 2
-            range = false; touch = false;
-            break;
-    }
-    IOHIDEventRef child = IOHIDEventCreateDigitizerFingerEvent(
+    // ── 2. 子事件: 单根手指 (18 参 WithQuality, identity=2) ──
+    IOHIDEventRef child = IOHIDEventCreateDigitizerFingerEventWithQuality(
         kCFAllocatorDefault, mach_absolute_time(),
-        index,          // finger index
-        3,              // identity (ZXTouch 同款, 与 down/move/up 无关)
-        eventMask,
+        0,              // index (原版固定 0)
+        2,              // identity (原版为 2, 不是旧实现的 3)
+        childMask,
         nx, ny, 0.0f,   // x, y, z
         0.0f, 0.0f,     // tipPressure, twist
-        range, touch,
+        0.0f, 0.0f,     // minorRadius, majorRadius
+        0.0f, 0.0f, 1.0f,  // quality, density, irregularity(原版 = 1.0)
+        rangeTouch, rangeTouch,
         0);             // options
     if (child) {
-        IOHIDEventSetFloatValue(child, 0xb0014, 0.04f);  // majorRadius
-        IOHIDEventSetFloatValue(child, 0xb0015, 0.04f);  // minorRadius
-        IOHIDEventAppendEvent(parent, child, 0);
+        IOHIDEventSetFloatValueWithOptions(child, 0xb001a, 0.0f, kTSHIDEventOptions);
+        IOHIDEventAppendEvent(parent, child, kTSHIDEventOptions);
+        // 子事件 senderID = 父值 + 1 (原版 0x...371 / 0x...372 的对应关系)
+        IOHIDEventSetSenderID(child, s_senderID + kTSHIDSenderIDChildOffset);
         CFRelease(child);
+    } else {
+        NSLog(@"[TSHIDEventTouch] 直发失败: 创建 child finger 事件失败");
     }
 
-    // parent 尾部字段 (ZXTouch 同款)
-    IOHIDEventSetIntegerValue(parent, 0xb0007, 0x23);  // eventMask 0x23
-    IOHIDEventSetIntegerValue(parent, 0xb0008, 0x1);   // range
-    IOHIDEventSetIntegerValue(parent, 0xb0009, 0x1);   // touch
+    // ── 3. 父事件掩码/range/touch ──
+    IOHIDEventSetIntegerValueWithOptions(parent, 0xb0007, (int)parentMask, kTSHIDEventOptions);
+    IOHIDEventSetIntegerValueWithOptions(parent, 0xb0008, rangeTouch ? 1 : 0, kTSHIDEventOptions);
+    IOHIDEventSetIntegerValueWithOptions(parent, 0xb0009, rangeTouch ? 1 : 0, kTSHIDEventOptions);
 
-    // senderID 必须非 0, 否则 backboardd 丢弃 (直发前置条件已保证非 0)
+    // ── 4. 下发 (senderID 必须非 0, 否则 backboardd 丢弃; 前置条件已保证) ──
     IOHIDEventSetSenderID(parent, s_senderID);
     IOHIDEventSystemClientDispatchEvent(_client, parent);
     CFRelease(parent);
@@ -980,38 +1051,19 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 }
 
 - (void)resetSenderID {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud removeObjectForKey:kSenderIDDefaultsKey];
-    [ud synchronize];
-    // 清掉可疑脏数据: 优先回到"本机枚举值", 枚举不到才用固定伪装值(不依赖任何真实触摸)
-    uint64_t probed = [self _probeSenderIDWithClient];
-    if (TSHIDIsPlausibleSenderID(probed)) {
-        s_senderID = probed;
-        s_senderIDSource = TSSenderIDSourceProbed;
-        TS_TOUCH_LOG(@"已清除保存的 senderID, 重置为本机枚举值 0x%llX", (unsigned long long)s_senderID);
-    } else {
-        s_senderID = kTSHIDSenderIDDefault;
-        s_senderIDSource = TSSenderIDSourceDefault;
-        TS_TOUCH_LOG(@"已清除保存的 senderID, 重置为固定伪装值 0x%llX", (unsigned long long)s_senderID);
-    }
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kSenderIDDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    // 回到原版固定值 —— 唯一"不依赖任何真实触摸/历史状态"的取值
+    s_senderID = kTSHIDSenderIDDefault;
+    s_senderIDSource = TSSenderIDSourceDefault;
+    TS_TOUCH_LOG(@"已清除保存的 senderID, 重置为原版固定值 0x%llX", (unsigned long long)s_senderID);
 }
 
 - (uint64_t)setSenderIDValue:(uint64_t)sid {
     if (sid == 0) {
-        // 恢复自动: 服务枚举 > 保存值 > 固定值
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
-        uint64_t probed = [self _probeSenderIDWithClient];
-        if (TSHIDIsPlausibleSenderID(probed)) {
-            s_senderID = probed;
-            s_senderIDSource = TSSenderIDSourceProbed;
-        } else if (saved != 0 && TSHIDIsPlausibleSenderID(saved)) {
-            s_senderID = saved;
-            s_senderIDSource = TSSenderIDSourceSaved;
-        } else {
-            s_senderID = kTSHIDSenderIDDefault;
-            s_senderIDSource = TSSenderIDSourceDefault;
-        }
+        // 恢复自动 = 回到原版 HUDServices 固定值
+        s_senderID = kTSHIDSenderIDDefault;
+        s_senderIDSource = TSSenderIDSourceDefault;
         TS_TOUCH_LOG(@"senderID 恢复自动: 0x%llX (来源=%@)",
                      (unsigned long long)s_senderID, TSSenderIDSourceName(s_senderIDSource));
         return s_senderID;

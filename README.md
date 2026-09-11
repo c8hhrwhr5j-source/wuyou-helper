@@ -47,7 +47,7 @@ IOHIDEventCreateDigitizerEvent
 IOHIDEventCreateDigitizerFingerEventWithQuality
 IOHIDEventAppendEvent / IOHIDEventSetSenderID
 ```
-做法：构造一个 digitizer（数位板）父事件 + 一根 finger 子事件，设置 `senderID=0x8000000800`（伪装成触屏），通过 `IOHIDEventSystemClientDispatchEvent` 投递给 `backboardd`。这是 ZXTouch / SimulateTouch 同款技术，**系统级、跨 App**，不需要 XCTest 测试宿主。
+做法：构造一个 digitizer（数位板）父事件（Hand 容器，index=0/identity=1）+ 一根 finger 子事件（18 参 `WithQuality`，index=0/identity=2），父事件掩码 `down=0x863 / move=0x844 / up=0x823`、子事件掩码 `down=0x803 / move=0x844 / up=0x803`，并用 `...WithOptions`（options=`0xF0000000`）写私有字段，最后设 `senderID=0x8000000817319371`（子事件 `+1`）通过 `IOHIDEventSystemClientDispatchEvent` 投递给 `backboardd`。这是原版 `HUDServices` 2.3.6 的逐字段还原（反汇编得到），**系统级、跨 App**，不需要 XCTest 测试宿主。
 
 > 见 `Core/TSHIDEventTouch.m`。私有函数签名随 iOS 版本略有差异，已加注释。
 

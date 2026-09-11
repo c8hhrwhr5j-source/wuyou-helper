@@ -74,7 +74,8 @@ typedef NS_ENUM(NSInteger, TSTouchChannel) {
     TSTouchChannelAXOnly  = 2,
 };
 
-/// 当前触摸发送者 ID（默认即原版同款固定触屏值 0x8000000800，可直接直发，无需手动触摸）。
+/// 当前触摸发送者 ID（默认即原版 HUDServices 写死的固定值 0x8000000817319371，
+/// 子事件自动用 +1；可直接直发，无需任何手动触摸）。
 - (uint64_t)senderID;
 
 /// 当前 senderID 的来源描述: 固定伪装值 / 历史保存值 / 服务枚举 / 运行时监听 / 手动指定

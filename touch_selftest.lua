@@ -108,6 +108,10 @@ end
 -- ---------------- ① 学习本机真实 senderID(肉手) ----------------
 local candidates = {}
 
+-- ⓪ 原版 TrollAutoScript HUDServices 写死的固定值(2026-09-11 逆向确认),
+--    现在也是 App 的默认直发值 —— 永远排第一个测, 因为它是"不依赖任何真实触摸"的那一个。
+candidates[#candidates + 1] = { id = "0x8000000817319371", label = "原版固定值(逆向确认)" }
+
 if type(touch) == "table" and touch.watch then
     p(string.format("请现在用【手指】在屏幕上点/滑几下(%.0f 秒内; 期间不要跑脚本点击)……",
                     LEARN_MS / 1000))
