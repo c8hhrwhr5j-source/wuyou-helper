@@ -64,10 +64,37 @@ typedef NS_ENUM(NSInteger, TSTouchPhase) {
 /// 用于脚本停止/出错时清理，避免留下"幽灵手指"导致后续真实触摸被系统吞掉。
 - (void)releaseAllTouches;
 
+/// 触摸注入通道(自检对照用):
+///   Auto    = 直发可用则直发, 直发不可用(HID client 建不起来)时回退本应用点击(AX/进程内)
+///   HIDOnly = 只走 IOHID 直发(用于判定"直发是否被系统受理")
+///   AXOnly  = 只走本应用点击(用于判定"AX 兜底是否有效")
+typedef NS_ENUM(NSInteger, TSTouchChannel) {
+    TSTouchChannelAuto    = 0,
+    TSTouchChannelHIDOnly = 1,
+    TSTouchChannelAXOnly  = 2,
+};
+
 /// 当前触摸发送者 ID（默认即原版同款固定触屏值 0x8000000800，可直接直发，无需手动触摸）。
 - (uint64_t)senderID;
 
-/// 诊断状态描述（client 是否创建成功 / senderID 是否就绪），供 Lua 层显示。
+/// 当前 senderID 的来源描述: 固定伪装值 / 历史保存值 / 服务枚举 / 运行时监听 / 手动指定
+- (NSString *)senderIDSourceDescription;
+
+/// 触摸注入通道(默认 Auto)。脚本可临时切到 HIDOnly / AXOnly 做对照自检。
+@property (nonatomic, assign) TSTouchChannel channel;
+
+/// 主动枚举本机 digitizer(触屏)服务, 取真实 senderID —— 不需要任何真实手指触摸。
+/// 返回探测到的 senderID(0 = 未找到), 并把枚举结果写入 touch.log。
+- (uint64_t)probeSenderID;
+
+/// 清除 NSUserDefaults 中保存的 senderID(可疑脏数据), 并把当前值重置为固定伪装值。
+- (void)resetSenderID;
+
+/// 手动指定 senderID(0 = 恢复自动: 服务枚举 > 保存值 > 固定值)。
+/// 返回实际生效的 senderID。
+- (uint64_t)setSenderIDValue:(uint64_t)sid;
+
+/// 诊断状态描述（client 是否创建成功 / senderID 来源 / 通道 / 直发下发次数），供 Lua 层显示。
 - (NSString *)statusDescription;
 
 @end

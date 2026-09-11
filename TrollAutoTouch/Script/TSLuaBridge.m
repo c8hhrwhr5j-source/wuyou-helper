@@ -1173,6 +1173,13 @@ static int l_touch_tap(lua_State *L) {
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
     CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
+    // 点击流水(每次 tap 一条, tap 频率低不会刷屏): 脚本坐标 -> 竖屏物理像素 -> 逻辑点。
+    // 用于区分"脚本根本没点"与"点了但系统没受理", 并可核对横屏坐标旋转是否正确;
+    // C 层"直发 DOWN ..."那一条则证明事件确实下发到了 IOHID。
+    lua_log([NSString stringWithFormat:
+             @"[touch] tap 脚本(%.0f,%.0f) -> 竖屏像素(%.0f,%.0f) -> 逻辑点(%.1f,%.1f)",
+             (double)x, (double)y, (double)sp.x, (double)sp.y,
+             (double)(sp.x / sc), (double)(sp.y / sc)]);
     [touch tapAtPoint:CGPointMake(sp.x / sc, sp.y / sc)
              duration:dur
              pressure:pressure radius:radius];
@@ -1182,6 +1189,62 @@ static int l_touch_tap(lua_State *L) {
 
 static int l_touch_status(lua_State *L) {
     lua_pushstring(L, [[TSHIDEventTouch shared] statusDescription].UTF8String);
+    return 1;
+}
+
+/// touch.probe(): 主动枚举本机 digitizer(触屏)服务取真实 senderID —— 不需要真实手指触摸。
+/// 返回探测到的 senderID(0 = 未取到); 枚举明细写入 touch.log。
+static int l_touch_probe(lua_State *L) {
+    uint64_t sid = [[TSHIDEventTouch shared] probeSenderID];
+    lua_pushnumber(L, (lua_Number)sid);
+    return 1;
+}
+
+/// touch.resetSenderID(): 清除 NSUserDefaults 里保存的 senderID(可能是别的设备/系统版本
+/// 遗留的脏值, 非 0 却在本机无效 → 事件被静默丢弃), 并回到固定伪装值。
+static int l_touch_resetSenderID(lua_State *L) {
+    [[TSHIDEventTouch shared] resetSenderID];
+    return 0;
+}
+
+/// touch.setSenderID(v): 手动指定 senderID(支持 "0x100000699" 字符串或数字); 传 0 恢复自动
+/// (服务枚举 > 保存值 > 固定值)。返回实际生效的 senderID。
+static int l_touch_setSenderID(lua_State *L) {
+    uint64_t v = 0;
+    if (lua_type(L, 1) == LUA_TSTRING) {
+        const char *cs = lua_tostring(L, 1);
+        NSString *s = luaToNSString(cs, cs ? strlen(cs) : 0);
+        unsigned long long parsed = 0;
+        NSScanner *scn = [NSScanner scannerWithString:s];
+        if ([s hasPrefix:@"0x"] || [s hasPrefix:@"0X"]) {
+            [scn scanHexLongLong:&parsed];
+        } else {
+            [scn scanUnsignedLongLong:&parsed];
+        }
+        v = (uint64_t)parsed;
+    } else {
+        v = (uint64_t)luaL_checknumber(L, 1);
+    }
+    uint64_t got = [[TSHIDEventTouch shared] setSenderIDValue:v];
+    lua_pushnumber(L, (lua_Number)got);
+    return 1;
+}
+
+/// touch.channel([mode]): 读取/设置注入通道。0=自动(直发优先, 不可用时回退本应用点击)
+/// 1=仅直发(判定"直发是否被系统受理") 2=仅本应用点击(判定 AX 兜底是否有效)。返回当前值。
+static int l_touch_channel(lua_State *L) {
+    TSHIDEventTouch *t = [TSHIDEventTouch shared];
+    if (!lua_isnoneornil(L, 1)) {
+        NSInteger m = (NSInteger)luaL_checkinteger(L, 1);
+        if (m < 0 || m > 2) {
+            luaL_error(L, "touch.channel 参数必须是 0(自动)/1(仅直发)/2(仅本应用点击)");
+            return 0;
+        }
+        t.channel = (TSTouchChannel)m;
+        lua_log([NSString stringWithFormat:@"[touch] 注入通道已切换为 %ld "
+                 @"(0=自动 1=仅直发 2=仅本应用点击)", (long)m]);
+    }
+    lua_pushinteger(L, (lua_Integer)t.channel);
     return 1;
 }
 
@@ -2611,6 +2674,10 @@ static void lua_register_all(lua_State *L) {
         {"swipe",       l_touch_swipe},
         {"stroke",      l_touch_stroke},
         {"touchStatus", l_touch_status},
+        {"touchProbe",  l_touch_probe},
+        {"touchResetSenderID", l_touch_resetSenderID},
+        {"touchSetSenderID",   l_touch_setSenderID},
+        {"touchChannel",       l_touch_channel},
         {"findText",    l_screen_findText},
         {NULL, NULL}
     };
@@ -2626,6 +2693,12 @@ static void lua_register_all(lua_State *L) {
         {"swipe",    l_touch_swipe},
         {"stroke",   l_touch_stroke},
         {"status",   l_touch_status},
+        // 诊断/自检(见 touch_selftest.lua): probe=枚举本机真实 senderID,
+        // resetSenderID=清除保存的脏值, setSenderID=手动指定, channel=切换注入通道
+        {"probe",         l_touch_probe},
+        {"resetSenderID", l_touch_resetSenderID},
+        {"setSenderID",   l_touch_setSenderID},
+        {"channel",       l_touch_channel},
         {NULL, NULL}
     };
     luaL_newlib(L, touchLib);

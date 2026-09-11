@@ -46,6 +46,7 @@
 #import <UIKit/UIKit.h>
 #import <mach/mach_time.h>
 #import <dlfcn.h>
+#import "../Common/TSLogStore.h"   // 触摸链路诊断日志直接落盘 touch.log
 
 // ---------- 私有类型与常量 ----------
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -83,6 +84,56 @@ static BOOL TSHIDIsPlausibleSenderID(uint64_t v) {
     return v >= 0x100000000ULL;   // >= 2^32
 }
 
+// ---------- 诊断: senderID 来源 ----------
+// "直发就绪"曾经只看 s_senderID != 0, 但真正的失败模式是:
+//   * NSUserDefaults 里存着一个"别的设备/别的系统版本"监听到的 senderID(非 0 但本机无效);
+//   * IOHIDEventSystemClientCreate 返回 NULL(client 都没建起来)。
+// 两种情况下 statusDescription 都照样显示"直发", 而实际事件被静默丢弃、永不回退 AX,
+// 表现就是"界面完全没反应且没有任何日志"。这里把来源/client/通道/下发次数全部暴露出来。
+typedef NS_ENUM(NSInteger, TSSenderIDSource) {
+    TSSenderIDSourceNone    = 0,
+    TSSenderIDSourceDefault = 1,   // 固定伪装值
+    TSSenderIDSourceSaved   = 2,   // NSUserDefaults 历史保存值
+    TSSenderIDSourceProbed  = 3,   // 启动时枚举本机 HID 服务得到(真实值)
+    TSSenderIDSourceLive    = 4,   // 运行中监听到真实 digitizer 事件
+    TSSenderIDSourceManual  = 5,   // 脚本手动指定
+};
+
+static NSString *TSSenderIDSourceName(TSSenderIDSource s) {
+    switch (s) {
+        case TSSenderIDSourceDefault: return @"固定伪装值";
+        case TSSenderIDSourceSaved:   return @"历史保存值";
+        case TSSenderIDSourceProbed:  return @"服务枚举";
+        case TSSenderIDSourceLive:    return @"运行时监听";
+        case TSSenderIDSourceManual:  return @"手动指定";
+        default:                      return @"无";
+    }
+}
+
+static NSString *TSChannelName(TSTouchChannel c) {
+    switch (c) {
+        case TSTouchChannelHIDOnly: return @"仅直发";
+        case TSTouchChannelAXOnly:  return @"仅本应用点击";
+        default:                    return @"自动";
+    }
+}
+
+// 私有属性的数值读取(Some IOHID 属性是 CFNumber, 个别是 CFString)
+static long TSHIDPropToLong(CFTypeRef v) {
+    if (!v) return -1;
+    CFTypeID t = CFGetTypeID(v);
+    if (t == CFNumberGetTypeID())  return (long)[(__bridge NSNumber *)v longValue];
+    if (t == CFStringGetTypeID())  return (long)[(__bridge NSString *)v integerValue];
+    return -1;
+}
+
+// 触摸链路关键节点直接写入 touch.log(与 lua_log 同一落盘通道)。
+// 此前这些信息只走 NSLog, 而 NSLog 不进 touch.log —— 用户在设置页导出的"系统日志"里
+// 完全看不到点击是否发生、坐标多少、走哪条通道, 导致"不点击"无法定位。
+#define TS_TOUCH_LOG(fmt, ...) do { \
+    [[TSLogStore shared] append:[NSString stringWithFormat:@"[touch] " fmt, ##__VA_ARGS__]]; \
+} while (0)
+
 // senderID 获取成功通知（userInfo 带 senderID），供 Lua 桥接层输出可见日志
 NSString * const TSHIDSenderIDDidChangeNotification = @"TSHIDSenderIDDidChangeNotification";
 
@@ -97,9 +148,15 @@ NSString * const TSHIDSenderIDDidChangeNotification = @"TSHIDSenderIDDidChangeNo
 // 用于 releaseAllTouches 在脚本停止时补发 touchUp，避免幽灵手指。
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *pressedIndexes;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *lastPoints;
+// 诊断: HID client 是否创建成功(IOHIDEventSystemClientCreate 返回非空)。
+// 为 NO 时直发通道实际不可用, 必须回退本应用点击, 不能只靠 senderID != 0 判断。
+@property (nonatomic, assign) BOOL clientReady;
+// 诊断: 直发事件已下发次数(成功调用 dispatch 的次数; 系统是否受理无法在此确认)
+@property (nonatomic, assign) NSUInteger dispatchCount;
 - (void)_setupClient;
 - (void)_setupSenderID;
 - (void)_releaseSenderIDClient;
+- (uint64_t)_probeSenderIDWithClient;
 @end
 
 // ---------- 私有函数声明 (IOKit 私有/未公开 C 接口) ----------
@@ -187,6 +244,8 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 // 触摸事件发送者 ID：启动即设为默认固定触屏值(或已保存的真实值), 因此恒非 0;
 // 监听系统 digitizer 事件只用于自动纠错。多线程共享, 故用静态全局(ZXTouch 亦为全局)。
 static uint64_t s_senderID = 0;
+// 当前值来源(诊断用): 见 TSSenderIDSourceName()
+static TSSenderIDSource s_senderIDSource = TSSenderIDSourceNone;
 
 // 监听系统触摸屏(digitizer)事件，读取真实 senderID（ZXTouch setSenderIdCallback 同款）。
 // 回调通过 ScheduleWithRunLoop 调度到主 RunLoop，可安全访问 NSUserDefaults。
@@ -202,16 +261,17 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
         // 真实值与当前使用值不同(当前多为默认固定值, 或保存值已过期)
         // → 真实值优先: 覆盖并持久化, 供下次启动直接复用。
         s_senderID = sid;
+        s_senderIDSource = TSSenderIDSourceLive;
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
         [ud setDouble:(double)sid forKey:kSenderIDDefaultsKey];
         [ud synchronize];
-        NSLog(@"[TSHIDEventTouch] 已获取真实触摸 senderID: 0x%llX (覆盖当前值并持久化)", sid);
+        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID: 0x%llX (已覆盖并持久化)", sid);
         // 通知 Lua 桥接层，让"已获取 senderID"直接显示在脚本日志中
         [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
                                                             object:nil
                                                           userInfo:@{@"senderID": @(sid)}];
     } else {
-        NSLog(@"[TSHIDEventTouch] 真实 senderID 与当前使用值一致 (0x%llX), 无需纠正", sid);
+        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID 0x%llX, 与当前使用值一致, 无需纠正", sid);
     }
 
     // 已确认一次真实值 → 监听使命完成, 释放监听 client(省掉每次系统触摸事件的回调检查)。
@@ -293,9 +353,10 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     BOOL ok = (err == TSAXErrorSuccess);
     CFRelease(element);
     if (ok) {
-        NSLog(@"[TSHIDEventTouch] AX 点击成功 @(%.0f,%.0f)", x, y);
+        TS_TOUCH_LOG(@"本应用点击(AX)成功 @逻辑点(%.1f,%.1f)", (double)x, (double)y);
     } else {
-        NSLog(@"[TSHIDEventTouch] AX 点击失败 @(%.0f,%.0f) (err=%d)", x, y, (int)err);
+        TS_TOUCH_LOG(@"本应用点击(AX)失败 @逻辑点(%.1f,%.1f) (err=%d, 目标可能无 accessibility 元素)",
+                     (double)x, (double)y, (int)err);
     }
     return ok;
 }
@@ -330,40 +391,123 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (_client) {
         IOHIDEventSystemClientScheduleWithRunLoop(_client, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+        _clientReady = YES;
+        TS_TOUCH_LOG(@"HID client 创建成功, 直发通道可用");
     } else {
+        _clientReady = NO;
+        TS_TOUCH_LOG(@"HID client 创建失败(IOHIDEventSystemClientCreate 返回 NULL): 直发不可用, 点击将回退本应用点击(AX/进程内)");
         NSLog(@"[TSHIDEventTouch] IOHIDEventSystemClientCreate 失败，请确认已用 TrollStore 安装且权限生效。");
     }
 }
 
-/// 初始化 senderID：默认使用固定触屏 senderID(无需任何真实触摸, 对齐原版 HUDServices),
-/// 有保存的真实值则优先复用; 两种情况都会挂一个短暂监听做自动纠错(见 TSHIDSenderIDCallback)。
+/// 主动枚举本机 HID 服务, 找出 digitizer(触屏)服务的 senderID —— 不需要任何真实手指触摸。
+///
+/// 为什么必须做这一步: 历史"保存值"完全可能来自另一台设备/另一个系统版本/非触屏服务,
+/// 它非 0 却在本机无效 —— backboardd 会把事件静默丢弃, 表现为"完全点不动且无任何报错"。
+/// 本机当前真实的触屏服务 registryID 才是唯一可信的值
+/// (iOS 上 IOHIDEventGetSenderID 返回的正是发送该事件的 IOHIDService 的 registryID)。
+- (uint64_t)_probeSenderIDWithClient {
+    if (!_client) return 0;
+
+    static CFArrayRef (*fnCopyServices)(IOHIDEventSystemClientRef) = NULL;
+    static uint64_t (*fnGetRegistryID)(IOHIDServiceRef) = NULL;
+    static CFTypeRef (*fnCopyProperty)(IOHIDServiceRef, CFStringRef) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // 全部走 dlsym: 私有符号缺失时不能把整个二进制拖成链接失败
+        fnCopyServices  = (CFArrayRef (*)(IOHIDEventSystemClientRef))dlsym(RTLD_DEFAULT, "IOHIDEventSystemClientCopyServices");
+        fnGetRegistryID = (uint64_t (*)(IOHIDServiceRef))dlsym(RTLD_DEFAULT, "IOHIDServiceClientGetRegistryID");
+        if (!fnGetRegistryID) fnGetRegistryID = (uint64_t (*)(IOHIDServiceRef))dlsym(RTLD_DEFAULT, "IOHIDServiceGetRegistryID");
+        fnCopyProperty  = (CFTypeRef (*)(IOHIDServiceRef, CFStringRef))dlsym(RTLD_DEFAULT, "IOHIDServiceClientCopyProperty");
+        if (!fnCopyProperty) fnCopyProperty = (CFTypeRef (*)(IOHIDServiceRef, CFStringRef))dlsym(RTLD_DEFAULT, "IOHIDServiceGetProperty");
+    });
+    if (!fnCopyServices) {
+        TS_TOUCH_LOG(@"senderID 探测: IOHIDEventSystemClientCopyServices 不可用, 跳过探测");
+        return 0;
+    }
+
+    CFArrayRef services = fnCopyServices(_client);
+    if (!services) {
+        TS_TOUCH_LOG(@"senderID 探测: IOHIDEventSystemClientCopyServices 返回空");
+        return 0;
+    }
+
+    uint64_t found = 0;
+    NSMutableString *dump = [NSMutableString string];
+    CFIndex n = CFArrayGetCount(services);
+    for (CFIndex i = 0; i < n; i++) {
+        IOHIDServiceRef svc = (IOHIDServiceRef)CFArrayGetValueAtIndex(services, i);
+        if (!svc) continue;
+        uint64_t rid = fnGetRegistryID ? fnGetRegistryID(svc) : 0;
+        long page = -1, usage = -1;
+        if (fnCopyProperty) {
+            CFTypeRef p = fnCopyProperty(svc, CFSTR("PrimaryUsagePage"));
+            if (p) { page = TSHIDPropToLong(p); CFRelease(p); }
+            CFTypeRef u = fnCopyProperty(svc, CFSTR("PrimaryUsage"));
+            if (u) { usage = TSHIDPropToLong(u); CFRelease(u); }
+        }
+        // kHIDPage_Digitizer = 0x0D ; kHIDUsage_Dig_TouchScreen = 0x22
+        if (page == 0x0D && rid != 0) {
+            [dump appendFormat:@" [page=0x%lX usage=0x%lX rid=0x%llX]", page, usage, rid];
+            if (found == 0 && (usage == 0x22 || usage == -1)) {
+                found = rid;
+            }
+        }
+    }
+    if (dump.length > 0) {
+        TS_TOUCH_LOG(@"senderID 探测: 本机 digitizer 服务%@", dump);
+    } else {
+        TS_TOUCH_LOG(@"senderID 探测: %ld 个服务中未发现 digitizer(触屏) 服务", (long)n);
+    }
+    CFRelease(services);
+    return found;
+}
+
+/// 初始化 senderID。优先级(高 → 低):
+///   1. 主动枚举本机 digitizer 服务的真实 senderID(免触摸, 不受历史脏数据影响);
+///   2. NSUserDefaults 历史保存值;
+///   3. 固定伪装值 0x8000000800(原版 HUDServices 同款)。
+/// 之后仍挂一个短暂监听做自动纠错(见 TSHIDSenderIDCallback): 系统产生真实 digitizer
+/// 事件后复核当前值, 确认后释放监听 client。
 - (void)_setupSenderID {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
+    BOOL savedPlausible = (saved != 0 && TSHIDIsPlausibleSenderID(saved));
 
-    if (saved != 0 && TSHIDIsPlausibleSenderID(saved)) {
-        // 优先复用历史监听到的真实 senderID。senderID 是触屏服务的稳定标识, 设备重启
-        // 后不变, 因此不再用 uptime 判断"是否重启"(旧逻辑正是点击失效的主因)。
+    uint64_t probed = [self _probeSenderIDWithClient];
+
+    if (TSHIDIsPlausibleSenderID(probed)) {
+        // 探测到本机真实值 → 直接用, 并覆盖可能已经过期的保存值
+        s_senderID = probed;
+        s_senderIDSource = TSSenderIDSourceProbed;
+        if (probed != saved) {
+            [ud setDouble:(double)probed forKey:kSenderIDDefaultsKey];
+            [ud synchronize];
+        }
+        TS_TOUCH_LOG(@"采用服务枚举 senderID: 0x%llX (原保存值=0x%llX)", probed, saved);
+    } else if (savedPlausible) {
+        // 探测不到(部分系统版本不开放服务枚举) → 退回历史保存值
         s_senderID = saved;
-        NSLog(@"[TSHIDEventTouch] 复用已保存的真实 senderID: 0x%llX", s_senderID);
+        s_senderIDSource = TSSenderIDSourceSaved;
+        TS_TOUCH_LOG(@"未探测到 digitizer 服务, 复用已保存 senderID: 0x%llX", saved);
     } else {
-        // 没有可用保存值(首次安装 / 旧版本写入的垃圾值): 直接用固定触屏 senderID,
-        // 与原版 HUDServices 一致 —— 立即可直发, 不需要用户先摸一下屏幕。
         s_senderID = kTSHIDSenderIDDefault;
-        NSLog(@"[TSHIDEventTouch] 使用默认触屏 senderID: 0x%llX (可直接直发, 无需手动触摸)",
-              s_senderID);
+        s_senderIDSource = TSSenderIDSourceDefault;
+        TS_TOUCH_LOG(@"无探测值也无保存值, 使用固定伪装 senderID: 0x%llX", s_senderID);
     }
 
-    // 无论走哪条路径都挂监听: 真实值一旦可用就覆盖(自动纠错), 确认后释放监听。
+    // 监听纠错: 与直发是否就绪无关, 真实值一旦可用就覆盖, 确认后释放监听 client。
     _senderIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (!_senderIDClient) {
-        NSLog(@"[TSHIDEventTouch] 创建 senderID 监听 client 失败 (不影响已就绪的直发)");
+        TS_TOUCH_LOG(@"创建 senderID 监听 client 失败 (不影响已就绪的直发)");
         return;
     }
     IOHIDEventSystemClientScheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     // target 传 self: 回调确认真实值后经 _releaseSenderIDClient 注销回调并释放 client
     IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, (__bridge void *)self, NULL);
-    NSLog(@"[TSHIDEventTouch] 直发已就绪(senderID=0x%llX), 后台监听真实值用于自动纠错……", s_senderID);
+    TS_TOUCH_LOG(@"直发: client=%@ senderID=0x%llX(来源=%@) 通道=%@; 后台监听真实值用于自动纠错",
+                 _client ? @"OK" : @"NULL", (unsigned long long)s_senderID,
+                 TSSenderIDSourceName(s_senderIDSource), TSChannelName(_channel));
 }
 
 /// senderID 已获取后调用：注销回调、解除 runloop 调度并释放监听 client。
@@ -406,10 +550,25 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
         }
     }
 
-    // ── 1. 第一通道: app 进程内 IOHID 直发 (senderID 就绪即可) ──
-    if (s_senderID != 0) {
+    // ── 1. 第一通道: app 进程内 IOHID 直发 ──
+    // 就绪条件 = client 成功创建 且 senderID 非 0。
+    // 只判断 senderID 会把"client 为 NULL"误判成"直发就绪": 事件发不出去, 又因为这里
+    // 提前 return 而永远回退不到本应用点击 —— 表现正是"界面完全没反应且无任何日志"。
+    BOOL hidUsable = (_clientReady && _client != NULL && s_senderID != 0);
+    if (_channel != TSTouchChannelAXOnly && hidUsable) {
         [self _dispatchIOHIDTouchAtPoint:point index:index phase:phase
                                 pressure:pressure radius:radius];
+        return;
+    }
+
+    // 仅直发模式: 直发不可用也不回退, 只报一次(用于判定"直发本身是否可用")
+    if (_channel == TSTouchChannelHIDOnly) {
+        static BOOL s_loggedHIDOnlyUnavailable = NO;
+        if (!s_loggedHIDOnlyUnavailable) {
+            s_loggedHIDOnlyUnavailable = YES;
+            TS_TOUCH_LOG(@"仅直发模式但直发不可用(client=%@, senderID=0x%llX): 事件未下发",
+                         _client ? @"OK" : @"NULL", (unsigned long long)s_senderID);
+        }
         return;
     }
 
@@ -417,7 +576,8 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     static BOOL s_loggedFallback = NO;
     if (!s_loggedFallback) {
         s_loggedFallback = YES;
-        NSLog(@"[TSHIDEventTouch] IOHID 直发不可用, 进入本应用点击模式 (AX/进程内)");
+        TS_TOUCH_LOG(@"IOHID 直发不可用(client=%@, senderID=0x%llX), 进入本应用点击模式 (AX/进程内)",
+                     _client ? @"OK" : @"NULL", (unsigned long long)s_senderID);
     }
     if (phase == TSTouchPhaseBegan) {
         if (!TSAXTapAt(point.x, point.y)) {
@@ -510,19 +670,23 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     IOHIDEventSetSenderID(parent, s_senderID);
     IOHIDEventSystemClientDispatchEvent(_client, parent);
     CFRelease(parent);
+    _dispatchCount += 1;
 
     if (phase == TSTouchPhaseBegan) {
-        NSLog(@"[TSHIDEventTouch] HID 直发 DOWN #%u @(%.0f,%.0f) senderID=0x%llX",
-              index, point.x, point.y, (unsigned long long)s_senderID);
+        // 每次按下都落盘一条: 界面"点了没反应"时, 靠这行区分
+        // "脚本根本没点" 与 "点了但系统没受理"。
+        TS_TOUCH_LOG(@"直发 DOWN #%u 逻辑点(%.1f,%.1f) 归一化(%.4f,%.4f) senderID=0x%llX",
+                     index, (double)point.x, (double)point.y, (double)nx, (double)ny,
+                     (unsigned long long)s_senderID);
     } else if (phase == TSTouchPhaseMoved) {
-        // MOVE 高频触发, NSLog 是同步 I/O, 高速滑动时逐条打印会拖慢触摸线程,
+        // MOVE 高频触发, 落盘是同步 I/O, 高速滑动时逐条打印会拖慢触摸线程,
         // 节流为每秒最多一条 (帧率/手感不受影响)。
         static NSTimeInterval s_lastMoveLogTime = 0;
         NSTimeInterval now = CFAbsoluteTimeGetCurrent();
         if (now - s_lastMoveLogTime >= 1.0) {
             s_lastMoveLogTime = now;
-            NSLog(@"[TSHIDEventTouch] HID 直发 MOVE #%u @(%.0f,%.0f)",
-                  index, point.x, point.y);
+            TS_TOUCH_LOG(@"直发 MOVE #%u 逻辑点(%.1f,%.1f) 归一化(%.4f,%.4f)",
+                         index, (double)point.x, (double)point.y, (double)nx, (double)ny);
         }
     }
 }
@@ -546,8 +710,8 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
             [ctl sendActionsForControlEvents:UIControlEventTouchDown];
             [ctl sendActionsForControlEvents:UIControlEventTouchUpInside];
             handled = YES;
-            NSLog(@"[TSHIDEventTouch] 进程内点击成功: %@ @(%.0f,%.0f)",
-                  NSStringFromClass(candidate.class), point.x, point.y);
+            TS_TOUCH_LOG(@"本应用点击(进程内 UIControl)成功: %@ @逻辑点(%.1f,%.1f)",
+                         NSStringFromClass(candidate.class), (double)point.x, (double)point.y);
         }
     };
     if ([NSThread isMainThread]) {
@@ -631,13 +795,73 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     return s_senderID;
 }
 
+- (NSString *)senderIDSourceDescription {
+    return TSSenderIDSourceName(s_senderIDSource);
+}
+
+- (uint64_t)probeSenderID {
+    uint64_t probed = [self _probeSenderIDWithClient];
+    if (TSHIDIsPlausibleSenderID(probed)) {
+        TS_TOUCH_LOG(@"手动探测: 本机 digitizer senderID = 0x%llX (当前使用 0x%llX, 来源=%@)",
+                     (unsigned long long)probed, (unsigned long long)s_senderID,
+                     TSSenderIDSourceName(s_senderIDSource));
+    } else {
+        TS_TOUCH_LOG(@"手动探测: 未取到 digitizer senderID (当前使用 0x%llX, 来源=%@)",
+                     (unsigned long long)s_senderID, TSSenderIDSourceName(s_senderIDSource));
+    }
+    return probed;
+}
+
+- (void)resetSenderID {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud removeObjectForKey:kSenderIDDefaultsKey];
+    [ud synchronize];
+    // 清掉可疑脏数据后回到固定伪装值(不依赖任何真实触摸)
+    s_senderID = kTSHIDSenderIDDefault;
+    s_senderIDSource = TSSenderIDSourceDefault;
+    TS_TOUCH_LOG(@"已清除保存的 senderID, 重置为固定伪装值 0x%llX", (unsigned long long)s_senderID);
+}
+
+- (uint64_t)setSenderIDValue:(uint64_t)sid {
+    if (sid == 0) {
+        // 恢复自动: 服务枚举 > 保存值 > 固定值
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
+        uint64_t probed = [self _probeSenderIDWithClient];
+        if (TSHIDIsPlausibleSenderID(probed)) {
+            s_senderID = probed;
+            s_senderIDSource = TSSenderIDSourceProbed;
+        } else if (saved != 0 && TSHIDIsPlausibleSenderID(saved)) {
+            s_senderID = saved;
+            s_senderIDSource = TSSenderIDSourceSaved;
+        } else {
+            s_senderID = kTSHIDSenderIDDefault;
+            s_senderIDSource = TSSenderIDSourceDefault;
+        }
+        TS_TOUCH_LOG(@"senderID 恢复自动: 0x%llX (来源=%@)",
+                     (unsigned long long)s_senderID, TSSenderIDSourceName(s_senderIDSource));
+        return s_senderID;
+    }
+    s_senderID = sid;
+    s_senderIDSource = TSSenderIDSourceManual;
+    TS_TOUCH_LOG(@"senderID 已手动设为 0x%llX (通道=%@)", (unsigned long long)s_senderID,
+                 TSChannelName(_channel));
+    return s_senderID;
+}
+
 - (NSString *)statusDescription {
     NSMutableString *s = [NSMutableString string];
-    // 第一通道: app 进程内 IOHID 直发 (senderID 恒非 0: 默认固定值或已保存真实值)
-    if (s_senderID != 0) {
-        [s appendFormat:@", touch=直发(senderID=0x%llX)", (unsigned long long)s_senderID];
+    NSString *chan = TSChannelName(_channel);
+    // 直发的"就绪"必须同时满足 client 创建成功 + senderID 非 0;
+    // 只看 senderID 会把 client 为 NULL 的情况显示成"就绪"(事件其实发不出去)。
+    if (_clientReady && _client != NULL && s_senderID != 0) {
+        [s appendFormat:@", touch=直发就绪(senderID=0x%llX 来源=%@, client=OK, 通道=%@, 已下发=%lu 次)",
+                    (unsigned long long)s_senderID, TSSenderIDSourceName(s_senderIDSource),
+                    chan, (unsigned long)_dispatchCount];
+    } else if (!_client) {
+        [s appendFormat:@", touch=直发不可用(HID client 创建失败, 通道=%@)", chan];
     } else {
-        [s appendString:@", touch=直发未就绪"];
+        [s appendFormat:@", touch=直发未就绪(senderID=0, 通道=%@)", chan];
     }
     // 本应用点击 fallback 状态 (AX 辅助功能 / 进程内 UIControl)
     TSAXSetup();
