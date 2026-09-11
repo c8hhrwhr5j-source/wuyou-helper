@@ -410,19 +410,24 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     // 原版已验证可用的固定值替换成直发无反应的 registryID(日志里的 0x10000069B),
     // 这是"重启几次后 / 挂机中点击失效"的直接原因之一。
     // 需要真实值时请用 touch.watch / touch.candidates 显式取用。
-    // 真实触摸是高频事件流, 同一个 senderID 在 2 秒内只记一条, 避免把 touch.log 刷满。
+    // 真实触摸是高频事件流: 同一个 senderID 在 2 秒内只记一条, 避免把 touch.log 刷满
+    // (挂机时用户手指搭在屏幕上滑一下就会产生成百上千个 digitizer 事件)。
     static uint64_t       s_lastOtherSid = 0;
     static NSTimeInterval s_lastOtherLog = 0;
     NSTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (sid != s_lastOtherSid || now - s_lastOtherLog > 2.0) {
+    BOOL firstTimeThisSid = (sid != s_lastOtherSid);
+    if (firstTimeThisSid || now - s_lastOtherLog > 2.0) {
         s_lastOtherSid = sid;
         s_lastOtherLog = now;
         TS_TOUCH_LOG(@"监听: 收到系统已有触屏的真实触摸事件 senderID=0x%llX (直发用 0x%llX; 仅记录, 不改变直发值)",
                      sid, (unsigned long long)s_senderID);
-        // 通知 Lua 桥接层: 已拿到真实触摸的 senderID(方便脚本日志展示)
-        [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
-                                                            object:nil
-                                                          userInfo:@{@"senderID": @(sid)}];
+        if (firstTimeThisSid) {
+            // 只在"首次见到这个真实 senderID"时通知一次 Lua 桥接层(用于脚本日志展示),
+            // 而不是每 2 秒重复通知一次 —— 通知本身也要写一行日志, 属于纯噪音。
+            [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
+                                                                object:nil
+                                                              userInfo:@{@"senderID": @(sid)}];
+        }
     }
 }
 
@@ -835,10 +840,9 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
         if (!TSAXTapAt(point.x, point.y)) {
             [self _localTapAtPoint:point];
         }
-    } else if (phase == TSTouchPhaseEnded) {
-        TS_TOUCH_LOG(@"点击 #%lu → 兜底通道结束 逻辑点(%.1f,%.1f)(无系统回显概念: 走的是 AX/进程内 API)",
-                     (unsigned long)s_clickSeq, (double)point.x, (double)point.y);
     }
+    // 兜底通道的 UP/MOVE 不再单独记日志: AX / 进程内 UIControl 的成败已在上面那两次
+    // 调用里逐条写明(它们就是"兜底这次点到没点到"的答案), 再来一行"结束"纯属噪音。
 }
 
 /// app 进程内 IOHID 直发 —— 逐字段对齐原版 TrollAutoScript HUDServices 2.3.6。

@@ -8,6 +8,10 @@
 //    touch.log = 程序自身产生的日志(引擎诊断/运行时/senderID/脚本启停等)
 //    debug.log = main.lua 主动写入的 log/logStr/print
 //  两类日志统一进内存 logs(UI 查看日志时全部可见), 仅文件按类别分流。
+//
+//  容量上限(2026-09-11): 内存每来源保留最新 500 行; 每个日志文件同样最多 500 行
+//  (超出即裁剪为最新 500 行) —— 挂机脚本时长跑, 日志无限增长会占内存/IO 与界面
+//  重绘时间, 500 行足够回溯"最近发生了什么"。
 
 #import <Foundation/Foundation.h>
 
@@ -17,19 +21,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)shared;
 
-/// 最近的全部日志（最多保留 2000 条，带时间戳，两类日志合并）
+/// 最近的全部日志（最多保留 500 条，带时间戳，两类日志合并）
 @property (nonatomic, readonly) NSArray<NSString *> *logs;
 
-/// 按日志来源返回内存日志（最多各保留 2000 条，带时间戳）:
+/// 按日志来源返回内存日志（最多各保留 500 条，带时间戳）:
 ///   fileName == "debug.log" → 脚本主动日志 (main.lua 的 log/logStr/print)
 ///   其他 (如 "touch.log")   → 程序自身日志
 /// 供设置页"查看脚本日志"/"查看系统日志"按来源分别展示。
 - (NSArray<NSString *> *)logsForFile:(NSString *)fileName;
 
 /// 某来源日志的"行号游标体系"最新值(单调递增)。
-/// 每来源每条日志获得一个自增行号(0 起)；内存只保留最新 2000 行，
+/// 每来源每条日志获得一个自增行号(0 起)；内存只保留最新 500 行，
 /// 更早的行被淘汰但行号继续增长，故以"行号"而非"数组下标"做增量游标，
-/// 可避免日志满 2000 条后下标停在 2000、新日志永远无法被增量拉取的 bug。
+/// 可避免日志满 500 条后下标停在 500、新日志永远无法被增量拉取的 bug。
 - (NSInteger)logSeqTotalForFile:(NSString *)fileName;
 
 /// 增量拉取某来源日志（供 HTTP /api/log 使用）：

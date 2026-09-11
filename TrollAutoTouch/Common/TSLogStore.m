@@ -6,9 +6,14 @@
 #import "TSLogStore.h"
 #import "TSPaths.h"
 
-static const NSUInteger kMaxLogCount = 2000;
+// 单来源内存/界面保留行数(2026-09-11 由 2000 收紧到 500: 挂机脚本时长跑,
+// 日志越多越占内存与 UI 重绘时间, 500 行足够看清"最近发生了什么")。
+static const NSUInteger kMaxLogCount = 500;
 static const NSUInteger kFileFlushBatch = 50;   // 攒满 50 条批量落盘
-static const NSUInteger kMaxLogFileBytes = 5 * 1024 * 1024;
+// 日志文件行数上限(2026-09-11 新增): touch.log / debug.log 各自最多 500 行,
+// 超出即裁剪为"最新 500 行"。行数是精确维护的(见 _lineCountForPath: 说明),
+// 不靠文件大小估算, 所以不会出现"说是 500 行实际几千行"的情况。
+static const NSUInteger kMaxLogFileLines = 500;
 
 // 日志文件写入队列(串行)，避免阻塞主线程
 static dispatch_queue_t LogFileQueue(void) {
@@ -30,6 +35,26 @@ static NSDateFormatter *LogTimeFormatter(void) {
         df.dateFormat = @"HH:mm:ss";
     });
     return df;
+}
+
+// 各日志文件当前的行数(键 = 文件路径)。
+// 用于把文件行数严格控制在 kMaxLogFileLines(500): 首次访问某文件时读文件统计一次,
+// 之后每次写入在该值上累加。调用方需持有 @synchronized(self) —— 只在 TSLogStore 内使用。
+static NSMutableDictionary<NSString *, NSNumber *> *s_logFileLines = nil;
+
+static NSMutableDictionary<NSString *, NSNumber *> *LogFileLines(void) {
+    if (!s_logFileLines) s_logFileLines = [NSMutableDictionary dictionary];
+    return s_logFileLines;
+}
+
+// 日志文件内容 → 非空行数组(统计行数 / 裁剪尾部共用)
+static NSArray<NSString *> *TSNonEmptyLines(NSString *content) {
+    if (content.length == 0) return @[];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (NSString *line in [content componentsSeparatedByString:@"\n"]) {
+        if (line.length > 0) [out addObject:line];
+    }
+    return out;
 }
 
 @implementation TSLogStore {
@@ -84,8 +109,12 @@ static NSDateFormatter *LogTimeFormatter(void) {
     if (content.length == 0) return;
     NSArray<NSString *> *lines = [content componentsSeparatedByString:@"\n"];
     @synchronized (self) {
+        // 记录文件真实行数: 内存数组只留 kMaxLogCount 行, 但文件可能仍有更多行,
+        // 后续写入时据此判断是否需要裁剪到 500 行。
+        NSUInteger fileLines = 0;
         for (NSString *line in lines) {
             if (line.length == 0) continue;
+            fileLines += 1;
             [source addObject:line];
             [_logs addObject:line];
             (*seqPtr) += 1;   // 每读入一行分配一个新行号
@@ -96,6 +125,7 @@ static NSDateFormatter *LogTimeFormatter(void) {
                 [_logs removeObjectsInRange:NSMakeRange(0, _logs.count - kMaxLogCount)];
             }
         }
+        LogFileLines()[path] = @(fileLines);
     }
 }
 
@@ -226,9 +256,17 @@ static NSDateFormatter *LogTimeFormatter(void) {
         [_debugPending removeAllObjects];
         _touchSeqTotal = 0;   // 行号随清空归零，客户端游标将失效(cleared)由全量替换校正
         _debugSeqTotal = 0;
-        [[NSFileManager defaultManager] removeItemAtPath:self.logFilePath error:nil];
-        [[NSFileManager defaultManager] removeItemAtPath:self.debugLogFilePath error:nil];
     }
+    // 删文件 + 重置行数缓存放到日志队列上执行: 与该队列上的落盘/裁剪串行,
+    // 避免"清空后又被一个在途批次写回"或与行数缓存产生竞态。
+    NSString *touchPath = self.logFilePath;
+    NSString *debugPath = self.debugLogFilePath;
+    dispatch_sync(LogFileQueue(), ^{
+        LogFileLines()[touchPath] = @0;
+        LogFileLines()[debugPath] = @0;
+        [[NSFileManager defaultManager] removeItemAtPath:touchPath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:debugPath error:nil];
+    });
 }
 
 #pragma mark - File
@@ -268,12 +306,7 @@ static NSDateFormatter *LogTimeFormatter(void) {
     if (lines.count == 0 || path.length == 0) return;
     [TSPaths ensureDirectoriesExist];
 
-    // 日志文件上限 5MB: 超出则重置, 只保留最新批次, 防止无限膨胀
-    NSDictionary *attrs = [[NSFileManager defaultManager]
-                           attributesOfItemAtPath:path error:nil];
-    if (attrs && [attrs[NSFileSize] unsignedLongLongValue] > kMaxLogFileBytes) {
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-    }
+    NSUInteger linesInFile = [self _lineCountForPath:path];
 
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
     if (!fh) {
@@ -294,6 +327,48 @@ static NSDateFormatter *LogTimeFormatter(void) {
             [fh closeFile];
         }
     }
+
+    // 行数上限(500): 超出即裁剪为"最新 500 行", 精确按行裁 —— 旧实现只在文件超过
+    // 5MB 时整体删除, 挂机数小时会攒出上万行, 每次追加都变慢, 也占内存/流量。
+    NSUInteger total = linesInFile + lines.count;
+    if (total > kMaxLogFileLines) {
+        total = [self _trimFile:path keep:kMaxLogFileLines];
+    }
+    @synchronized (self) {
+        LogFileLines()[path] = @(total);
+    }
+}
+
+// 该文件当前行数: 首次询问时读文件统计一次, 之后由写入/裁剪结果缓存 ——
+// 避免每次落盘都整读文件(落盘最多每 50 条或 1 秒一次, 读的是 ≤500 行的小文件)。
+- (NSUInteger)_lineCountForPath:(NSString *)path {
+    @synchronized (self) {
+        NSNumber *cached = LogFileLines()[path];
+        if (cached) return cached.unsignedIntegerValue;
+    }
+    NSString *content = [NSString stringWithContentsOfFile:path
+                                                  encoding:NSUTF8StringEncoding
+                                                     error:nil];
+    NSUInteger count = TSNonEmptyLines(content).count;
+    @synchronized (self) {
+        LogFileLines()[path] = @(count);
+    }
+    return count;
+}
+
+// 把日志文件裁剪为"最新 keep 行", 返回裁剪后的行数(文件不存在/读失败返回 0)。
+- (NSUInteger)_trimFile:(NSString *)path keep:(NSUInteger)keep {
+    NSString *content = [NSString stringWithContentsOfFile:path
+                                                  encoding:NSUTF8StringEncoding
+                                                     error:nil];
+    NSArray<NSString *> *lines = TSNonEmptyLines(content);
+    if (lines.count <= keep) return lines.count;
+    NSArray<NSString *> *tail = [lines subarrayWithRange:NSMakeRange(lines.count - keep, keep)];
+    [[tail componentsJoinedByString:@"\n"] writeToFile:path
+                                            atomically:YES
+                                              encoding:NSUTF8StringEncoding
+                                                 error:nil];
+    return keep;
 }
 
 @end

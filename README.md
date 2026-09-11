@@ -50,6 +50,9 @@ IOHIDEventAppendEvent / IOHIDEventSetSenderID
 做法：构造一个 digitizer（数位板）父事件（Hand 容器，index=0/identity=1）+ 一根 finger 子事件（18 参 `WithQuality`，index=0/identity=2），父事件掩码 `down=0x863 / move=0x844 / up=0x823`、子事件掩码 `down=0x803 / move=0x844 / up=0x803`，并用 `...WithOptions`（options=`0xF0000000`）写私有字段，最后设 `senderID=0x8000000817319371`（子事件 `+1`）通过 `IOHIDEventSystemClientDispatchEvent` 投递给 `backboardd`。这是原版 `HUDServices` 2.3.6 的逐字段还原（反汇编得到），**系统级、跨 App**，不需要 XCTest 测试宿主。
 
 > 见 `Core/TSHIDEventTouch.m`。私有函数签名随 iOS 版本略有差异，已加注释。
+>
+> iOS 16.6 实测生效的完整机制说明（逐字段事件构造、senderID 策略、entitlements、
+> 通道回退、日志判定）见 **[`TrollAutoTouch_iOS16.6点击生效说明.md`](TrollAutoTouch_iOS16.6点击生效说明.md)**。
 
 #### 怎么在 touch.log 里确认"这次点击真的发生了"
 跑自己的脚本时，每次点击在 `touch.log` 里固定落 2 行（滑动会多几行 MOVE，节流每秒最多 1 条）：
@@ -63,6 +66,9 @@ IOHIDEventAppendEvent / IOHIDEventSetSenderID
   `N > 0` → 事件被系统接收；`N = 0` → 事件很可能在入口就被丢弃，这次点击等于没发生；
 - 走兜底通道时同样有 `← 本应用点击(兜底通道…)` 行，并会打印 AX / 进程内 UIControl 的成功或失败原因。
 - 回显依赖常驻的监听 client，因此程序**不会**再像旧版那样"拿到真实 senderID 就释放监听"。
+- 日志容量：`touch.log` / `debug.log` **各自最多 500 行**（超出裁剪为最新 500 行），
+  内存与设置页同样保留 500 行；高频/重复日志（tap 坐标映射、后台任务续期、音量键停止步骤、
+  重复 toast 等）已限流或删除，避免挂机时日志拖慢脚本。
 
 ### 2. 截屏
 通过 `IOMobileFramebuffer` + `IOSurface` 私有框架读取 GPU 帧缓冲，可截任意 App。失败时回退到 `UIGraphicsImageRenderer`（仅本 App 窗口）。见 `Core/TSScreenCapture.m`。

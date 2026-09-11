@@ -678,16 +678,16 @@ static NSData *WSTextFrame(NSString *text) {
 }
 
 // API: GET /api/log?file=debug.log&after=<行号游标>
-// 增量返回设备内存日志（每来源最多保留最近 2000 行，行格式 [HH:mm:ss] 消息）:
+// 增量返回设备内存日志（每来源最多保留最近 500 行，行格式 [HH:mm:ss] 消息）:
 //   file      debug.log = 脚本主动日志(log/logStr/print), touch.log = 程序自身日志
 //   after     客户端已知的最新行号(上次返回的 nextIndex)；首次不传或传 0
 // 响应:
 //   lines     本次新增的行（可能为空）
-//   nextIndex 当前最新行号(单调递增，可能 >2000)，下次请求把它作为 after 传回
+//   nextIndex 当前最新行号(单调递增，可能 >500)，下次请求把它作为 after 传回
 //   cleared   内存日志被清空 / 游标行已被淘汰 / 客户端行号超前 时为 true，
 //             客户端应全量替换显示（返回的 lines 即全量）
-// 注意: 游标用"行号"而非"数组下标"——日志满 2000 行后会淘汰最老行，
-//       行号持续增长；若仍用下标，游标会永远停在 2000 导致新日志拉不到(不实时)。
+// 注意: 游标用"行号"而非"数组下标"——日志满 500 行后会淘汰最老行，
+//       行号持续增长；若仍用下标，游标会永远停在 500 导致新日志拉不到(不实时)。
 // 注意: query 为 handleHTTP 剥离后的查询串(不含前导 '?')。
 - (void)serveLog:(int)clientFd query:(NSString *)query {
     NSString *file = [self queryValue:query key:@"file"];

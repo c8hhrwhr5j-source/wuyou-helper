@@ -249,10 +249,9 @@ static unsigned long long TS_mallocInUse(void) {
         ip, TS_COLD_CONTROL_PORT]];
 }
 
-- (void)applicationWillResignActive:(UIApplication *)application {
-    [[TSLogStore shared] append:@"[App] willResignActive 即将失活"];
-}
-
+// applicationWillResignActive 已移除(2026-09-11): 它此前只做一件事 —— 往 touch.log
+// 写一行"即将失活", 但下拉控制中心/弹通知/切后台都会触发, 属纯噪音;
+// 真正的后台状态变化由下面 didEnterBackground 记录。
 - (void)applicationDidEnterBackground:(UIApplication *)application {
     [[TSLogStore shared] append:@"[App] didEnterBackground 进入后台"];
     [[TSDaemonManager shared] beginBackgroundTask];

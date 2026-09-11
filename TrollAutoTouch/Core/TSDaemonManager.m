@@ -31,6 +31,9 @@
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTaskId;
 @property (nonatomic, assign) BOOL hudVisible;
 @property (nonatomic, assign) BOOL silentStarted;  // 静音保活是否已启动(幂等保护)
+// 处于"到期续期"内部循环中(见 beginBackgroundTask 的 expirationHandler):
+// 续期产生的 结束/开始 不再逐条写 touch.log, 只由续期计数统一限流记录。
+@property (nonatomic, assign) BOOL renewingBackgroundTask;
 @end
 
 @implementation TSDaemonManager
@@ -147,14 +150,31 @@
 
     _bgTaskId = [[UIApplication sharedApplication] beginBackgroundTaskWithName:@"TrollAutoTouch.Daemon"
                                                               expirationHandler:^{
-        NSLog(@"[Daemon] 后台任务即将到期，重新申请...");
-        [[TSDaemonManager shared] log:@"后台任务即将到期, 重新申请"];
-        [[TSDaemonManager shared] endBackgroundTask];
-        [[TSDaemonManager shared] beginBackgroundTask];
+        // ── 续期日志限流(2026-09-11) ──
+        // iOS 后台任务有效期约 180 秒, 挂机时每 ~3 分钟续期一次; 旧实现每次续期写
+        // 3 行日志(到期/结束/开始), 跑 8 小时就是 ~480 行 —— 单靠 500 行上限会把有用
+        // 日志全部顶掉, 并且每次都是同步格式化 + 文件 IO。现在续期只记录第 1 次与
+        // 之后每 20 次各一条(其余仅 NSLog), 后台任务机制本身完全不变。
+        static NSUInteger s_bgRenewCount = 0;
+        s_bgRenewCount += 1;
+        NSLog(@"[Daemon] 后台任务即将到期，重新申请(第 %lu 次)", (unsigned long)s_bgRenewCount);
+        if (s_bgRenewCount == 1 || s_bgRenewCount % 20 == 0) {
+            [[TSDaemonManager shared] log:[NSString stringWithFormat:
+                @"后台任务续期第 %lu 次(约每 %d 分钟一次, 每 20 次记一条)",
+                (unsigned long)s_bgRenewCount, (int)(180 / 60)]];
+        }
+        TSDaemonManager *mgr = [TSDaemonManager shared];
+        mgr.renewingBackgroundTask = YES;
+        [mgr endBackgroundTask];
+        [mgr beginBackgroundTask];
+        mgr.renewingBackgroundTask = NO;
     }];
 
     NSLog(@"[Daemon] 后台任务已开始: %lu", (unsigned long)_bgTaskId);
-    [self log:[NSString stringWithFormat:@"后台任务已开始: %lu", (unsigned long)_bgTaskId]];
+    // 续期循环内部的 开始/结束 不写 touch.log(由上面的计数限流统一表达)
+    if (!_renewingBackgroundTask) {
+        [self log:[NSString stringWithFormat:@"后台任务已开始: %lu", (unsigned long)_bgTaskId]];
+    }
 }
 
 - (void)endBackgroundTask {
@@ -162,7 +182,9 @@
 
     [[UIApplication sharedApplication] endBackgroundTask:_bgTaskId];
     NSLog(@"[Daemon] 后台任务已结束: %lu", (unsigned long)_bgTaskId);
-    [self log:[NSString stringWithFormat:@"后台任务已结束: %lu", (unsigned long)_bgTaskId]];
+    if (!_renewingBackgroundTask) {
+        [self log:[NSString stringWithFormat:@"后台任务已结束: %lu", (unsigned long)_bgTaskId]];
+    }
     _bgTaskId = UIBackgroundTaskInvalid;
 }
 

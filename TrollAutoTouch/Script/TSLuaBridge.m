@@ -209,7 +209,12 @@ static int l_ts_searcher_virtual(lua_State *L) {
 
 - (void)_handleSenderIDDidChange:(NSNotification *)note {
     uint64_t sid = [note.userInfo[@"senderID"] unsignedLongLongValue];
-    lua_log([NSString stringWithFormat:@"[touch] 已获取真实触摸 senderID: 0x%llX, 点击注入已就绪", sid]);
+    // 措辞对齐事实: 直发**不使用**这个真实值(原版固定 0x8000000817319371),
+    // 这里只把"系统里存在触屏设备"这一事实告知脚本日志 ——
+    // 旧文案"点击注入已就绪"会让人误以为点击依赖它(实际依赖固定值)。
+    lua_log([NSString stringWithFormat:
+             @"[touch] 检测到系统真实触屏 senderID=0x%llX (仅记录: 直发固定用 0x%llX, 不受其影响)",
+             sid, (unsigned long long)[TSHIDEventTouch shared].senderID]);
 }
 
 - (void)setIsRunning:(BOOL)isRunning {
@@ -531,8 +536,14 @@ static int l_sys_toast(lua_State *L) {
     BOOL hidden = NO;
     if (lua_type(L, 3) == LUA_TBOOLEAN) hidden = lua_toboolean(L, 3);
 
-    lua_log([NSString stringWithFormat:@"[toast] %@ (%gms, hidden=%d)",
-             message, duration * 1000, hidden]);
+    // 连续相同内容的 toast 只记一条: 挂机脚本常在循环里反复 toast 同一句提示,
+    // 逐条记录会白占 touch.log 的 500 行额度(内容本身没有任何新信息)。
+    static NSString *s_lastToastMsg = nil;
+    if (![message isEqualToString:s_lastToastMsg]) {
+        s_lastToastMsg = [message copy];
+        lua_log([NSString stringWithFormat:@"[toast] %@ (%gms, hidden=%d)",
+                 message, duration * 1000, hidden]);
+    }
 
     // showToast 内部异步派发到主线程, 这里立即返回 (非阻塞)。
     [[TSHUDHost shared] showToast:message duration:duration hidden:hidden];
@@ -1156,6 +1167,14 @@ static int l_screen_unkeep(lua_State *L) {
 
 #pragma mark - 触摸
 
+// ── 低频诊断日志预算(2026-09-11 新增, 属"去掉无用日志"措施) ──
+// tap 的"脚本坐标 → 物理像素 → 逻辑点"映射只在脚本开头几条有意义(用来核对坐标
+// 变换/横竖屏旋转是否正确); 挂机脚本每秒可能点几次, 逐条打印会迅速淹没 500 行的
+// touch.log, 并让每次点击都多一次字符串格式化。故每次脚本启动只放行前 3 条,
+// 坐标越界等异常仍然照打(见 l_touch_tap)。
+static NSInteger s_tapLogBudget = 0;
+static void TSLuaLogBudgetReset(void) { s_tapLogBudget = 3; }
+
 static int l_touch_tap(lua_State *L) {
     // @autoreleasepool: 触摸注入内部经 NSInvocation/NSMethodSignature 调用 SpringBoard,
     // 每次调用产生若干 autoreleased 对象, 挂机高频触摸需每次 drain
@@ -1173,13 +1192,18 @@ static int l_touch_tap(lua_State *L) {
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
     CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
-    // 点击流水(每次 tap 一条, tap 频率低不会刷屏): 脚本坐标 -> 竖屏物理像素 -> 逻辑点。
-    // 用于区分"脚本根本没点"与"点了但系统没受理", 并可核对横屏坐标旋转是否正确;
-    // C 层"直发 DOWN ..."那一条则证明事件确实下发到了 IOHID。
-    lua_log([NSString stringWithFormat:
-             @"[touch] tap 脚本(%.0f,%.0f) -> 竖屏像素(%.0f,%.0f) -> 逻辑点(%.1f,%.1f)",
-             (double)x, (double)y, (double)sp.x, (double)sp.y,
-             (double)(sp.x / sc), (double)(sp.y / sc)]);
+    // 坐标映射核对: 每次脚本启动只记前 3 条(见 s_tapLogBudget), 越界坐标始终记录。
+    // 具体"有没有点到"由 C 层直发日志回答(直发 DOWN / 系统回显 / UP 总结)。
+    CGSize px = screenPixelSize();
+    BOOL outOfScreen = (sp.x < 0 || sp.y < 0 || sp.x > px.width || sp.y > px.height);
+    if (s_tapLogBudget > 0 || outOfScreen) {
+        if (s_tapLogBudget > 0) s_tapLogBudget -= 1;
+        lua_log([NSString stringWithFormat:
+                 @"[touch] tap 脚本(%.0f,%.0f) -> 竖屏像素(%.0f,%.0f) -> 逻辑点(%.1f,%.1f)%@",
+                 (double)x, (double)y, (double)sp.x, (double)sp.y,
+                 (double)(sp.x / sc), (double)(sp.y / sc),
+                 outOfScreen ? @" ⚠ 超出屏幕(检查脚本坐标/横竖屏)" : @""]);
+    }
     [touch tapAtPoint:CGPointMake(sp.x / sc, sp.y / sc)
              duration:dur
              pressure:pressure radius:radius];
@@ -3249,6 +3273,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     // 明确标记脚本真正进入执行阶段, 便于远程启动排查
     lua_log([NSString stringWithFormat:@"[Lua] 开始运行: %@",
              path ? path.lastPathComponent : @"(字符串代码)"]);
+    // 重置"低频诊断日志"预算: 挂机脚本里这类日志只在开头几条有价值,
+    // 逐条打印会迅速淹没 500 行的 touch.log(见 s_tapLogBudget 说明)。
+    TSLuaLogBudgetReset();
 
     // 预热 HUD 宿主 (单 App 架构): 提前创建全屏透明窗口并注册 SBS 系统级托管,
     // 使首次音量键弹窗即时可用; 失败不阻塞脚本 (弹窗会回退前台可见/静默切换)。

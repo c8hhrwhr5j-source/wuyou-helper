@@ -190,7 +190,10 @@ enum {
     _running = NO;
     _stopping = YES;   // 通知后台 BKS 注册线程立即退出, 避免与清理并发
 
-    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 移除 KVO/通知"];
+    // 停止流程的中间步骤只走 NSLog, 不再逐条写 touch.log(2026-09-11):
+    // 原本 7 行"stop: 步骤"日志是为排查停止时闪退加的, 但每次停止都写 7 行属于噪音,
+    // 且会顶掉 500 行上限里真正有用的内容 —— 结束时保留一条汇总行即可(见本方法末尾)。
+    NSLog(@"[TSVolumeKeyMonitor] stop: 移除 KVO/通知");
     @try {
         [[AVAudioSession sharedInstance] removeObserver:self
                                              forKeyPath:@"outputVolume"
@@ -225,11 +228,11 @@ enum {
     } else {
         cleanBKS();
     }
-    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: BKS 清理已提交"];
+    NSLog(@"[TSVolumeKeyMonitor] stop: BKS 清理已提交");
 
     // 清理 CPDM (SpringBoard 硬件按键)
     if (_messagingCenter) {
-        [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 清理 CPDM 中心"];
+        NSLog(@"[TSVolumeKeyMonitor] stop: 清理 CPDM 中心");
         @try {
             // 取消 delegate
             SEL setDelSel = NSSelectorFromString(@"setDelegate:");
@@ -247,7 +250,7 @@ enum {
         }
         _messagingCenter = nil;
     }
-    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: CPDM 清理完成"];
+    NSLog(@"[TSVolumeKeyMonitor] stop: CPDM 清理完成");
 
     // 清理 IOHID —— ⚠️ 绝不销毁、绝不解绑:
     // iOS 15.8 / TrollStore (无 platform 身份) 下已证实的 IOKit 内部崩溃路径:
@@ -257,7 +260,7 @@ enum {
     // 因此 client 只创建一次、进程生命周期内复用:
     // 关闭时仅取消回调 + 清空匹配 (两者已证实安全), dispatch queue 绑定保持到进程退出。
     if (_hidClient) {
-        [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 取消 IOHID 监听 (保留 client 复用)"];
+        NSLog(@"[TSVolumeKeyMonitor] stop: 取消 IOHID 监听 (保留 client 复用)");
         @try {
             // 1) 取消事件回调 (安全)
             void (*fnUnregister)(IOHIDEventSystemClientRef, void *, void *, void *) =
@@ -275,7 +278,7 @@ enum {
             NSLog(@"[TSVolumeKeyMonitor] IOHID 清理异常: %@ %@", e.name, e.reason);
         }
     }
-    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: IOHID 清理完成"];
+    NSLog(@"[TSVolumeKeyMonitor] stop: IOHID 清理完成");
 
     _avSystemController = nil;
     if (_timer) {
@@ -286,7 +289,8 @@ enum {
         dispatch_source_cancel(_watchdogTimer);
         _watchdogTimer = nil;
     }
-    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 全部完成"];
+    // 一条汇总(替代原来的 7 条"步骤"日志): 中间步骤仍可从设备控制台(NSLog)看到
+    [[TSLogStore shared] append:@"[TSVolumeKeyMonitor] stop: 清理完成(KVO/通知 + BKS + CPDM + IOHID)"];
 }
 
 // ═══════════ 主通道①: BKS 硬件事件路由 (BackBoardServices.framework) ═══════════
