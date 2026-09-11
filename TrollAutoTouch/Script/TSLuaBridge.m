@@ -1193,10 +1193,12 @@ static int l_touch_status(lua_State *L) {
 }
 
 /// touch.probe(): 主动枚举本机 digitizer(触屏)服务取真实 senderID —— 不需要真实手指触摸。
-/// 返回探测到的 senderID(0 = 未取到); 枚举明细写入 touch.log。
+/// 返回探测到的 senderID 的【十六进制字符串】(如 "0x931C5CF1E3A24768"), 未取到返回 "0x0"。
+/// 为什么用字符串: senderID 是 64 位值, 而 Lua 数字是 double(53 位尾数), 以数字传递会丢低位
+/// 精度 —— 发出去的 senderID 就变成另一个值, 系统静默丢弃, 排查时看不出任何异常。
 static int l_touch_probe(lua_State *L) {
     uint64_t sid = [[TSHIDEventTouch shared] probeSenderID];
-    lua_pushnumber(L, (lua_Number)sid);
+    lua_pushstring(L, [NSString stringWithFormat:@"0x%llX", (unsigned long long)sid].UTF8String);
     return 1;
 }
 
@@ -1226,7 +1228,8 @@ static int l_touch_setSenderID(lua_State *L) {
         v = (uint64_t)luaL_checknumber(L, 1);
     }
     uint64_t got = [[TSHIDEventTouch shared] setSenderIDValue:v];
-    lua_pushnumber(L, (lua_Number)got);
+    // 回传十六进制字符串(64 位值经 Lua double 会丢精度, 见 l_touch_probe 说明)
+    lua_pushstring(L, [NSString stringWithFormat:@"0x%llX", (unsigned long long)got].UTF8String);
     return 1;
 }
 
@@ -1245,6 +1248,55 @@ static int l_touch_channel(lua_State *L) {
                  @"(0=自动 1=仅直发 2=仅本应用点击)", (long)m]);
     }
     lua_pushinteger(L, (lua_Integer)t.channel);
+    return 1;
+}
+
+/// touch.senderIDs(): 返回本机枚举到的 digitizer(触屏)候选 senderID, 每项一张表:
+///   { id = "0x931C5CF1E3A24768", index = <1 起序号>, usage = <0x4 等>,
+///     product = "...", transport = "..." }
+/// id 是【十六进制字符串】(64 位值走 Lua double 会丢精度, 见 l_touch_probe 说明),
+/// 可直接回传给 touch.setSenderID()。用于逐个试出"本机真正被系统受理"的那一个。
+static int l_touch_senderIDs(lua_State *L) {
+    NSArray<NSDictionary *> *list = [[TSHIDEventTouch shared] senderIDCandidates];
+    lua_newtable(L);
+    lua_Integer i = 1;
+    for (NSDictionary *d in list) {
+        lua_newtable(L);
+        NSString *hex = [NSString stringWithFormat:@"0x%llX", [d[@"value"] unsignedLongLongValue]];
+        lua_pushstring(L, hex.UTF8String);                                  lua_setfield(L, -2, "id");
+        lua_pushinteger(L, i);                                              lua_setfield(L, -2, "index");
+        lua_pushinteger(L, (lua_Integer)[d[@"usage"] longValue]);           lua_setfield(L, -2, "usage");
+        lua_pushstring(L, [(d[@"product"] ?: @"") UTF8String]);             lua_setfield(L, -2, "product");
+        lua_pushstring(L, [(d[@"transport"] ?: @"") UTF8String]);           lua_setfield(L, -2, "transport");
+        lua_rawseti(L, -2, i);
+        i += 1;
+    }
+    return 1;
+}
+
+/// touch.useSenderIDAt(i): 启用候选列表第 i 项(Lua 序号从 1 起), 并持久化。
+/// 返回生效值的十六进制字符串。这是"精确"的用法 —— 不需要把 64 位值交给 Lua 数字。
+static int l_touch_useSenderIDAt(lua_State *L) {
+    NSInteger idx = (NSInteger)luaL_checkinteger(L, 1) - 1;   // Lua 1 起 → 内部 0 起
+    uint64_t v = [[TSHIDEventTouch shared] useSenderIDCandidateAtIndex:idx];
+    lua_pushstring(L, [NSString stringWithFormat:@"0x%llX", (unsigned long long)v].UTF8String);
+    return 1;
+}
+
+/// touch.watch(ms): 监听 ms 毫秒内"系统真实触摸事件"的 senderID —— 期间请用肉手在屏幕上
+/// 点/滑几下(此间不要跑脚本点击)。返回去重后的十六进制字符串数组(可能为空)。
+/// 这是本机真实值最可信的来源: 不靠服务枚举顺序猜, 也不受历史保存脏值影响。
+static int l_touch_watch(lua_State *L) {
+    NSInteger ms = (NSInteger)luaL_optinteger(L, 1, 8000);
+    NSArray<NSNumber *> *ids = [[TSHIDEventTouch shared] watchSenderIDsForMilliseconds:ms];
+    lua_newtable(L);
+    lua_Integer i = 1;
+    for (NSNumber *n in ids) {
+        NSString *hex = [NSString stringWithFormat:@"0x%llX", n.unsignedLongLongValue];
+        lua_pushstring(L, hex.UTF8String);
+        lua_rawseti(L, -2, i);
+        i += 1;
+    }
     return 1;
 }
 
@@ -2678,6 +2730,9 @@ static void lua_register_all(lua_State *L) {
         {"touchResetSenderID", l_touch_resetSenderID},
         {"touchSetSenderID",   l_touch_setSenderID},
         {"touchChannel",       l_touch_channel},
+        {"touchSenderIDs",     l_touch_senderIDs},
+        {"touchUseSenderIDAt", l_touch_useSenderIDAt},
+        {"touchWatch",         l_touch_watch},
         {"findText",    l_screen_findText},
         {NULL, NULL}
     };
@@ -2699,6 +2754,9 @@ static void lua_register_all(lua_State *L) {
         {"resetSenderID", l_touch_resetSenderID},
         {"setSenderID",   l_touch_setSenderID},
         {"channel",       l_touch_channel},
+        {"senderIDs",     l_touch_senderIDs},
+        {"useSenderIDAt", l_touch_useSenderIDAt},
+        {"watch",         l_touch_watch},
         {NULL, NULL}
     };
     luaL_newlib(L, touchLib);

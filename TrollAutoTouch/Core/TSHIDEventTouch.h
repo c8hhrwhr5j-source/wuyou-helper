@@ -94,7 +94,20 @@ typedef NS_ENUM(NSInteger, TSTouchChannel) {
 /// 返回实际生效的 senderID。
 - (uint64_t)setSenderIDValue:(uint64_t)sid;
 
-/// 诊断状态描述（client 是否创建成功 / senderID 来源 / 通道 / 直发下发次数），供 Lua 层显示。
+/// 本机枚举到的 digitizer(触屏)服务候选列表, 每项: value / usage / product / transport。
+/// 枚举不到时退化为"保存值 + 固定伪装值"两个候选。供脚本逐个试出本机可用值。
+- (NSArray<NSDictionary *> *)senderIDCandidates;
+
+/// 启用候选列表第 index 项(0 起)作为 senderID 并持久化。越界返回 0。
+- (uint64_t)useSenderIDCandidateAtIndex:(NSInteger)index;
+
+/// 监听一段时间内系统真实触摸(digitizer)事件的 senderID —— 期间请用肉手在屏幕上点一下。
+/// 这是最可信的"本机真实 senderID"来源(不依赖服务枚举, 也不受候选顺序猜测影响);
+/// 返回观察到的去重值列表(可能为空: 该时段内没有任何真实触摸)。
+/// 注意: 期间不要同时跑脚本自己的点击 —— 内部虽有 1.5s 回显过滤, 但物理点击才是干净样本。
+- (NSArray<NSNumber *> *)watchSenderIDsForMilliseconds:(NSInteger)ms;
+
+/// 诊断状态描述（client 是否创建成功 / senderID 来源 / 通道 / 候选数 / 直发下发次数），供 Lua 层显示。
 - (NSString *)statusDescription;
 
 @end
