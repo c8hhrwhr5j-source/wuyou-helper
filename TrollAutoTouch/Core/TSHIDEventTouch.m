@@ -49,6 +49,16 @@
 //     覆盖回直发值并持久化。日志显示 0x10000069B 直发毫无反应, 覆盖后连固定值也丢了。
 //     现在固定值恒为直发值, 监听只做记录(见 TSHIDSenderIDCallback)。
 //
+//  ===== "到底有没有真的点到" 怎么看 (只看 touch.log 即可) =====
+//  脚本运行期每次点击在 touch.log 里落 2~3 行:
+//     点击 #12 ← 下发 DOWN 逻辑点(100.0,200.0) 归一化(0.2344,0.3125) finger=0 senderID=0x8000000817319371 通道=仅直发
+//     点击 #12 ✔ 系统回显第 1 次: 收到自己下发的事件 senderID=0x8000000817319371 (距下发 12ms)
+//     点击 #12 → 下发 UP 逻辑点(100.0,200.0) 起点(100.0,200.0) 用时 58ms | 系统回显 1 次: ✔ 已被 HID 事件系统接收(这次点击真的发生了)
+//    · 有 DOWN 行          = 脚本确实下发了这次点击(区分"脚本根本没点");
+//    · UP 行回显次数 > 0   = 事件被 HID 事件系统接收并回灌(与肉手触摸同一条通路) → 真的点到了;
+//    · UP 行回显次数 = 0   = 事件很可能在入口就被丢弃 → 这次点击等于没发生(即使坐标正确)。
+//  回显依赖常驻的监听 client, 因此 _setupSenderID 不再像旧版那样"拿到真实值就释放它"。
+//
 
 #import "TSHIDEventTouch.h"
 #import <UIKit/UIKit.h>
@@ -329,40 +339,57 @@ extern void IOHIDEventSetFloatValueWithOptions(IOHIDEventRef event, uint32_t fie
 #define kIOHIDEventFieldDigitizerMinorRadius   0x000b0015
 
 // ---------- 静态全局 ----------
-// 触摸事件发送者 ID：启动即设为默认固定触屏值(或已保存的真实值), 因此恒非 0;
-// 监听系统 digitizer 事件只用于自动纠错。多线程共享, 故用静态全局(ZXTouch 亦为全局)。
+// 触摸事件发送者 ID：恒为原版固定值(0x8000000817319371), 因此恒非 0。
+// 多线程共享, 故用静态全局(ZXTouch 亦为全局)。
 static uint64_t s_senderID = 0;
 // 当前值来源(诊断用): 见 TSSenderIDSourceName()
 static TSSenderIDSource s_senderIDSource = TSSenderIDSourceNone;
-// 最近一次直发(IOHIDEventSystemClientDispatchEvent)的时间戳, 用于过滤"自身回显":
-// 我们派发的事件会再次流经事件系统, 监听 client 可能收到自己刚发出去的那一颗
-// (其 senderID 正是我们自己设进去的值)。若据此"纠正", 就形成自证循环 ——
-// 保存值永远等于上次自己用的值, 真实值永远学不到、脏值永远洗不掉。
-// 这正是日志里"直发 DOWN 之后紧跟一条运行时监听到同一 senderID"的真相。
+// 最近一次直发(IOHIDEventSystemClientDispatchEvent)的时间戳, 用于判定"自身回显"的时效:
+// 我们派发的事件会再次流经事件系统, 监听 client 会收到自己刚发出去的那一颗
+// (其 senderID 正是我们自己设进去的值) —— 这正是"这次点击被系统接收了吗"的证据,
+// 也正因此, 自身事件绝不能参与"学习真实 senderID"(否则是自证循环)。
 static NSTimeInterval s_lastDispatchTime = 0;
 
-// 监听系统触摸屏(digitizer)事件，读取真实 senderID（ZXTouch setSenderIdCallback 同款）。
-// 回调通过 ScheduleWithRunLoop 调度到主 RunLoop，可安全访问 NSUserDefaults。
-// 该监听只做"自动纠错": 直发已经用默认固定值就绪, 这里等一次真实触摸确认/纠正即可,
-// 确认后立即释放监听 client(不会常驻)。target 传入 self (见 _setupSenderID)。
+// ---------- 点击受理确认(让用户在 touch.log 里一眼看出"到底有没有真的点到") ----------
+// 取证依据: 经 IOHIDEventSystemClientDispatchEvent 下发的事件会**再流经 HID 事件系统**,
+// 被本进程的监听 client 收到(即"自身回显"—— 这正是旧版日志里"直发 DOWN 之后紧跟一条
+// 监听到同一 senderID"的来源, 与肉手触摸走的是同一条事件通路)。
+//   · 有回显 → 事件确实被事件系统接收并回灌;
+//   · 0 回显 → 事件多半在入口处就被丢弃, 这次点击基本等于没发生。
+// 于是每个手势在 touch.log 落"DOWN 一行 + UP 一行总结(含回显次数)"。
+// (以下计数在 Lua 脚本线程与主 RunLoop 之间共享, 均为单字长读写; 极端情况最多差 1, 无害。)
+static NSUInteger   s_clickSeq        = 0;    // 当前点击编号(DOWN 时递增)
+static NSUInteger   s_clickEchoTotal  = 0;    // 本次点击收到的自身回显次数
+static NSUInteger   s_clickEchoLogged = 0;    // 本次点击已打印的回显日志条数(去重防刷屏)
+static NSTimeInterval s_clickDownTime = 0;    // 本次点击 DOWN 的下发时刻
+static CGPoint      s_clickDownPoint  = {0, 0}; // 本次点击的起始逻辑点(UP 总结里回显)
+
+// 监听系统触摸屏(digitizer)事件。回调通过 ScheduleWithRunLoop 调度到主 RunLoop。
+// 2026-09-11 起这个回调有两个职责:
+//   1. 【点击受理确认】识别"自身回显"(我们刚下发的事件被事件系统回灌) → 在 touch.log
+//      里为每次点击留下"系统已接收"的可见证据(见 s_clickEchoTotal 说明);
+//   2. 【记录真实触屏】系统里已有触屏(肉手)的真实 senderID, 仅记录, 不再改变直发值。
+// 监听 client 现在**常驻**(不再拿到真实值就释放), 否则脚本运行期间就没有回显证据了。
 static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef service, IOHIDEventRef event) {
     if (!event) return;
     if (IOHIDEventGetType(event) != kIOHIDEventTypeDigitizer) return;
     uint64_t sid = IOHIDEventGetSenderID(event);
     if (sid == 0) return;
 
-    // 自身回显过滤: 见 s_lastDispatchTime 说明 —— 少这道闸, 监听学到的永远是"自己上次设的值"。
-    if (s_lastDispatchTime > 0) {
-        NSTimeInterval dt = CFAbsoluteTimeGetCurrent() - s_lastDispatchTime;
-        if (dt >= 0 && dt < 1.5) {
-            static BOOL s_loggedEchoOnce = NO;
-            if (!s_loggedEchoOnce) {
-                s_loggedEchoOnce = YES;
-                TS_TOUCH_LOG(@"监听: 忽略疑似自身回显的 digitizer 事件(senderID=0x%llX, 距上次下发 %.2fs)",
-                             sid, dt);
-            }
-            return;
+    // ── 自身回显: 不再静默忽略, 而是当作"事件被系统接收"的可见证据 ──
+    // 判据同时看 senderID(父值/子值)与时效(距下发 1.5s 内), 不会再把"刚下完发就来了
+    // 一次肉手真触摸"误判成回显(旧实现只用时间判据, 会误伤)。
+    if (sid == s_senderID || sid == s_senderID + kTSHIDSenderIDChildOffset) {
+        s_clickEchoTotal += 1;
+        NSTimeInterval dt = (s_lastDispatchTime > 0)
+                          ? (CFAbsoluteTimeGetCurrent() - s_lastDispatchTime) : 999.0;
+        if (dt < 1.5 && s_clickEchoLogged < 3) {   // 一次点击最多 3 条, 滑动不刷屏
+            s_clickEchoLogged += 1;
+            TS_TOUCH_LOG(@"点击 #%lu ✔ 系统回显第 %lu 次: 收到自己下发的事件 senderID=0x%llX (距下发 %.0fms)",
+                         (unsigned long)s_clickSeq, (unsigned long)s_clickEchoTotal,
+                         sid, dt * 1000.0);
         }
+        return;   // 自身事件绝不能参与"学习真实 senderID"(否则是自证循环)
     }
 
     TSHIDEventTouch *self = (__bridge TSHIDEventTouch *)target;
@@ -383,22 +410,19 @@ static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef se
     // 原版已验证可用的固定值替换成直发无反应的 registryID(日志里的 0x10000069B),
     // 这是"重启几次后 / 挂机中点击失效"的直接原因之一。
     // 需要真实值时请用 touch.watch / touch.candidates 显式取用。
-    if (sid != s_senderID) {
-        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID=0x%llX; 当前直发用 0x%llX, 保持不纠正(原版固定值优先)",
+    // 真实触摸是高频事件流, 同一个 senderID 在 2 秒内只记一条, 避免把 touch.log 刷满。
+    static uint64_t       s_lastOtherSid = 0;
+    static NSTimeInterval s_lastOtherLog = 0;
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (sid != s_lastOtherSid || now - s_lastOtherLog > 2.0) {
+        s_lastOtherSid = sid;
+        s_lastOtherLog = now;
+        TS_TOUCH_LOG(@"监听: 收到系统已有触屏的真实触摸事件 senderID=0x%llX (直发用 0x%llX; 仅记录, 不改变直发值)",
                      sid, (unsigned long long)s_senderID);
-        // 仍是"拿到了真实 senderID"这一事实, 通知 Lua 桥接层做日志展示(不改变直发值)
+        // 通知 Lua 桥接层: 已拿到真实触摸的 senderID(方便脚本日志展示)
         [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
                                                             object:nil
                                                           userInfo:@{@"senderID": @(sid)}];
-    } else {
-        TS_TOUCH_LOG(@"运行时监听到真实触摸 senderID 0x%llX, 与当前直发值一致", sid);
-    }
-
-    // 已确认一次真实触摸值 → 监听使命完成, 释放监听 client(省掉每次系统触摸事件的回调检查)。
-    if (self) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self _releaseSenderIDClient];
-        });
     }
 }
 
@@ -463,7 +487,10 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     TSAXError err = copyAt(sysWide, (float)x, (float)y, &element);
     CFRelease(sysWide);
     if (err != TSAXErrorSuccess || !element) {
-        NSLog(@"[TSHIDEventTouch] AX 未找到元素 @(%.0f,%.0f) (err=%d) —— 目标可能无 accessibility 元素", x, y, (int)err);
+        // 必须写 touch.log: 这条以前的 NSLog 不进 touch.log, 用户看日志时无法判断
+        // "AX 是没找到元素" 还是 "根本没走这条路"。
+        TS_TOUCH_LOG(@"本应用点击(AX)失败 @逻辑点(%.1f,%.1f): 该坐标没有 accessibility 元素(err=%d)",
+                     (double)x, (double)y, (int)err);
         return NO;
     }
     err = perform(element, CFSTR("AXPress"));
@@ -712,26 +739,28 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
                  TSSenderIDSourceName(s_senderIDSource), TSChannelName(_channel),
                  (unsigned long long)probed, (unsigned long long)saved);
 
-    // 真实触摸监听: 仅观察/记录(见 TSHIDSenderIDCallback), 不再覆盖直发值。
+    // 真实触摸监听: 常驻。既记录系统已有触屏(肉手)的真实 senderID, 也负责识别
+    // "自身回显" —— 后者是"这次点击到底有没有被系统接收"的唯一进程内证据,
+    // 必须覆盖整个脚本运行期, 因此**不再**拿到真实值就释放 client(见 TSHIDSenderIDCallback)。
     _senderIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (!_senderIDClient) {
-        TS_TOUCH_LOG(@"创建 senderID 监听 client 失败 (不影响已就绪的直发)");
+        TS_TOUCH_LOG(@"创建 senderID 监听 client 失败 (不影响已就绪的直发; 但点击回显确认不可用)");
         return;
     }
     IOHIDEventSystemClientScheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-    // target 传 self: 回调记录真实值后经 _releaseSenderIDClient 注销回调并释放 client
     IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, (__bridge void *)self, NULL);
 }
 
-/// senderID 已获取后调用：注销回调、解除 runloop 调度并释放监听 client。
-/// 避免监听 client 常驻，让每个系统触摸事件都进回调检查（省掉持续的开销）。
+/// 注销回调、解除 runloop 调度并释放监听 client。
+/// 2026-09-11 起正常流程**不再调用**它(监听 client 要常驻才能持续做点击回显确认),
+/// 仅保留给异常/退出场景使用。
 - (void)_releaseSenderIDClient {
     if (!_senderIDClient) return;
     IOHIDEventSystemClientUnregisterEventCallback(_senderIDClient);
     IOHIDEventSystemClientUnscheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     CFRelease(_senderIDClient);
     _senderIDClient = NULL;
-    NSLog(@"[TSHIDEventTouch] senderID 已就绪, 已释放监听 client");
+    TS_TOUCH_LOG(@"已释放 senderID/回显监听 client(此后不再有点击回显确认)");
 }
 
 /// 当前屏幕逻辑尺寸
@@ -793,9 +822,22 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
                      _client ? @"OK" : @"NULL", (unsigned long long)s_senderID);
     }
     if (phase == TSTouchPhaseBegan) {
+        s_clickSeq += 1;
+        s_clickDownTime = CFAbsoluteTimeGetCurrent();
+        s_clickDownPoint = point;
+        s_clickEchoTotal = 0;
+        s_clickEchoLogged = 0;
+        // 兜底通道同样要在 touch.log 里留下"这次点击走到哪了"的记录 ——
+        // 与直发通道的 UP 总结行配对, 用户一眼就能看出走的是哪条路。
+        TS_TOUCH_LOG(@"点击 #%lu ← 本应用点击(兜底通道, 不是系统级触摸; 只对前台 App 生效) 逻辑点(%.1f,%.1f) 通道=%@",
+                     (unsigned long)s_clickSeq, (double)point.x, (double)point.y,
+                     TSChannelName(_channel));
         if (!TSAXTapAt(point.x, point.y)) {
             [self _localTapAtPoint:point];
         }
+    } else if (phase == TSTouchPhaseEnded) {
+        TS_TOUCH_LOG(@"点击 #%lu → 兜底通道结束 逻辑点(%.1f,%.1f)(无系统回显概念: 走的是 AX/进程内 API)",
+                     (unsigned long)s_clickSeq, (double)point.x, (double)point.y);
     }
 }
 
@@ -907,15 +949,24 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     IOHIDEventSystemClientDispatchEvent(_client, parent);
     CFRelease(parent);
     _dispatchCount += 1;
-    // 记录下发时刻: 监听回调据此过滤"自身回显"(见 s_lastDispatchTime 注释)
+    // 下发时刻: 监听回调据此判定"自身回显"的时效(见 s_lastDispatchTime 注释)
     s_lastDispatchTime = CFAbsoluteTimeGetCurrent();
 
+    // ── 5. touch.log 可见性: 每次点击 = 一行 DOWN + 一行 UP 总结 ──
+    // 用户跑自己的脚本时, 只靠这几行就能判断"到底有没有真的点到":
+    //   · 有 DOWN 行          → 脚本确实下发了这一次点击;
+    //   · UP 行回显次数 > 0   → 事件已被 HID 事件系统接收并回灌(与肉手触摸同一通路);
+    //   · UP 行回显次数 = 0   → 事件很可能在入口就被丢弃, 这次点击等于没发生。
     if (phase == TSTouchPhaseBegan) {
-        // 每次按下都落盘一条: 界面"点了没反应"时, 靠这行区分
-        // "脚本根本没点" 与 "点了但系统没受理"。
-        TS_TOUCH_LOG(@"直发 DOWN #%u 逻辑点(%.1f,%.1f) 归一化(%.4f,%.4f) senderID=0x%llX",
-                     index, (double)point.x, (double)point.y, (double)nx, (double)ny,
-                     (unsigned long long)s_senderID);
+        s_clickSeq += 1;
+        s_clickDownTime = s_lastDispatchTime;
+        s_clickDownPoint = point;
+        s_clickEchoTotal = 0;
+        s_clickEchoLogged = 0;
+        TS_TOUCH_LOG(@"点击 #%lu ← 下发 DOWN 逻辑点(%.1f,%.1f) 归一化(%.4f,%.4f) finger=%u senderID=0x%llX 通道=%@",
+                     (unsigned long)s_clickSeq, (double)point.x, (double)point.y,
+                     (double)nx, (double)ny, index,
+                     (unsigned long long)s_senderID, TSChannelName(_channel));
     } else if (phase == TSTouchPhaseMoved) {
         // MOVE 高频触发, 落盘是同步 I/O, 高速滑动时逐条打印会拖慢触摸线程,
         // 节流为每秒最多一条 (帧率/手感不受影响)。
@@ -923,9 +974,19 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
         NSTimeInterval now = CFAbsoluteTimeGetCurrent();
         if (now - s_lastMoveLogTime >= 1.0) {
             s_lastMoveLogTime = now;
-            TS_TOUCH_LOG(@"直发 MOVE #%u 逻辑点(%.1f,%.1f) 归一化(%.4f,%.4f)",
-                         index, (double)point.x, (double)point.y, (double)nx, (double)ny);
+            TS_TOUCH_LOG(@"点击 #%lu   MOVE 逻辑点(%.1f,%.1f) 归一化(%.4f,%.4f)",
+                         (unsigned long)s_clickSeq, (double)point.x, (double)point.y,
+                         (double)nx, (double)ny);
         }
+    } else if (phase == TSTouchPhaseEnded) {
+        NSTimeInterval cost = (s_clickDownTime > 0) ? (s_lastDispatchTime - s_clickDownTime) : 0;
+        TS_TOUCH_LOG(@"点击 #%lu → 下发 UP 逻辑点(%.1f,%.1f) 起点(%.1f,%.1f) 用时%.0fms | 系统回显 %lu 次: %@",
+                     (unsigned long)s_clickSeq, (double)point.x, (double)point.y,
+                     (double)s_clickDownPoint.x, (double)s_clickDownPoint.y, cost * 1000.0,
+                     (unsigned long)s_clickEchoTotal,
+                     s_clickEchoTotal > 0
+                        ? @"✔ 已被 HID 事件系统接收(这次点击真的发生了)"
+                        : @"✘ 未收到回显, 事件很可能被系统丢弃(这次点击没生效)");
     }
 }
 
@@ -950,6 +1011,10 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
             handled = YES;
             TS_TOUCH_LOG(@"本应用点击(进程内 UIControl)成功: %@ @逻辑点(%.1f,%.1f)",
                          NSStringFromClass(candidate.class), (double)point.x, (double)point.y);
+        } else {
+            // 以前这里是静默失败: 日志上"什么都没有"和"点了没效果"分不清。
+            TS_TOUCH_LOG(@"本应用点击(进程内 UIControl)失败 @逻辑点(%.1f,%.1f): 该坐标不是 UIControl 或无窗口",
+                         (double)point.x, (double)point.y);
         }
     };
     if ([NSThread isMainThread]) {

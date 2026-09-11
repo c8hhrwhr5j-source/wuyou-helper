@@ -51,6 +51,19 @@ IOHIDEventAppendEvent / IOHIDEventSetSenderID
 
 > 见 `Core/TSHIDEventTouch.m`。私有函数签名随 iOS 版本略有差异，已加注释。
 
+#### 怎么在 touch.log 里确认"这次点击真的发生了"
+跑自己的脚本时，每次点击在 `touch.log` 里固定落 2 行（滑动会多几行 MOVE，节流每秒最多 1 条）：
+```
+[touch] 点击 #12 ← 下发 DOWN 逻辑点(100.0,200.0) 归一化(0.2344,0.3125) finger=0 senderID=0x8000000817319371 通道=仅直发
+[touch] 点击 #12 ✔ 系统回显第 1 次: 收到自己下发的事件 senderID=0x8000000817319371 (距下发 12ms)
+[touch] 点击 #12 → 下发 UP 逻辑点(100.0,200.0) 起点(100.0,200.0) 用时 58ms | 系统回显 1 次: ✔ 已被 HID 事件系统接收(这次点击真的发生了)
+```
+- 出现 `← 下发 DOWN` 行 = 脚本确实下发了这次点击（排除"脚本根本没点"）；
+- `系统回显 N 次`：下发的事件会**再流经 HID 事件系统**，被本进程的监听 client 收到（与肉手触摸同一条通路）。
+  `N > 0` → 事件被系统接收；`N = 0` → 事件很可能在入口就被丢弃，这次点击等于没发生；
+- 走兜底通道时同样有 `← 本应用点击(兜底通道…)` 行，并会打印 AX / 进程内 UIControl 的成功或失败原因。
+- 回显依赖常驻的监听 client，因此程序**不会**再像旧版那样"拿到真实 senderID 就释放监听"。
+
 ### 2. 截屏
 通过 `IOMobileFramebuffer` + `IOSurface` 私有框架读取 GPU 帧缓冲，可截任意 App。失败时回退到 `UIGraphicsImageRenderer`（仅本 App 窗口）。见 `Core/TSScreenCapture.m`。
 
