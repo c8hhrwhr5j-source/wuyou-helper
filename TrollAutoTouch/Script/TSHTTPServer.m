@@ -967,6 +967,20 @@ static NSData *WSTextFrame(NSString *text) {
         [self sendAndClose:clientFd data:[self errorResponse:400 msg:@"缺少 cmd 参数"]];
         return;
     }
+    // 单脚本互斥(2026-09-11): 已有脚本占用运行位时, start 直接回报失败而不是排进队列 ——
+    // 否则远程连点两次 start, 第二个脚本会等前一个结束后"自动"跑起来(用户没想启动它)。
+    if ([cmd isEqualToString:@"start"] && [[TSLuaBridge shared] isScriptSlotBusy]) {
+        NSString *running = [TSLuaBridge shared].runningPath.lastPathComponent ?: @"";
+        [[TSLogStore shared] append:[NSString stringWithFormat:
+            @"[HTTP] /task start 被拒绝: 其他脚本正在运行 (%@)", running]];
+        [self sendAndClose:clientFd data:[self jsonResponse:@{
+            @"ok": @NO,
+            @"cmd": cmd,
+            @"error": @"其他脚本正在运行，请先停止",
+            @"running": running
+        }]];
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([cmd isEqualToString:@"start"]) {
             NSString *file = params[@"file"];

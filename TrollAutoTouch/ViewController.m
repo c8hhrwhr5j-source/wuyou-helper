@@ -297,7 +297,10 @@ static BOOL _luaPausedByButton = NO;
 
     // 脚本已在运行(例如脚本内 ui.open() 弹出设置页后点"开始运行"):
     // 设置已由网页保存, 脚本会从 settings 表继续执行, 这里不能再启动一次, 否则脚本重复执行。
-    if ([[TSLuaBridge shared] isRunning]) {
+    // 但若正在跑的是**另一个**脚本, 就属于"同时跑两个脚本", 必须明确提示
+    // (2026-09-11 单脚本限制: 同一脚本静默拒绝, 不同脚本弹"其他脚本正在运行，请先停止")。
+    if ([[TSLuaBridge shared] rejectSecondScriptForPath:
+            [TSPaths pathForLua:[name stringByAppendingString:@".lua"]]]) {
         return;
     }
 

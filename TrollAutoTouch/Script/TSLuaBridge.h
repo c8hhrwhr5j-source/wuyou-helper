@@ -48,11 +48,23 @@ FOUNDATION_EXPORT NSNotificationName const TSLuaPauseStateChangedNotification;
 /// 当前正在运行的脚本完整路径(nil 表示未在运行)
 @property (nonatomic, copy, nullable) NSString *runningPath;
 
-/// 在后台线程执行 Lua 脚本文件
+/// 运行位是否已被占用(2026-09-11 起同一时刻只允许一个 Lua 脚本)。
+/// 与 isRunning 的区别: 这个标记在"派发脚本之前"就置位, 覆盖"已派发但还没开跑"与
+/// "已请求停止但脚本尚未退出"的收尾窗口 —— UI/HTTP 侧据此判断要不要提示用户
+/// "其他脚本正在运行，请先停止"。启动接口(runFile/runString/runProject)自身也会再校验。
+@property (nonatomic, readonly) BOOL isScriptSlotBusy;
+
+/// 在后台线程执行 Lua 脚本文件。
+/// 已有脚本占用运行位时**不会启动**(会提示"其他脚本正在运行，请先停止")。
 - (void)runFile:(NSString *)path;
 
-/// 在后台线程执行 Lua 代码字符串
+/// 在后台线程执行 Lua 代码字符串(同样受单脚本互斥约束)
 - (void)runString:(NSString *)code;
+
+/// UI 侧启动前预检(2026-09-11 单脚本限制): 运行位已被**别的**脚本占用时,
+/// 提示"其他脚本正在运行，请先停止"并返回 YES; 占用者就是 path 本身时静默返回 YES
+/// (同一脚本的设置页续跑流程); 未被占用返回 NO, 调用方可正常启动。
+- (BOOL)rejectSecondScriptForPath:(nullable NSString *)path;
 
 /// 在后台线程执行 Lua 项目 (文件夹)
 /// 自动查找入口文件 (main.lua > init.lua > 第一个 .lua 文件)

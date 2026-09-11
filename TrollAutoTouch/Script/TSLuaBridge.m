@@ -198,7 +198,8 @@ static int l_ts_searcher_virtual(lua_State *L) {
     if (self) {
         _luaQueue = dispatch_queue_create("com.trollautotouch.lua", DISPATCH_QUEUE_SERIAL);
         self.isRunning = NO;
-        // senderID 就绪时输出到脚本日志，方便确认注入链路是否打通
+        // 监听到系统真实触屏的 senderID 时只写 NSLog(2026-09-11: 这属于正常事实,
+        // 不再进 touch.log; 直发用的是固定伪装值, 与该真实值无关)
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(_handleSenderIDDidChange:)
                                                      name:TSHIDSenderIDDidChangeNotification
@@ -209,12 +210,10 @@ static int l_ts_searcher_virtual(lua_State *L) {
 
 - (void)_handleSenderIDDidChange:(NSNotification *)note {
     uint64_t sid = [note.userInfo[@"senderID"] unsignedLongLongValue];
-    // 措辞对齐事实: 直发**不使用**这个真实值(原版固定 0x8000000817319371),
-    // 这里只把"系统里存在触屏设备"这一事实告知脚本日志 ——
-    // 旧文案"点击注入已就绪"会让人误以为点击依赖它(实际依赖固定值)。
-    lua_log([NSString stringWithFormat:
-             @"[touch] 检测到系统真实触屏 senderID=0x%llX (仅记录: 直发固定用 0x%llX, 不受其影响)",
-             sid, (unsigned long long)[TSHIDEventTouch shared].senderID]);
+    // 只走 NSLog, 不进 touch.log(2026-09-11): "系统里存在触屏设备"是正常事实而非错误,
+    // 而直发**不使用**这个真实值(固定 0x8000000817319371 才生效), 记进日志只会误导。
+    NSLog(@"[touch] 检测到系统真实触屏 senderID=0x%llX (仅诊断: 直发固定用 0x%llX, 不受其影响)",
+          sid, (unsigned long long)[TSHIDEventTouch shared].senderID);
 }
 
 - (void)setIsRunning:(BOOL)isRunning {
@@ -1167,13 +1166,30 @@ static int l_screen_unkeep(lua_State *L) {
 
 #pragma mark - 触摸
 
-// ── 低频诊断日志预算(2026-09-11 新增, 属"去掉无用日志"措施) ──
-// tap 的"脚本坐标 → 物理像素 → 逻辑点"映射只在脚本开头几条有意义(用来核对坐标
-// 变换/横竖屏旋转是否正确); 挂机脚本每秒可能点几次, 逐条打印会迅速淹没 500 行的
-// touch.log, 并让每次点击都多一次字符串格式化。故每次脚本启动只放行前 3 条,
-// 坐标越界等异常仍然照打(见 l_touch_tap)。
+// ── HUD 宿主状态"按需记录"(2026-09-11, 属"去掉无用日志"措施) ──
+// 用户要求 touch.log 只留错误提示: HUD 正常注册/正常前后台态不再写日志(以前每次启动
+// 固定写一行 "[HUD] HUD 宿主状态: SBS class OK | NOT registered(ctxId=0) | ..."), 只有
+// 下面两种情况会让音量键弹窗彻底不可用, 必须留下痕迹:
+//   · SBS class MISSING   → FrontBoard 私有类取不到, 系统级托管不可能成功;
+//   · startupFailedSBS=YES → 启动注册已失败。
+// 需要看完整状态(含 ctxId / 前后台 / 活跃内容数)时用脚本 API 主动查询。
+static void TSLuaLogHUDStatusIfAbnormal(void) {
+    NSString *status = [[TSHUDHost shared] registrationStatusDescription];
+    BOOL abnormal = ([status rangeOfString:@"MISSING"].location != NSNotFound ||
+                     [status rangeOfString:@"startupFailedSBS=YES"].location != NSNotFound);
+    if (abnormal) {
+        lua_log([NSString stringWithFormat:@"[HUD] ⚠ %@", status]);
+    } else {
+        NSLog(@"[HUD] %@", status);   // 正常态只留控制台(NSLog), 不占 touch.log
+    }
+}
+
+// ── 低频诊断日志预算(2026-09-11, 属"去掉无用日志"措施) ──
+// 用户要求: touch.log 只留错误提示。tap 的"脚本坐标 → 物理像素 → 逻辑点"映射属于正常
+// 路径, 于是每次脚本启动只放行**第 1 条**(核对一次坐标变换/横竖屏旋转是否正确即可),
+// 坐标越界等异常始终照打(见 l_touch_tap)。
 static NSInteger s_tapLogBudget = 0;
-static void TSLuaLogBudgetReset(void) { s_tapLogBudget = 3; }
+static void TSLuaLogBudgetReset(void) { s_tapLogBudget = 1; }
 
 static int l_touch_tap(lua_State *L) {
     // @autoreleasepool: 触摸注入内部经 NSInvocation/NSMethodSignature 调用 SpringBoard,
@@ -1192,8 +1208,8 @@ static int l_touch_tap(lua_State *L) {
     CGFloat radius   = (CGFloat)luaL_optnumber(L, 5, 0);
     CGFloat sc = touchScale();
     CGPoint sp = tsScriptToActualPoint(CGPointMake(x, y));   // 脚本坐标系 -> 屏幕物理方向(竖屏buffer)
-    // 坐标映射核对: 每次脚本启动只记前 3 条(见 s_tapLogBudget), 越界坐标始终记录。
-    // 具体"有没有点到"由 C 层直发日志回答(直发 DOWN / 系统回显 / UP 总结)。
+    // 坐标映射核对: 每次脚本启动只记第 1 条(见 s_tapLogBudget), 越界坐标始终记录。
+    // "有没有点到"看 C 层的告警(⚠ 未收到系统回显), 或用脚本 API touch.status() 查询。
     CGSize px = screenPixelSize();
     BOOL outOfScreen = (sp.x < 0 || sp.y < 0 || sp.x > px.width || sp.y > px.height);
     if (s_tapLogBudget > 0 || outOfScreen) {
@@ -2956,78 +2972,164 @@ static void lua_register_all(lua_State *L) {
 
 #pragma mark - 执行
 
+// ═══════════════════ 单脚本互斥(2026-09-11 用户要求) ═══════════════════
+// 同一时刻只允许运行一个 Lua 脚本: 第二个脚本一律拒绝启动, 并提示
+// "其他脚本正在运行，请先停止"。
+//
+// 为什么不能直接看 isRunning:
+//   runFile/runProject 是 dispatch_async 到 _luaQueue 的, 而 isRunning 要等 _execute
+//   真正开跑才置 YES —— "已派发但还没开跑"这段窗口里 isRunning 仍是 NO。若此时再点一次
+//   "执行", 第二个脚本也会被排进串行队列: 前一个只要不结束, 它就一直等; 更要命的是等前一个
+//   结束后它会紧接着自动跑起来, 用户完全没点过第二次。所以用一个在"派发前"就抢占的
+//   独立标记 s_scriptSlotBusy 表示"运行位已被占用"。
+// 释放时机: 脚本真正结束时(含各种 return / Lua 报错 / 异常)由 @try/@finally 释放,
+//   因此"点了停止但脚本还没退出"的收尾窗口内仍然算占用(提示语会改成"正在停止中")。
+static BOOL s_scriptSlotBusy = NO;
+
+- (BOOL)isScriptSlotBusy {
+    @synchronized (TSLuaBridge.class) {
+        return s_scriptSlotBusy;
+    }
+}
+
+/// 抢占运行位。返回 NO 表示已有脚本占用(此时已提示用户, 调用方直接放弃本次启动)。
+/// 注意: 必须在 dispatch_async 之前调用(调用方通常是主线程)。
+- (BOOL)_acquireScriptSlotForName:(nullable NSString *)name {
+    BOOL taken = NO;
+    @synchronized (TSLuaBridge.class) {
+        if (!s_scriptSlotBusy) {
+            s_scriptSlotBusy = YES;
+            taken = YES;
+        }
+    }
+    // 提示放在锁外: 提示本身会写日志/派发 UI, 不该在持锁状态下做
+    if (!taken) {
+        [self _notifyScriptSlotOccupied:name];
+    }
+    return taken;
+}
+
+/// 释放运行位(脚本结束/启动失败都必须走到, 由 @finally 保证)
+- (void)_releaseScriptSlot {
+    @synchronized (TSLuaBridge.class) {
+        s_scriptSlotBusy = NO;
+    }
+}
+
+/// 给 UI 的预检(2026-09-11): 若运行位已被**别的**脚本占用, 提示用户并返回 YES;
+/// 占用者就是 path 本身时返回 YES 但**不提示**(脚本内 ui.open() 弹出的设置页点"开始运行"
+/// 属于同一脚本的设置续跑流程, 设置已保存, 不该提示"请先停止")。
+/// 未被占用时返回 NO(调用方正常启动)。
+- (BOOL)rejectSecondScriptForPath:(nullable NSString *)path {
+    if (!self.isScriptSlotBusy) return NO;
+    NSString *running = self.runningPath.lastPathComponent ?: @"";
+    NSString *want = path.lastPathComponent ?: @"";
+    if (running.length && want.length && [running isEqualToString:want]) {
+        return YES;   // 同一脚本: 静默拒绝(重复启动会让脚本跑两遍)
+    }
+    [self _notifyScriptSlotOccupied:want];
+    return YES;
+}
+
+/// 提示"已有脚本在跑"。停止中与真的在跑给不同文案, 避免用户已经按了停止还被要求"请先停止"。
+- (void)_notifyScriptSlotOccupied:(nullable NSString *)name {
+    NSString *msg = _stopRequested
+                  ? @"上一个脚本正在停止中，请稍候再启动"
+                  : @"其他脚本正在运行，请先停止";
+    NSString *who = name.length ? name : @"(字符串代码)";
+    // 这属于"被拒绝的操作", 要留痕(不是正常路径的刷屏日志)
+    lua_log([NSString stringWithFormat:@"[Lua] ⚠ %@ (已拒绝启动: %@)", msg, who]);
+    // showToast 内部会派发到主线程(与 sys.toast 同一实现), 这里直接调用即可
+    [[TSHUDHost shared] showToast:msg duration:2.0 hidden:NO];
+}
+
 - (void)runString:(NSString *)code {
     // 注意: 绝不能用 @synchronized(self) 包住 _execute ——
     // 脚本运行期间会一直持有 self 锁, 主线程 stop() 抢锁会永久阻塞导致应用卡死。
     // _luaQueue 本身就是串行队列, 已保证同一时间只有一个脚本在跑。
+    if (![self _acquireScriptSlotForName:nil]) return;   // 单脚本互斥(已提示)
     dispatch_async(_luaQueue, ^{
-        // 未激活设备 15 分钟试用到期后禁止再启动脚本
-        if ([[TSTrialManager shared] isExpired]) {
-            lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
-            return;
+        @try {
+            // 未激活设备 15 分钟试用到期后禁止再启动脚本
+            if ([[TSTrialManager shared] isExpired]) {
+                lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
+                return;
+            }
+            [self _execute:code filePath:nil];
+        } @finally {
+            [self _releaseScriptSlot];
         }
-        [self _execute:code filePath:nil];
     });
 }
 
 - (void)runFile:(NSString *)path {
+    if (![self _acquireScriptSlotForName:path.lastPathComponent]) return;   // 单脚本互斥
     dispatch_async(_luaQueue, ^{
-        // 未激活设备 15 分钟试用到期后禁止再启动脚本
-        if ([[TSTrialManager shared] isExpired]) {
-            lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
-            return;
-        }
-        NSError *err = nil;
-        NSString *code = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
-        if (err || !code) {
-            lua_log([NSString stringWithFormat:@"[Lua] 读取脚本失败: %@", path]);
-            return;
-        }
-        // .tas 加密脚本: 先解密再交给 Lua 引擎
-        if ([TSScriptCipher isEncryptedContent:code]) {
-            NSString *plain = [TSScriptCipher decryptScript:code];
-            if (!plain) {
-                lua_log([NSString stringWithFormat:@"[Lua] 脚本解密失败(.tas): %@", path]);
+        @try {
+            // 未激活设备 15 分钟试用到期后禁止再启动脚本
+            if ([[TSTrialManager shared] isExpired]) {
+                lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
                 return;
             }
-            code = plain;
-            lua_log([NSString stringWithFormat:@"[Lua] 运行加密脚本(.tas): %@", path.lastPathComponent]);
-        } else if ([TSScriptCipher isProjectPackageContent:code]) {
-            // 整包加密的项目包(.tas): 解密解包后按项目方式运行
-            [self _runEncryptedProjectPackageAtPath:path content:code];
-            return;
+            NSError *err = nil;
+            NSString *code = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+            if (err || !code) {
+                lua_log([NSString stringWithFormat:@"[Lua] 读取脚本失败: %@", path]);
+                return;
+            }
+            // .tas 加密脚本: 先解密再交给 Lua 引擎
+            if ([TSScriptCipher isEncryptedContent:code]) {
+                NSString *plain = [TSScriptCipher decryptScript:code];
+                if (!plain) {
+                    lua_log([NSString stringWithFormat:@"[Lua] 脚本解密失败(.tas): %@", path]);
+                    return;
+                }
+                code = plain;
+                lua_log([NSString stringWithFormat:@"[Lua] 运行加密脚本(.tas): %@", path.lastPathComponent]);
+            } else if ([TSScriptCipher isProjectPackageContent:code]) {
+                // 整包加密的项目包(.tas): 解密解包后按项目方式运行
+                [self _runEncryptedProjectPackageAtPath:path content:code];
+                return;
+            }
+            [self _execute:code filePath:path];
+        } @finally {
+            [self _releaseScriptSlot];
         }
-        [self _execute:code filePath:path];
     });
 }
 
 - (void)runProject:(NSString *)dirPath {
+    if (![self _acquireScriptSlotForName:dirPath.lastPathComponent]) return;   // 单脚本互斥
     dispatch_async(_luaQueue, ^{
-        if ([[TSTrialManager shared] isExpired]) {
-            lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
-            return;
+        @try {
+            if ([[TSTrialManager shared] isExpired]) {
+                lua_log(@"[Lua] 15 分钟试用已结束，请到 设置-卡密 激活后继续使用");
+                return;
+            }
+
+            // 查找入口文件
+            NSString *entryFile = [self _findEntryPointInDirectory:dirPath];
+            if (!entryFile) {
+                lua_log([NSString stringWithFormat:@"[Lua] 项目目录 %@ 中未找到 .lua 文件", dirPath]);
+                return;
+            }
+
+            // 读取入口文件
+            NSError *err = nil;
+            NSString *code = [NSString stringWithContentsOfFile:entryFile encoding:NSUTF8StringEncoding error:&err];
+            if (err || !code) {
+                lua_log([NSString stringWithFormat:@"[Lua] 读取项目入口文件失败: %@", entryFile]);
+                return;
+            }
+
+            lua_log([NSString stringWithFormat:@"[Lua] 运行项目: %@ (入口: %@)",
+                     dirPath.lastPathComponent, entryFile.lastPathComponent]);
+
+            // 执行, 传入项目目录作为第二个参数
+            [self _executeProject:code entryFile:entryFile projectDir:dirPath];
+        } @finally {
+            [self _releaseScriptSlot];
         }
-
-        // 查找入口文件
-        NSString *entryFile = [self _findEntryPointInDirectory:dirPath];
-        if (!entryFile) {
-            lua_log([NSString stringWithFormat:@"[Lua] 项目目录 %@ 中未找到 .lua 文件", dirPath]);
-            return;
-        }
-
-        // 读取入口文件
-        NSError *err = nil;
-        NSString *code = [NSString stringWithContentsOfFile:entryFile encoding:NSUTF8StringEncoding error:&err];
-        if (err || !code) {
-            lua_log([NSString stringWithFormat:@"[Lua] 读取项目入口文件失败: %@", entryFile]);
-            return;
-        }
-
-        lua_log([NSString stringWithFormat:@"[Lua] 运行项目: %@ (入口: %@)",
-                 dirPath.lastPathComponent, entryFile.lastPathComponent]);
-
-        // 执行, 传入项目目录作为第二个参数
-        [self _executeProject:code entryFile:entryFile projectDir:dirPath];
     });
 }
 
@@ -3285,8 +3387,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         [[TSHUDService sharedInstance] warmUp];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            lua_log([NSString stringWithFormat:@"[HUD] %@",
-                     [[TSHUDHost shared] registrationStatusDescription]]);
+            TSLuaLogHUDStatusIfAbnormal();
         });
     });
 
@@ -3392,8 +3493,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         [[TSHUDService sharedInstance] warmUp];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            lua_log([NSString stringWithFormat:@"[HUD] %@",
-                     [[TSHUDHost shared] registrationStatusDescription]]);
+            TSLuaLogHUDStatusIfAbnormal();
         });
     });
     [[TSAudioKeepAlive shared] start];
