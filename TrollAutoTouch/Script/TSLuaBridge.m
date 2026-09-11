@@ -1162,7 +1162,7 @@ static int l_touch_tap(lua_State *L) {
     @autoreleasepool {
     TSHIDEventTouch *touch = [TSHIDEventTouch shared];
     if (touch.senderID == 0) {
-        lua_log(@"[touch] 警告: senderID 未就绪(0), 注入事件可能被系统丢弃! 请先在设备上手动触摸一次屏幕后重跑脚本");
+        lua_log(@"[touch] 警告: senderID 未就绪(0), 注入事件可能被系统丢弃!");
     }
     CGFloat x = (CGFloat)luaL_checknumber(L, 1);
     CGFloat y = (CGFloat)luaL_checknumber(L, 2);

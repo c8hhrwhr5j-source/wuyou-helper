@@ -64,7 +64,7 @@ typedef NS_ENUM(NSInteger, TSTouchPhase) {
 /// 用于脚本停止/出错时清理，避免留下"幽灵手指"导致后续真实触摸被系统吞掉。
 - (void)releaseAllTouches;
 
-/// 当前触摸发送者 ID（0 = 未获取到，需先在设备上手动触摸一次屏幕）。
+/// 当前触摸发送者 ID（默认即原版同款固定触屏值 0x8000000800，可直接直发，无需手动触摸）。
 - (uint64_t)senderID;
 
 /// 诊断状态描述（client 是否创建成功 / senderID 是否就绪），供 Lua 层显示。

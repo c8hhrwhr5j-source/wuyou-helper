@@ -20,7 +20,7 @@
 //       child finger 事件 + IOHIDEventSetSenderID + IOHIDEventSystemClientDispatchEvent)。
 //       需要 entitlements: com.apple.backboard.client +
 //       com.apple.private.hid.client.event-dispatch (TrollAutoTouch.entitlements 已含)
-//       以及有效 senderID (动态获取, 见 _setupSenderID)。
+//       以及有效 senderID (默认固定触屏值 0x8000000800, 见 _setupSenderID)。
 //    2. [兜底] 本应用点击 fallback (借鉴 无忧辅助触控 TouchSimulation 三重策略):
 //       直发不可用时, 不再丢弃点击:
 //         a. AX (Accessibility): AXUIElementCopyElementAtPosition + AXPress,
@@ -31,8 +31,15 @@
 //   已确认在 iOS 15.5+ TrollStore 2.x 下因无法获得 platform 身份而不可行,
 //   相关代码已整体移除, 不再尝试注入。)
 //
-//  senderID 动态获取: 监听系统 digitizer 事件读取真实 senderID, 持久化到
-//  NSUserDefaults, 重启后复用 (ZXTouch senderid.plist 同款逻辑)。
+//  senderID 策略 (2026-09-11 修正 "点击不生效 / 需手动触摸屏幕 / 重启多次无效"):
+//    1. 默认使用固定触屏 senderID 0x8000000800 (原版 HUDServices / ZXTouch 同款伪装值):
+//       立即可以直发, **不需要任何真实手指触摸**, 设备重启后依然有效;
+//    2. 若历史上监听到过"真实 senderID"并已持久化, 则优先复用真实值;
+//    3. 启动时仍挂一个短暂监听做自动纠错: 系统一旦产生 digitizer 事件, 若真实值与
+//       当前使用值不同(固定值在本机被拒 / 保存值过期), 立即覆盖并重新持久化, 随后释放监听。
+//  旧实现"设备重启(uptime 回退)即丢弃保存值、重新等真实触摸"是点击失效根因:
+//  senderID 是触屏服务的稳定标识, 重启不变; 而脚本挂机时无人触摸屏幕, 该路径永远
+//  拿不到值 → 直发失效 → 落到只对本 app 有效的 AX/进程内兜底 → 点击无反应。
 //
 
 #import "TSHIDEventTouch.h"
@@ -63,7 +70,18 @@ typedef uint32_t IOHIDEventType;
 
 // senderID 持久化键 (NSUserDefaults)
 static NSString * const kSenderIDDefaultsKey        = @"TSHIDSenderID";
-static NSString * const kSenderIDBootTimeDefaultsKey = @"TSHIDSenderIDBootTime";
+
+// 默认(伪装)触屏 senderID —— 原版 TrollAutoScript HUDServices / ZXTouch 同款固定值。
+// 伪装成系统触摸屏设备使 backboardd 接受直发事件; 因为它是常量, 直发链路不依赖
+// 任何真实手指触摸, 也不受设备重启影响 (这是原版"随时可点"的根本原因)。
+static const uint64_t kTSHIDSenderIDDefault = 0x8000000800ULL;
+
+// 保存值的合理性判断: 真实 senderID 是 64 位设备标识(常见 0x80000008xx / 0x1000000xx,
+// 量级 >= 2^32); 历史版本曾误把"开机 Unix 时间戳"(约 1.6e9~4.1e9)写进该键, 这里排除,
+// 避免复用垃圾值导致事件被 backboardd 静默丢弃。
+static BOOL TSHIDIsPlausibleSenderID(uint64_t v) {
+    return v >= 0x100000000ULL;   // >= 2^32
+}
 
 // senderID 获取成功通知（userInfo 带 senderID），供 Lua 桥接层输出可见日志
 NSString * const TSHIDSenderIDDidChangeNotification = @"TSHIDSenderIDDidChangeNotification";
@@ -166,40 +184,37 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int v
 #define kIOHIDEventFieldDigitizerMinorRadius   0x000b0015
 
 // ---------- 静态全局 ----------
-// 触摸事件发送者 ID：通过监听系统 digitizer 事件动态获取。
-// 多线程共享，因此用静态全局（ZXTouch 亦为全局）。
+// 触摸事件发送者 ID：启动即设为默认固定触屏值(或已保存的真实值), 因此恒非 0;
+// 监听系统 digitizer 事件只用于自动纠错。多线程共享, 故用静态全局(ZXTouch 亦为全局)。
 static uint64_t s_senderID = 0;
-
-// 系统自开机以来的"清醒"uptime（秒），单调递增、睡眠不增长、设备重启后归零重计。
-// 用它判断设备是否重启过：uptime 回退（current < saved）= 重启过，senderID 需重新获取；
-// uptime 未回退 = 未重启，可放心复用已保存的 senderID。
-// 注意: 不能再用 "绝对时间戳 - uptime"(推断开机时刻) 判据 —— 设备跨睡眠后该值
-// 会偏移约等于睡眠时长, 被误判为"重启"而丢掉 senderID, 导致脚本"识别到却不点击"。
-static NSTimeInterval TSHIDCurrentUptime(void) {
-    return [NSProcessInfo processInfo].systemUptime;
-}
 
 // 监听系统触摸屏(digitizer)事件，读取真实 senderID（ZXTouch setSenderIdCallback 同款）。
 // 回调通过 ScheduleWithRunLoop 调度到主 RunLoop，可安全访问 NSUserDefaults。
-// target 传入 self (见 _setupSenderID)，拿到 senderID 后立即释放监听 client，避免常驻监听。
+// 该监听只做"自动纠错": 直发已经用默认固定值就绪, 这里等一次真实触摸确认/纠正即可,
+// 确认后立即释放监听 client(不会常驻)。target 传入 self (见 _setupSenderID)。
 static void TSHIDSenderIDCallback(void *target, void *refcon, IOHIDServiceRef service, IOHIDEventRef event) {
     if (!event) return;
     if (IOHIDEventGetType(event) != kIOHIDEventTypeDigitizer) return;
-    if (s_senderID != 0) return;
     uint64_t sid = IOHIDEventGetSenderID(event);
     if (sid == 0) return;
 
-    s_senderID = sid;
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setDouble:(double)sid forKey:kSenderIDDefaultsKey];
-    [ud setDouble:TSHIDCurrentUptime() forKey:kSenderIDBootTimeDefaultsKey];
-    [ud synchronize];
-    NSLog(@"[TSHIDEventTouch] 已获取触摸发送者 senderID: 0x%llX", sid);
-    // 通知 Lua 桥接层，让"已获取 senderID"直接显示在脚本日志中
-    [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
-                                                        object:nil
-                                                      userInfo:@{@"senderID": @(sid)}];
-    // senderID 已就绪，监听不再需要 → 注销回调并释放监听 client（省掉每次系统触摸事件的回调检查）
+    if (sid != s_senderID) {
+        // 真实值与当前使用值不同(当前多为默认固定值, 或保存值已过期)
+        // → 真实值优先: 覆盖并持久化, 供下次启动直接复用。
+        s_senderID = sid;
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setDouble:(double)sid forKey:kSenderIDDefaultsKey];
+        [ud synchronize];
+        NSLog(@"[TSHIDEventTouch] 已获取真实触摸 senderID: 0x%llX (覆盖当前值并持久化)", sid);
+        // 通知 Lua 桥接层，让"已获取 senderID"直接显示在脚本日志中
+        [[NSNotificationCenter defaultCenter] postNotificationName:TSHIDSenderIDDidChangeNotification
+                                                            object:nil
+                                                          userInfo:@{@"senderID": @(sid)}];
+    } else {
+        NSLog(@"[TSHIDEventTouch] 真实 senderID 与当前使用值一致 (0x%llX), 无需纠正", sid);
+    }
+
+    // 已确认一次真实值 → 监听使命完成, 释放监听 client(省掉每次系统触摸事件的回调检查)。
     TSHIDEventTouch *self = (__bridge TSHIDEventTouch *)target;
     if (self) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -320,34 +335,35 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
     }
 }
 
-/// 初始化 senderID：优先复用已保存值；否则注册回调监听系统触摸事件动态获取。
-/// 注意: 动态获取需要用户先在设备上触摸一次屏幕（或按 Home 键等产生 digitizer 事件）。
+/// 初始化 senderID：默认使用固定触屏 senderID(无需任何真实触摸, 对齐原版 HUDServices),
+/// 有保存的真实值则优先复用; 两种情况都会挂一个短暂监听做自动纠错(见 TSHIDSenderIDCallback)。
 - (void)_setupSenderID {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     uint64_t saved = (uint64_t)[ud doubleForKey:kSenderIDDefaultsKey];
-    NSTimeInterval savedUptime = [ud doubleForKey:kSenderIDBootTimeDefaultsKey];
-    NSTimeInterval currentUptime = TSHIDCurrentUptime();
 
-    // 复用判据: 保存的 uptime 未回退 = 设备未重启 -> 已保存 senderID 仍然有效。
-    // savedUptime < 1e9 用于过滤旧版本写入的"开机绝对时间戳"(约 1.7e9 数量级),
-    // 该格式无法与 uptime 比较, 视为无效重新监听。
-    // 容差 1 秒: 系统 uptime 在保存与读取之间可能有的微小抖动。
-    if (saved != 0 && savedUptime > 0 && savedUptime < 1e9
-        && currentUptime >= savedUptime - 1.0) {
+    if (saved != 0 && TSHIDIsPlausibleSenderID(saved)) {
+        // 优先复用历史监听到的真实 senderID。senderID 是触屏服务的稳定标识, 设备重启
+        // 后不变, 因此不再用 uptime 判断"是否重启"(旧逻辑正是点击失效的主因)。
         s_senderID = saved;
-        NSLog(@"[TSHIDEventTouch] 设备未重启(uptime 未回退)，复用已保存的 senderID: 0x%llX", s_senderID);
-        return;
+        NSLog(@"[TSHIDEventTouch] 复用已保存的真实 senderID: 0x%llX", s_senderID);
+    } else {
+        // 没有可用保存值(首次安装 / 旧版本写入的垃圾值): 直接用固定触屏 senderID,
+        // 与原版 HUDServices 一致 —— 立即可直发, 不需要用户先摸一下屏幕。
+        s_senderID = kTSHIDSenderIDDefault;
+        NSLog(@"[TSHIDEventTouch] 使用默认触屏 senderID: 0x%llX (可直接直发, 无需手动触摸)",
+              s_senderID);
     }
 
+    // 无论走哪条路径都挂监听: 真实值一旦可用就覆盖(自动纠错), 确认后释放监听。
     _senderIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (!_senderIDClient) {
-        NSLog(@"[TSHIDEventTouch] 创建 senderID 监听 client 失败");
+        NSLog(@"[TSHIDEventTouch] 创建 senderID 监听 client 失败 (不影响已就绪的直发)");
         return;
     }
     IOHIDEventSystemClientScheduleWithRunLoop(_senderIDClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-    // target 传 self: 回调拿到 senderID 后经 _releaseSenderIDClient 注销回调并释放 client
+    // target 传 self: 回调确认真实值后经 _releaseSenderIDClient 注销回调并释放 client
     IOHIDEventSystemClientRegisterEventCallback(_senderIDClient, TSHIDSenderIDCallback, (__bridge void *)self, NULL);
-    NSLog(@"[TSHIDEventTouch] 正在监听系统触摸事件获取 senderID……（若迟迟不生效请先在设备上手动触摸一次屏幕）");
+    NSLog(@"[TSHIDEventTouch] 直发已就绪(senderID=0x%llX), 后台监听真实值用于自动纠错……", s_senderID);
 }
 
 /// senderID 已获取后调用：注销回调、解除 runloop 调度并释放监听 client。
@@ -617,11 +633,11 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
 
 - (NSString *)statusDescription {
     NSMutableString *s = [NSMutableString string];
-    // 第一通道: app 进程内 IOHID 直发 (senderID 就绪即可)
+    // 第一通道: app 进程内 IOHID 直发 (senderID 恒非 0: 默认固定值或已保存真实值)
     if (s_senderID != 0) {
         [s appendFormat:@", touch=直发(senderID=0x%llX)", (unsigned long long)s_senderID];
     } else {
-        [s appendString:@", touch=直发未就绪(需手动触摸一次屏幕)"];
+        [s appendString:@", touch=直发未就绪"];
     }
     // 本应用点击 fallback 状态 (AX 辅助功能 / 进程内 UIControl)
     TSAXSetup();
