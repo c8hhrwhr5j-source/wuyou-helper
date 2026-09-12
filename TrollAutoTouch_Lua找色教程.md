@@ -1331,9 +1331,14 @@ app.inputText("hello")
 |---|---|---|
 | `app.frontBid()` | string / nil | 当前前台 App bundle id |
 | `app.isInstalled(bid)` | boolean | 是否安装 |
+| `app.isRunning(bid)` | boolean | 是否正在运行(排查 close 无效的第一步) |
 | `app.open(bid)` | boolean | 打开 App |
 | `app.close(bid)` | boolean | 关闭 App |
 | `app.inputText(text)` | boolean | 输入文本 |
+
+> `app.close(bid)` 传的是 **bundle id**(如 `com.tencent.xin`),不是 App 显示名。
+> 关闭失败时 `touch.log` 会写明原因: `未找到运行进程`(= 没在运行或 bundle id 不对)
+> 或 `kill 返回 Operation not permitted`(= 本 App 无权给其他进程发信号)。
 
 ---
 
@@ -1955,6 +1960,7 @@ end
 |---|---|
 | `app.frontBid()` | 前台 App bundle id → string / nil |
 | `app.isInstalled(bid)` | 是否安装 → boolean |
+| `app.isRunning(bid)` | 是否正在运行 → boolean |
 | `app.open(bid)` | 打开 App → boolean |
 | `app.close(bid)` | 关闭 App → boolean |
 | `app.inputText(text)` | 输入文本 → boolean |

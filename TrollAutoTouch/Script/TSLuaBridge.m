@@ -1899,6 +1899,14 @@ static int l_app_open(lua_State *L) {
     return 1;
 }
 
+/// app.isRunning(bid) —— 该 App 当前是否有进程在跑(排查 app.close 为什么无效的
+/// 第一步: 这里返回 false 说明 bundle id 写错或 App 根本没启动)
+static int l_app_isRunning(lua_State *L) {
+    const char *bid = luaL_checkstring(L, 1);
+    lua_pushboolean(L, [[TSAppManager shared] isRunning:@(bid)]);
+    return 1;
+}
+
 static int l_app_close(lua_State *L) {
     const char *bid = luaL_checkstring(L, 1);
     lua_pushboolean(L, [[TSAppManager shared] closeApp:@(bid)]);
@@ -2870,6 +2878,7 @@ static void lua_register_all(lua_State *L) {
     static const luaL_Reg appLib[] = {
         {"frontBid",   l_app_frontBid},
         {"isInstalled",l_app_isInstalled},
+        {"isRunning",  l_app_isRunning},
         {"open",       l_app_open},
         {"close",      l_app_close},
         {"inputText",  l_app_inputText},

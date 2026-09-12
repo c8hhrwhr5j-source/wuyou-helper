@@ -7,10 +7,13 @@
 
 #import "TSAppManager.h"
 #import "TSKeyboardInjector.h"
+#import "../Common/TSLogStore.h"
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <sys/sysctl.h>
 #import <signal.h>
+#import <errno.h>
+#import <string.h>
 
 // SecTask 是 iOS 私有 API (无公共头文件), 符号从 Security.framework 导出。
 // 用于查询 App 实际生效的 entitlements —— 与签名数据无关, 反映内核真正授予
@@ -58,6 +61,23 @@ static NSArray *(*_LSApplicationWorkspace_allApps)(id, SEL) = NULL;
 static int (*_MobileInstallationLookup)(CFDictionaryRef, CFDictionaryRef *) = NULL;
 static int (*_MobileInstallationUninstall)(CFStringRef, CFDictionaryRef, void *) = NULL;
 static int (*_MobileInstallationInstall)(CFStringRef, CFDictionaryRef, void *, void *) = NULL;
+
+// ---- BackBoardServices (仅作 kill() 被拒时的退路) ----
+// void BKSTerminateApplicationForReasonAndReportWithDescription(
+//        CFStringRef bundleID, int reason, bool report, CFStringRef description);
+// 直接向 backboardd 请求终止该 App(与"上滑关闭"同一条通路)。未授权时它会安静地什么都不做,
+// 不会崩溃; 因此只在 kill() 返回 EPERM(本 App 无权给别的进程发信号)时才尝试。
+static void (*_BKSTerminateApplication)(CFStringRef, int, bool, CFStringRef) = NULL;
+static void _loadBackBoardServices(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
+                         RTLD_LAZY);
+        if (h) {
+            _BKSTerminateApplication = dlsym(h, "BKSTerminateApplicationForReasonAndReportWithDescription");
+        }
+    });
+}
 
 // ────────────────────────────────────────────────────────────
 #pragma mark - 符号初始化
@@ -160,40 +180,10 @@ static void _loadMobileInstallation(void) {
 // ────────────────────────────────────────────────────────────
 
 - (pid_t)frontPid {
-    // 通过 Accessibility 或进程枚举反查
-    // 先尝试通过 SBS 获取 bundleId，再从进程列表匹配
+    // 前台 App 的 bundleId (SBS) → 再用 pid→bundleId 映射反查 pid
     NSString *bid = [self frontBid];
     if (!bid) return -1;
-
-    // 枚举进程找到匹配 bundleId 的
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    size_t size = 0;
-    if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0) return -1;
-
-    struct kinfo_proc *procs = malloc(size);
-    if (!procs) return -1;
-    if (sysctl(mib, 3, procs, &size, NULL, 0) < 0) { free(procs); return -1; }
-
-    int count = (int)(size / sizeof(struct kinfo_proc));
-    pid_t found = -1;
-    for (int i = 0; i < count; i++) {
-        pid_t p = procs[i].kp_proc.p_pid;
-        if (p <= 0) continue;
-
-        // 获取进程路径
-        char pathbuf[PROC_PIDPATHINFO_MAXSIZE];
-        if (proc_pidpath(p, pathbuf, sizeof(pathbuf)) <= 0) continue;
-
-        NSString *path = [NSString stringWithUTF8String:pathbuf];
-        // 检查路径是否包含该 bundleId
-        if ([path containsString:[NSString stringWithFormat:@"/%@.app/", bid]] ||
-            [path containsString:[NSString stringWithFormat:@"/%@/", bid]]) {
-            found = p;
-            break;
-        }
-    }
-    free(procs);
-    return found;
+    return [self pidForBundleId:bid];
 }
 
 - (NSString *)frontBid {
@@ -275,6 +265,8 @@ static void _loadMobileInstallation(void) {
 
     if (_LSApplicationWorkspace_allApps) {
         NSArray *apps = _LSApplicationWorkspace_allApps(_workspace, @selector(allInstalledApplications));
+        // 进程表只扫一次: 每个 App 单独查一遍会让"应用列表"卡住(上百 App × 上百进程)
+        NSDictionary<NSNumber *, NSString *> *map = [self pidBundleIdMap];
         for (id app in apps) {
             // LSApplicationProxy
             NSString *bid = [app valueForKey:@"applicationIdentifier"];
@@ -286,7 +278,7 @@ static void _loadMobileInstallation(void) {
             info.version = [[app valueForKey:@"bundleVersion"] description] ?: @"?";
             info.bundlePath = [app valueForKey:@"bundleURL"] ? [[app valueForKey:@"bundleURL"] path] : nil;
             info.dataPath   = [app valueForKey:@"containerURL"] ? [[app valueForKey:@"containerURL"] path] : nil;
-            info.pid = [self pidForBundleId:bid];
+            info.pid = [self pidForBundleId:bid map:map];
             [result addObject:info];
         }
     }
@@ -327,17 +319,40 @@ static void _loadMobileInstallation(void) {
 
 - (BOOL)closeApp:(NSString *)bundleId {
     pid_t pid = [self pidForBundleId:bundleId];
-    if (pid <= 0) return NO;
-    // 先发送 SIGTERM
-    if (kill(pid, SIGTERM) == 0) {
-        // 等待一小段时间
-        usleep(500000); // 500ms
-        // 如果还没死，发 SIGKILL
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-        }
-        return YES;
+    if (pid <= 0) {
+        // 以前这里直接 return NO 且毫无提示 —— 用户只看到"点了没反应"。
+        // 失败原因必须落进 touch.log(2026-09-12): 没找到进程 = 该 App 没在运行 / 未安装 /
+        // bundle id 写错(注意: 不是 App 显示名)。
+        [[TSLogStore shared] append:[NSString stringWithFormat:
+            @"[App] ⚠ 关闭失败: 未找到 %@ 的运行进程(该 App 未在运行, 或 bundle id 不对)", bundleId]];
+        return NO;
     }
+
+    // ① 直接发信号: SIGTERM(优雅退出) → 等 500ms → 还在就 SIGKILL
+    if (kill(pid, SIGTERM) == 0) {
+        usleep(500000);                      // 500ms
+        if (kill(pid, 0) != 0) return YES;   // 已退出
+        kill(pid, SIGKILL);
+        usleep(200000);
+        if (kill(pid, 0) != 0) return YES;   // 已退出
+    }
+    int e = errno;   // EPERM = 本进程无权给别的进程发信号; ESRCH = 进程已经没了
+    if (e == ESRCH) return YES;   // 查到 pid 之后进程自己退出了 —— 目标已达成
+
+    // ② kill 被拒(EPERM)时的退路: 请 backboardd 代为终止(与上滑关闭同一条通路)。
+    //    未获授权时该调用只是无效, 不会崩溃; 符号不存在也直接跳过。
+    _loadBackBoardServices();
+    if (_BKSTerminateApplication && e == EPERM) {
+        _BKSTerminateApplication((__bridge CFStringRef)bundleId, 1, false, NULL);
+        usleep(800000);
+        if ([self pidForBundleId:bundleId] <= 0) return YES;
+    }
+
+    [[TSLogStore shared] append:[NSString stringWithFormat:
+        @"[App] ⚠ 关闭失败: %@ (pid=%d) 仍在运行 —— kill 返回 %s(errno=%d)%@",
+        bundleId, pid, strerror(e), e,
+        (e == EPERM ? @", 本 App 无权给其他进程发信号(非越狱设备上的常见限制)"
+                    : (e == ESRCH ? @", 进程已退出" : @""))]];
     return NO;
 }
 
@@ -413,36 +428,93 @@ static void _loadMobileInstallation(void) {
 #pragma mark 内部辅助
 // ────────────────────────────────────────────────────────────
 
-- (pid_t)pidForBundleId:(NSString *)bundleId {
+/// 枚举当前所有进程 pid。
+static NSArray<NSNumber *> *TSAllPids(void) {
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     size_t size = 0;
-    if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0) return -1;
-
+    if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0) return nil;
     struct kinfo_proc *procs = malloc(size);
-    if (!procs) return -1;
-    if (sysctl(mib, 3, procs, &size, NULL, 0) < 0) {
-        free(procs);
-        return -1;
-    }
+    if (!procs) return nil;
+    if (sysctl(mib, 3, procs, &size, NULL, 0) < 0) { free(procs); return nil; }
 
     int count = (int)(size / sizeof(struct kinfo_proc));
-    pid_t found = -1;
+    NSMutableArray<NSNumber *> *out = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
     for (int i = 0; i < count; i++) {
         pid_t p = procs[i].kp_proc.p_pid;
-        if (p <= 0) continue;
-
-        char pathbuf[PROC_PIDPATHINFO_MAXSIZE];
-        if (proc_pidpath(p, pathbuf, sizeof(pathbuf)) <= 0) continue;
-
-        NSString *path = [NSString stringWithUTF8String:pathbuf];
-        if ([path containsString:[NSString stringWithFormat:@"/%@.app/", bundleId]] ||
-            [path containsString:[NSString stringWithFormat:@"/%@/", bundleId]]) {
-            found = p;
-            break;
-        }
+        if (p > 0) [out addObject:@(p)];
     }
     free(procs);
-    return found;
+    return out;
+}
+
+/// 一次性构建 "pid → bundleId" 映射(只遍历进程列表一次)。
+///
+/// 2026-09-12 修复: 旧实现靠"进程可执行文件路径里包含 /<bundleId>.app/"来匹配,
+/// 这在 iOS 上几乎永远匹配不上 —— 用户 App 的 .app 目录名是 **App 显示名**, 不是
+/// bundle id, 例如:
+///    com.tencent.xin  → /private/var/containers/Bundle/Application/<UUID>/WeChat.app/WeChat
+/// 于是 pidForBundleId 恒返回 -1 → closeApp/isRunning 全部失效(app.close 静默返回 NO)。
+/// 正确做法是让 SpringBoardServices 把 pid 反查成 bundle id(SBSCopyDisplayIdentifierForProcessID)。
+- (NSDictionary<NSNumber *, NSString *> *)pidBundleIdMap {
+    _loadSpringBoardServices();
+    NSMutableDictionary<NSNumber *, NSString *> *map = [NSMutableDictionary dictionary];
+    if (!_SBSSpringBoardServerPort || !_SBSCopyDisplayIdentifierForProcessID) return map;
+
+    mach_port_t port = _SBSSpringBoardServerPort();
+    for (NSNumber *n in TSAllPids()) {
+        pid_t p = (pid_t)n.intValue;
+        CFStringRef bid = _SBSCopyDisplayIdentifierForProcessID(port, p);
+        if (!bid) continue;
+        map[n] = (__bridge_transfer NSString *)bid;   // 转移所有权, 无需 CFRelease
+    }
+    return map;
+}
+
+/// 该 App 的真实 .app 路径(来自 LSApplicationProxy.bundleURL), 供路径匹配回退使用。
+- (nullable NSString *)bundlePathForBundleId:(NSString *)bundleId {
+    _loadLSApplicationWorkspace();
+    if (!_LSApplicationWorkspace_allApps || !bundleId.length) return nil;
+    NSArray *apps = _LSApplicationWorkspace_allApps(_workspace, @selector(allInstalledApplications));
+    for (id app in apps) {
+        NSString *bid = [app valueForKey:@"applicationIdentifier"];
+        if (![bid isEqualToString:bundleId]) continue;
+        NSURL *u = [app valueForKey:@"bundleURL"];
+        return u.path;
+    }
+    return nil;
+}
+
+- (pid_t)pidForBundleId:(NSString *)bundleId {
+    return [self pidForBundleId:bundleId map:nil];
+}
+
+/// @param map 预先算好的 pid→bundleId 映射(批量查询时传入, 避免每个 App 都重扫一遍进程表);
+///            传 nil 时内部现算一次。
+- (pid_t)pidForBundleId:(NSString *)bundleId map:(nullable NSDictionary<NSNumber *, NSString *> *)map {
+    if (!bundleId.length) return -1;
+
+    // ① SpringBoardServices 反查(唯一可靠来源)
+    NSDictionary<NSNumber *, NSString *> *m = map ?: [self pidBundleIdMap];
+    for (NSNumber *n in m) {
+        if ([m[n] isEqualToString:bundleId]) return (pid_t)n.intValue;
+    }
+    if (m.count > 0) return -1;   // 映射表非空却查不到 = 该 App 确实没在跑
+
+    // ② 回退(SBS 不可用): 用 App 真实 .app 路径匹配进程路径
+    NSString *bundlePath = [self bundlePathForBundleId:bundleId];
+    if (!bundlePath.length) return -1;
+    NSString *want = bundlePath.stringByResolvingSymlinksInPath;   // /var → /private/var
+    for (NSNumber *n in TSAllPids()) {
+        pid_t p = (pid_t)n.intValue;
+        char pathbuf[PROC_PIDPATHINFO_MAXSIZE];
+        if (proc_pidpath(p, pathbuf, sizeof(pathbuf)) <= 0) continue;
+        NSString *path = [NSString stringWithUTF8String:pathbuf];
+        if ([path.stringByResolvingSymlinksInPath hasPrefix:want] ||
+            [path containsString:[NSString stringWithFormat:@"/%@.app/", bundleId]]) {
+            return p;
+        }
+    }
+    return -1;
 }
 
 @end
