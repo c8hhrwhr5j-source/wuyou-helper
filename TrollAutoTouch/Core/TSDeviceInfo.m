@@ -16,6 +16,26 @@
 #import <sys/socket.h>
 #import <dlfcn.h>
 #import <notify.h>
+#import <Network/Network.h>
+#import <CFNetwork/CFNetwork.h>
+
+// ── VPN 连接检测 ──
+// 权威判定: NWPathMonitor 常驻监听系统网络路径, 路径中出现
+// nw_interface_type_vpn 接口 ⇒ VPN 在隧道层已激活(系统级 VPN 均覆盖,
+// 无需 entitlement)。回调结果缓存到实例属性, Lua 同步调用时直接读缓存。
+// 同步兜底(路径回调覆盖不到的场景):
+//   ① getifaddrs 枚举带可路由地址的 utun 接口(分流 VPN);
+//   ② CFNetworkCopySystemProxySettings 系统代理(仅代理模式工具)。
+static nw_path_monitor_t gVPNPathMonitor = NULL;
+
+@interface TSDeviceInfo ()
+/// 是否已收到 NWPathMonitor 首次路径回调
+@property (nonatomic, assign) BOOL vpnPathKnown;
+/// 路径中是否出现 vpn 类型接口
+@property (nonatomic, assign) BOOL vpnPathActive;
+/// vpn 接口名(如 utun4), 无则为 nil
+@property (nonatomic, copy) NSString *vpnPathInterface;
+@end
 
 @implementation TSDeviceInfo
 
@@ -24,6 +44,138 @@
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{ instance = [[TSDeviceInfo alloc] init]; });
     return instance;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        [self startVPNPathMonitor];
+    }
+    return self;
+}
+
+// ── VPN 检测: 常驻路径监听 ──
+
+- (void)startVPNPathMonitor {
+    nw_path_monitor_t monitor = nw_path_monitor_create();
+    gVPNPathMonitor = monitor;
+    __weak typeof(self) weakSelf = self;
+    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t _Nonnull path) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        BOOL vpn = NO;
+        NSString *iface = nil;
+        if (path.status == nw_path_status_satisfied ||
+            path.status == nw_path_status_satisfiable) {
+            nw_path_enumerate_interfaces(path, ^(nw_interface_t _Nonnull interface) {
+                if (nw_interface_get_type(interface) == nw_interface_type_vpn) {
+                    vpn = YES;
+                    iface = [NSString stringWithUTF8String:nw_interface_get_name(interface)];
+                }
+                return true;
+            });
+        }
+        self.vpnPathKnown = YES;
+        self.vpnPathActive = vpn;
+        self.vpnPathInterface = iface;
+    });
+    nw_path_monitor_set_queue(monitor, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    nw_path_monitor_start(monitor);
+}
+
+// ── VPN 检测: 对外查询 ──
+
+- (BOOL)isVPNConnected {
+    return [self vpnState][@"connected"].boolValue;
+}
+
+- (NSDictionary *)vpnState {
+    // ① 权威: 系统网络路径中出现 vpn 类型接口(全量/系统级 VPN)
+    if (_vpnPathKnown && _vpnPathActive) {
+        return @{ @"connected": @YES,
+                  @"method": @"path",
+                  @"interface": _vpnPathInterface ?: @"" };
+    }
+    // ② 兜底: 带可路由地址的 utun 隧道接口(分流 VPN, 路径回调可能看不到)
+    NSDictionary *tun = [self tunnelInterfaceInfo];
+    if (tun) {
+        return @{ @"connected": @YES,
+                  @"method": @"utun",
+                  @"interface": tun[@"name"] ?: @"" };
+    }
+    // ③ 兜底: 系统全局代理(仅代理模式工具, 如 Surge/Shadowrocket HTTP 代理模式)
+    if ([self hasEnabledSystemProxy]) {
+        return @{ @"connected": @YES, @"method": @"proxy", @"interface": @"" };
+    }
+    return @{ @"connected": @(NO),
+              @"method": _vpnPathKnown ? @"path" : @"unknown",
+              @"interface": @"" };
+}
+
+// 同步枚举 utun 接口, 只有携带"可路由"地址(IPv4 非 169.254 链路本地 /
+// IPv6 非 fe80::/10 且非 ::1)才算 VPN 隧道 —— 系统空闲时无地址或仅
+// 链路本地地址的 utun 不计, 避免误报。
+- (nullable NSDictionary *)tunnelInterfaceInfo {
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0) return nil;
+    NSDictionary *result = nil;
+    for (struct ifaddrs *cursor = interfaces; cursor && !result; cursor = cursor->ifa_next) {
+        if (!cursor->ifa_addr) continue;
+        const char *ifname = cursor->ifa_name;
+        if (!ifname || strncmp(ifname, "utun", 4) != 0) continue;
+        if (cursor->ifa_addr->sa_family == AF_INET) {
+            const struct sockaddr_in *sa = (const struct sockaddr_in *)cursor->ifa_addr;
+            // 排除 IPv4 链路本地 169.254.0.0/16
+            if ((ntohl(sa->sin_addr.s_addr) >> 16) == 0xA9FE) continue;
+            char buf[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
+            result = @{ @"name": [NSString stringWithUTF8String:ifname],
+                        @"address": [NSString stringWithUTF8String:buf] };
+        } else if (cursor->ifa_addr->sa_family == AF_INET6) {
+            const struct sockaddr_in6 *sa6 = (const struct sockaddr_in6 *)cursor->ifa_addr;
+            const uint8_t *a = sa6->sin6_addr.s6_addr;
+            BOOL linkLocal = (a[0] == 0xFE && (a[1] & 0xC0) == 0x80); // fe80::/10
+            BOOL loopback  = (a[0] == 0 && a[15] == 1);               // ::1
+            if (linkLocal || loopback) continue;
+            char buf[INET6_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET6, &sa6->sin6_addr, buf, sizeof(buf));
+            result = @{ @"name": [NSString stringWithUTF8String:ifname],
+                        @"address": [NSString stringWithUTF8String:buf] };
+        }
+    }
+    freeifaddrs(interfaces);
+    return result;
+}
+
+// 系统代理检测: HTTP/HTTPS/SOCKS/PAC 任一启用且配置了有效主机/URL 即认为
+// 处于代理模式(很多"VPN"工具实际是系统代理)。__SCOPED__ 为按接口区分的
+// 代理设置(iOS 上常见), 递归检查。
+- (BOOL)hasEnabledSystemProxy {
+    CFDictionaryRef cfSettings = CFNetworkCopySystemProxySettings();
+    if (!cfSettings) return NO;
+    NSDictionary *settings = CFBridgingRelease(cfSettings);
+    return [self proxyEnabledInDict:settings];
+}
+
+- (BOOL)proxyEnabledInDict:(NSDictionary *)dict {
+    if (![dict isKindOfClass:[NSDictionary class]]) return NO;
+    NSArray *pairs = @[
+        @[(NSString *)kCFNetworkProxiesHTTPEnable,  (NSString *)kCFNetworkProxiesHTTPProxy],
+        @[(NSString *)kCFNetworkProxiesHTTPSEnable, (NSString *)kCFNetworkProxiesHTTPSProxy],
+        @[(NSString *)kCFNetworkProxiesSOCKSEnable, (NSString *)kCFNetworkProxiesSOCKSProxy],
+        @[(NSString *)kCFNetworkProxiesProxyAutoConfigEnable,
+          (NSString *)kCFNetworkProxiesProxyAutoConfigURLString],
+    ];
+    for (NSArray *pair in pairs) {
+        if ([dict[pair[0]] boolValue] && [dict[pair[1]] length] > 0) return YES;
+    }
+    NSDictionary *scoped = dict[@"__SCOPED__"];
+    if ([scoped isKindOfClass:[NSDictionary class]]) {
+        for (id sub in scoped.allValues) {
+            if ([self proxyEnabledInDict:sub]) return YES;
+        }
+    }
+    return NO;
 }
 
 - (NSDictionary *)fullInfo {

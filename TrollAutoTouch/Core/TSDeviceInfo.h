@@ -41,6 +41,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// WiFi IP 地址
 - (nullable NSString *)wifiIPAddress;
 
+/// 设备当前是否连接 VPN
+/// 权威判定: Network.framework NWPathMonitor 路径中出现 vpn 类型接口;
+/// 同步兜底: 带可路由地址的 utun 隧道接口 / 系统全局代理(仅代理模式工具)。
+- (BOOL)isVPNConnected;
+
+/// VPN 检测详情
+/// { connected = bool, method = "path"|"utun"|"proxy"|"unknown", interface = "utun4" }
+/// method 说明: path=系统网络路径判定(权威), utun=隧道接口兜底, proxy=系统代理,
+/// unknown=路径监听尚未上报首帧(通常仅启动后毫秒级窗口)。
+- (NSDictionary *)vpnState;
+
 /// 设备标识
 - (NSString *)identifierForVendor;
 

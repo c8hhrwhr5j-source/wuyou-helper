@@ -1652,6 +1652,22 @@ static int l_sys_getIP(lua_State *L) {
     return 1;
 }
 
+/// sys.isVPNConnected() -> bool
+/// 设备当前是否连接 VPN。权威判定走 Network.framework 路径监听(常驻缓存,
+/// 同步返回), 兜底覆盖 utun 分流隧道与系统代理模式工具。
+static int l_sys_isVPNConnected(lua_State *L) {
+    lua_pushboolean(L, [[TSDeviceInfo shared] isVPNConnected]);
+    return 1;
+}
+
+/// sys.vpnState() -> table { connected, method, interface }
+/// method: "path"(系统路径, 权威) / "utun"(隧道接口兜底) /
+///         "proxy"(系统代理) / "unknown"(监听尚未上报)
+static int l_sys_vpnState(lua_State *L) {
+    _pushNSObjectToLua(L, [[TSDeviceInfo shared] vpnState]);
+    return 1;
+}
+
 static int l_sys_battery(lua_State *L) {
     lua_pushnumber(L, [[TSDeviceInfo shared] batteryLevel]);
     return 1;
@@ -2838,6 +2854,8 @@ static void lua_register_all(lua_State *L) {
         {"model",       l_sys_model},
         {"screenSize",  l_sys_screenSize},
         {"getIP",       l_sys_getIP},
+        {"isVPNConnected", l_sys_isVPNConnected},
+        {"vpnState",    l_sys_vpnState},
         {"battery",     l_sys_battery},
         {"alert",       l_sys_alert},
         {"alertButtons",l_sys_alertButtons},
