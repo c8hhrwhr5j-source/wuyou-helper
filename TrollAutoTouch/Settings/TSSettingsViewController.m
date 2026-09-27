@@ -14,6 +14,7 @@
 #import "../Views/TSPerformanceMonitorView.h"
 #import "../Core/TSToolExecutor.h"
 #import "../Core/TSDaemonManager.h"
+#import "../Core/TSLocationKeepAlive.h"
 #import "../Core/TSDeviceInfo.h"
 #import "../Core/TSLicense.h"
 #import "../Core/TSTrialManager.h"
@@ -258,6 +259,9 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
             [[TSLuaBridge shared] stopGlobalVolumeMonitoring];
             [[TSLogStore shared] append:@"[TAS] 关闭服务: 步骤2/3 停止后台服务"];
             [[TSDaemonManager shared] stopAll];
+            // 注销 SLC 重启自启监听: 服务关闭后不再要求系统在重启后自动拉起
+            // (stop 内部刻意保留 SLC 以支持终止后自动恢复, 故需在此显式注销)
+            [[TSLocationKeepAlive shared] stopSystemRelaunchWatch];
             [[TSLogStore shared] append:@"[TAS] 关闭服务: 步骤3/3 关闭 HTTP 端口"];
             [[TSHTTPServer shared] stop];
             [[TSLogStore shared] append:@"[TAS] 关闭服务: 全部完成"];

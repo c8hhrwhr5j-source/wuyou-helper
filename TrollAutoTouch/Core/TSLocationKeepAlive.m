@@ -68,7 +68,15 @@
         }
 
         [self->_lm startUpdatingLocation];
-        NSLog(@"[定位保活] startUpdatingLocation 已调用");
+        // ── 开机自启(近似): 重大位置变化监听(SLC) ──
+        // SLC 注册由系统 daemons 持久记录: app 被杀/设备重启后依然有效,
+        // 重启后首次基站切换/移动 ~500m 时系统自动在后台拉起本 app 进程,
+        // didFinishLaunching 无条件启动 TAS 服务 + 8080 端口, 保活链自动接管。
+        // 非越狱 TrollStore 下这是唯一可用的"重启后自动恢复"通道
+        // (真正的开机 LaunchDaemon 需要 platform 身份, 仅越狱可实现)。
+        // 注意: SLC 与标准定位可并存, 且 SLC 不受 background 模式限制。
+        [self->_lm startMonitoringSignificantLocationChanges];
+        NSLog(@"[定位保活] startUpdatingLocation 已调用, SLC 重启自启监听已注册");
     });
 }
 
@@ -77,7 +85,18 @@
         if (!self->_running) return;
         self->_running = NO;
         [self->_lm stopUpdatingLocation];
-        NSLog(@"[定位保活] 持续定位已停止");
+        // 刻意【不】注销 SLC: stopAll 会在 appWillTerminate/dealloc 等终止路径被调用,
+        // 若随之注销 SLC, 系统级注册丢失, 重启/被杀后的自动拉起即失效。
+        // SLC 注册是系统持久化的, 保持即可(用户强杀 app 后 iOS 本身也不再自动拉起)。
+        NSLog(@"[定位保活] 持续定位已停止(SLC 自启监听保留)");
+    });
+}
+
+// 注销 SLC 重启自启监听 —— 仅在用户于设置页明确关闭 TAS 服务时调用。
+- (void)stopSystemRelaunchWatch {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_lm stopMonitoringSignificantLocationChanges];
+        NSLog(@"[定位保活] SLC 自启监听已注销(用户关闭 TAS 服务)");
     });
 }
 

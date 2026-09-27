@@ -37,6 +37,14 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    // ── 开机/被杀后由 SLC(重大位置变化)系统拉起: 写日志便于验证重启自启 ──
+    // 此时 app 处于后台, 但 didFinishLaunching 全链路照常执行(TAS/8080/保活),
+    // 用户无需点开图标即可恢复服务。
+    BOOL relaunchedByLocation = [launchOptions[UIApplicationLaunchOptionsLocationKey] boolValue];
+    if (relaunchedByLocation) {
+        [[TSLogStore shared] append:@"[App] 由定位事件(SLC)系统后台拉起, 服务自动恢复"];
+    }
+
     // ── 屏幕常亮: 打开 app 即禁止系统自动锁屏, 直到 app 退出 ──
     // (脚本挂机/网页设置 UI 操作期间均保持屏幕点亮)
     application.idleTimerDisabled = YES;
