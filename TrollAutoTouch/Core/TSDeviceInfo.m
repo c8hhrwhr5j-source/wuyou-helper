@@ -16,13 +16,14 @@
 #import <sys/socket.h>
 #import <dlfcn.h>
 #import <notify.h>
+#import <string.h>
 #import <Network/Network.h>
 #import <CFNetwork/CFNetwork.h>
 
 // ── VPN 连接检测 ──
-// 权威判定: NWPathMonitor 常驻监听系统网络路径, 路径中出现
-// nw_interface_type_vpn 接口 ⇒ VPN 在隧道层已激活(系统级 VPN 均覆盖,
-// 无需 entitlement)。回调结果缓存到实例属性, Lua 同步调用时直接读缓存。
+// 权威判定: NWPathMonitor 常驻监听系统网络路径, 路径中出现承载路由的
+// utun 隧道接口 ⇒ VPN 在隧道层已激活(系统级 VPN 均覆盖, 无需 entitlement)。
+// 回调结果缓存到实例属性, Lua 同步调用时直接读缓存。
 // 同步兜底(路径回调覆盖不到的场景):
 //   ① getifaddrs 枚举带可路由地址的 utun 接口(分流 VPN);
 //   ② CFNetworkCopySystemProxySettings 系统代理(仅代理模式工具)。
@@ -31,7 +32,7 @@ static nw_path_monitor_t gVPNPathMonitor = NULL;
 @interface TSDeviceInfo ()
 /// 是否已收到 NWPathMonitor 首次路径回调
 @property (nonatomic, assign) BOOL vpnPathKnown;
-/// 路径中是否出现 vpn 类型接口
+/// 路径中是否出现承载路由的 utun 隧道接口
 @property (nonatomic, assign) BOOL vpnPathActive;
 /// vpn 接口名(如 utun4), 无则为 nil
 @property (nonatomic, copy) NSString *vpnPathInterface;
@@ -61,23 +62,27 @@ static nw_path_monitor_t gVPNPathMonitor = NULL;
     gVPNPathMonitor = monitor;
     __weak typeof(self) weakSelf = self;
     nw_path_monitor_set_update_handler(monitor, ^(nw_path_t _Nonnull path) {
-        __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
-        BOOL vpn = NO;
-        NSString *iface = nil;
-        if (path.status == nw_path_status_satisfied ||
-            path.status == nw_path_status_satisfiable) {
-            nw_path_enumerate_interfaces(path, ^(nw_interface_t _Nonnull interface) {
-                if (nw_interface_get_type(interface) == nw_interface_type_vpn) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        // 注: ObjC 的 Network C API 没有 nw_interface_type_vpn(仅 Swift overlay
+        // 有 .vpn), 这里按接口名 utun* 判定 —— 出现在系统路径里的 utun 意味着
+        // 隧道正在承载路由, 比 getifaddrs 裸枚举可靠。
+        __block BOOL vpn = NO;
+        __block NSString *iface = nil;
+        nw_path_status_t st = nw_path_get_status(path);
+        if (st == nw_path_status_satisfied || st == nw_path_status_satisfiable) {
+            nw_path_enumerate_interfaces(path, ^ bool (nw_interface_t _Nonnull interface) {
+                const char *name = nw_interface_get_name(interface);
+                if (name && strncmp(name, "utun", 4) == 0) {
                     vpn = YES;
-                    iface = [NSString stringWithUTF8String:nw_interface_get_name(interface)];
+                    iface = [NSString stringWithUTF8String:name];
                 }
                 return true;
             });
         }
-        self.vpnPathKnown = YES;
-        self.vpnPathActive = vpn;
-        self.vpnPathInterface = iface;
+        strongSelf.vpnPathKnown = YES;
+        strongSelf.vpnPathActive = vpn;
+        strongSelf.vpnPathInterface = iface;
     });
     nw_path_monitor_set_queue(monitor, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     nw_path_monitor_start(monitor);
@@ -86,11 +91,11 @@ static nw_path_monitor_t gVPNPathMonitor = NULL;
 // ── VPN 检测: 对外查询 ──
 
 - (BOOL)isVPNConnected {
-    return [self vpnState][@"connected"].boolValue;
+    return [((NSNumber *)[self vpnState][@"connected"]) boolValue];
 }
 
 - (NSDictionary *)vpnState {
-    // ① 权威: 系统网络路径中出现 vpn 类型接口(全量/系统级 VPN)
+    // ① 权威: 系统网络路径中正在承载路由的 utun 隧道接口(全量/系统级 VPN)
     if (_vpnPathKnown && _vpnPathActive) {
         return @{ @"connected": @YES,
                   @"method": @"path",
@@ -159,15 +164,18 @@ static nw_path_monitor_t gVPNPathMonitor = NULL;
 
 - (BOOL)proxyEnabledInDict:(NSDictionary *)dict {
     if (![dict isKindOfClass:[NSDictionary class]]) return NO;
+    // 用字符串字面量而非 kCFNetworkProxies* 常量: HTTPS/SOCKS 相关常量在
+    // iOS SDK 中标记为不可用(仅 macOS), 但字典键本身就是这些明文字符串。
     NSArray *pairs = @[
-        @[(NSString *)kCFNetworkProxiesHTTPEnable,  (NSString *)kCFNetworkProxiesHTTPProxy],
-        @[(NSString *)kCFNetworkProxiesHTTPSEnable, (NSString *)kCFNetworkProxiesHTTPSProxy],
-        @[(NSString *)kCFNetworkProxiesSOCKSEnable, (NSString *)kCFNetworkProxiesSOCKSProxy],
-        @[(NSString *)kCFNetworkProxiesProxyAutoConfigEnable,
-          (NSString *)kCFNetworkProxiesProxyAutoConfigURLString],
+        @[@"HTTPEnable", @"HTTPProxy"],
+        @[@"HTTPSEnable", @"HTTPSProxy"],
+        @[@"SOCKSEnable", @"SOCKSProxy"],
+        @[@"ProxyAutoConfigEnable", @"ProxyAutoConfigURLString"],
     ];
     for (NSArray *pair in pairs) {
-        if ([dict[pair[0]] boolValue] && [dict[pair[1]] length] > 0) return YES;
+        NSNumber *enable = dict[pair[0]];
+        NSString *target = dict[pair[1]];
+        if (enable.boolValue && target.length > 0) return YES;
     }
     NSDictionary *scoped = dict[@"__SCOPED__"];
     if ([scoped isKindOfClass:[NSDictionary class]]) {

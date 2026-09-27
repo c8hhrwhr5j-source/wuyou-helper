@@ -42,7 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSString *)wifiIPAddress;
 
 /// 设备当前是否连接 VPN
-/// 权威判定: Network.framework NWPathMonitor 路径中出现 vpn 类型接口;
+/// 权威判定: Network.framework NWPathMonitor 路径中出现承载路由的 utun 隧道接口;
 /// 同步兜底: 带可路由地址的 utun 隧道接口 / 系统全局代理(仅代理模式工具)。
 - (BOOL)isVPNConnected;
 
