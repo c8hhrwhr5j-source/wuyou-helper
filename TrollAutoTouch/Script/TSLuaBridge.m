@@ -1935,6 +1935,23 @@ static int l_app_inputText(lua_State *L) {
     return 1;
 }
 
+#pragma mark - 脚本状态
+
+/// script.isPaused() —— 脚本是否处于暂停状态(用户按了音量键或在主界面/悬浮球/HUD
+/// 触发了暂停)。Lua 端超时控制据此判定暂停, 避免用两次调用间隔这种启发式
+/// 阈值误判任务长循环为暂停(宝图任务单轮 40~70 秒, 旧的 30 秒阈值失效)。
+static int l_script_isPaused(lua_State *L) {
+    lua_pushboolean(L, [TSLuaBridge shared].isPaused);
+    return 1;
+}
+
+/// script.isRunning() —— 是否正在运行脚本(对应 TSLuaBridge.isRunning, 不含
+/// "派发但还未开跑" / "已停止但未退出" 的边缘窗口, 与 UI 列表里的"运行中"一致)。
+static int l_script_isRunning(lua_State *L) {
+    lua_pushboolean(L, [TSLuaBridge shared].isRunning);
+    return 1;
+}
+
 #pragma mark - UI 树
 
 static int l_appNode_info(lua_State *L) {
@@ -2904,6 +2921,17 @@ static void lua_register_all(lua_State *L) {
     };
     luaL_newlib(L, appLib);
     lua_setglobal(L, "app");
+
+    // ── script 模块(脚本本身状态) ──
+    // 区别于 appLib: appLib 是"被注入目标"的状态(app.isRunning = 游戏进程在跑);
+    // 这里 scriptLib 是"TrollAutoTouch 宿主脚本引擎"的状态(isPaused / isRunning)。
+    static const luaL_Reg scriptLib[] = {
+        {"isPaused",  l_script_isPaused},
+        {"isRunning", l_script_isRunning},
+        {NULL, NULL}
+    };
+    luaL_newlib(L, scriptLib);
+    lua_setglobal(L, "script");
 
     // ── appNode 模块 ──
     static const luaL_Reg appNodeLib[] = {
