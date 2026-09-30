@@ -139,6 +139,25 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)httpPost:(NSString *)url body:(NSData *)body contentType:(NSString *)contentType
       completion:(void(^)(NSData * _Nullable data, NSError * _Nullable error))completion;
 
+/// FTP 单文件下载 (明文标准 FTP, 被动模式, IPv4, 同步阻塞)
+/// @param host     FTP 服务器主机名或 IPv4 地址
+/// @param port     FTP 控制端口, 传 0 表示用默认 21
+/// @param user     用户名(匿名传 @"anonymous")
+/// @param password 密码(匿名传 @"anonymous@")
+/// @param remotePath 远端文件路径(从 FTP 根目录算起的绝对或相对路径)
+/// @param localPath  本地保存绝对路径, 父目录不存在会自动创建
+/// @param error     失败时填入错误信息(可传 nil)
+/// @return 成功返回 YES, 失败返回 NO 并填 error
+/// @note 协议层基于 BSD socket 自实现(NSURLSession 不支持 FTP), 仅 IPv4 / PASV;
+///       不支持 FTPS (TLS) 加密; 文件名假设 UTF-8 编码; SIZE/PASV/RETR 走标准 RFC 959/3659。
+- (BOOL)ftpDownloadHost:(NSString *)host
+                   port:(uint16_t)port
+                   user:(NSString *)user
+               password:(NSString *)password
+             remotePath:(NSString *)remotePath
+              localPath:(NSString *)localPath
+                  error:(NSError **)error;
+
 #pragma mark - 设备工具
 
 /// 获取磁盘空间信息

@@ -1668,6 +1668,48 @@ static int l_sys_vpnState(lua_State *L) {
     return 1;
 }
 
+/// sys.ftpDownload(host, port, user, pass, remotePath, localPath) -> bool, [errMsg]
+/// FTP 单文件下载 (明文标准 FTP, 同步阻塞)。底层用 BSD socket 自实现协议,
+/// NSURLSession 不支持 FTP。返回 true=成功; 失败返回 false + 错误描述。
+///   host        FTP 服务器域名或 IPv4
+///   port        控制端口(可省略, 默认 21)
+///   user        用户名(匿名传 "anonymous")
+///   pass        密码(匿名传 "anonymous@")
+///   remotePath  远端路径(从 FTP 根目录算起)
+///   localPath   本地绝对保存路径, 父目录不存在自动创建
+/// 仅 IPv4 / PASV 被动模式, 不支持 FTPS 加密, 文件名按 UTF-8 编码。
+static int l_sys_ftpDownload(lua_State *L) {
+    size_t hLen = 0, uLen = 0, pLen = 0, rLen = 0, lLen = 0;
+    const char *hC = luaL_checklstring(L, 1, &hLen);
+    int port = (int)luaL_optinteger(L, 2, 21);
+    const char *uC = luaL_checklstring(L, 3, &uLen);
+    const char *pC = luaL_checklstring(L, 4, &pLen);
+    const char *rC = luaL_checklstring(L, 5, &rLen);
+    const char *lC = luaL_checklstring(L, 6, &lLen);
+
+    NSString *host    = [[NSString alloc] initWithBytes:hC length:hLen encoding:NSUTF8StringEncoding];
+    NSString *user    = [[NSString alloc] initWithBytes:uC length:uLen encoding:NSUTF8StringEncoding];
+    NSString *pass    = [[NSString alloc] initWithBytes:pC length:pLen encoding:NSUTF8StringEncoding];
+    NSString *remote  = [[NSString alloc] initWithBytes:rC length:rLen encoding:NSUTF8StringEncoding];
+    NSString *local   = [[NSString alloc] initWithBytes:lC length:lLen encoding:NSUTF8StringEncoding];
+
+    NSError *err = nil;
+    BOOL ok = [[TSToolExecutor shared] ftpDownloadHost:host
+                                                  port:(uint16_t)port
+                                                  user:user
+                                              password:pass
+                                            remotePath:remote
+                                             localPath:local
+                                                 error:&err];
+    if (ok) {
+        lua_pushboolean(L, YES);
+        return 1;
+    }
+    lua_pushboolean(L, NO);
+    lua_pushstring(L, (err.localizedDescription ?: @"未知错误").UTF8String);
+    return 2;
+}
+
 static int l_sys_battery(lua_State *L) {
     lua_pushnumber(L, [[TSDeviceInfo shared] batteryLevel]);
     return 1;
@@ -2873,6 +2915,7 @@ static void lua_register_all(lua_State *L) {
         {"getIP",       l_sys_getIP},
         {"isVPNConnected", l_sys_isVPNConnected},
         {"vpnState",    l_sys_vpnState},
+        {"ftpDownload", l_sys_ftpDownload},
         {"battery",     l_sys_battery},
         {"alert",       l_sys_alert},
         {"alertButtons",l_sys_alertButtons},
