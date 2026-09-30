@@ -589,7 +589,7 @@ static int ftp_read_response(int sock, char *outText, size_t outTextCap) {
 static int ftp_send_cmd(int sock, const char *cmd, char *outText, size_t outTextCap) {
     NSMutableData *d = [NSMutableData dataWithBytes:cmd length:strlen(cmd)];
     [d appendBytes:"\r\n" length:2];
-    if (send(sock, d.bytes, d.length, 0) != (ssize_t)d.size) return -1;
+    if (send(sock, d.bytes, d.length, 0) != (ssize_t)[d length]) return -1;
     return ftp_read_response(sock, outText, outTextCap);
 }
 
@@ -771,7 +771,7 @@ static NSError *ftp_error(int errCode, NSString *msg) {
         [[NSFileManager defaultManager] createDirectoryAtPath:parentDir
             withIntermediateDirectories:YES attributes:nil error:nil];
     }
-    int fd = open(localPath.UTF8FileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open([localPath fileSystemRepresentation], O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         int e = errno;
         NSString *m = [NSString stringWithFormat:@"创建本地文件失败: %s", strerror(e)];
