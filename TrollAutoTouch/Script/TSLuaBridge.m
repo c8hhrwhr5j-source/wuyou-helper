@@ -1753,9 +1753,13 @@ static int l_http_post(lua_State *L) {
 ///   - 同步阻塞, 大文件需等下载完成(回调每 ~200ms 触发一次)。
 ///   - 回调函数签名: function(totalLength, currentLength, downloadSpeed) end
 ///     三参单位字节, speed 为本次回调相对上次的瞬时速率。
+///   - 脚本被主线程 stop 时也会取消下载 (避免 Lua 线程已停但 ObjC 仍在轮询的死等)。
 ///   - 回调在 Lua 调用线程上触发(Lua 后台线程), 安全。
 ///   - 失败 (URL 无效/写文件失败/超时/网络错误) 返回 (false, 错误信息字符串)。
 ///     成功时错误信息为空串。出错时同步 NSLog 完整 NSError, Lua 层拿到简述。
+///   - 注: 原版 http.lua 支持 callback 返回 true 中止下载; 本实现因保持 TSToolExecutor
+///     progress block 签名 (void) 不变, 仅支持通过 stop 按钮中止。如需 callback 中止
+///     逻辑, 请在 progress 回调内主动 stop() 当前脚本。
 static int l_http_download(lua_State *L) {
     size_t uLen = 0, pLen = 0;
     const char *uC = luaL_checklstring(L, 1, &uLen);
@@ -1781,6 +1785,12 @@ static int l_http_download(lua_State *L) {
             lua_pushinteger(L, (lua_Integer)speed);
             lua_call(L, 3, 0);
         } : nil
+                                            shouldCancel:^BOOL(void) {
+            // 中止检测: 仅检查 _stopRequested 全局标志 (主线程点停止时置位)。
+            // 不调 Lua callback (避免 progress / shouldCancel 重复触发 Lua 函数,
+            // 保持 progress 回调三参签名的简单性)。
+            return _stopRequested ? YES : NO;
+        }
                                                   error:&err];
     if (hasCb) luaL_unref(L, LUA_REGISTRYINDEX, cbRef);
     NSString *errMsg = @"";

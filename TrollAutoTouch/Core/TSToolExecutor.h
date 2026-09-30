@@ -159,12 +159,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// 父目录不存在自动创建。progress 回调每次有数据到达时触发, 三参为
 /// (totalLength, currentLength, downloadSpeed), 单位字节; speed 为
 /// 本次回调相对上次回调的瞬时速率。成功返回 YES。
+/// shouldCancel 可选中止查询 (每次 fireProgress 时调用一次); 返回 YES 立即
+/// 取消当前下载。失败时 progress 的语义保持不变, 仅为通知。
 - (BOOL)httpDownloadSync:(NSString *)url
                 savePath:(NSString *)localPath
               timeoutSec:(NSTimeInterval)timeoutSec
                 progress:(nullable void(^)(int64_t totalLength,
                                           int64_t currentLength,
                                           int64_t downloadSpeed))progress
+             shouldCancel:(nullable BOOL(^)(void))shouldCancel
                    error:(NSError **)error;
 
 #pragma mark - 设备工具
