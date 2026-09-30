@@ -104,6 +104,93 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 @property (nonatomic, strong) dispatch_queue_t execQueue;
 @end
 
+#pragma mark - TSHTTPDownloadDelegate (NSURLSessionDataDelegate)
+//
+// 把 NSURLSession 委托封装成一个小型 ObjC 类, 用于同步阻塞下载 (httpDownloadSync)。
+// 该类必须在 @implementation TSToolExecutor 之前定义, 因为 ObjC 不允许
+// @interface/@implementation 嵌套在另一个 @implementation 内部 (CI 失败过,
+// 报 missing '@end')。
+//
+@interface TSHTTPDownloadDelegate : NSObject<NSURLSessionDataDelegate>
+@property (atomic, assign) int64_t totalLength;     // -1 表示未知
+@property (atomic, assign) int64_t currentLength;   // delegate 线程写, 任意线程读
+@property (atomic, readonly) BOOL success;
+@property (atomic, readonly) BOOL finished;         // 委托回调结束(成功或失败)
+@property (atomic, readonly) NSError *lastError;
+@end
+
+@implementation TSHTTPDownloadDelegate {
+@public
+    NSFileHandle *_fileHandle;
+    int _fd;
+    int64_t _lastSampleBytes;
+    NSTimeInterval _lastSampleTime;
+    NSError *_lastError;
+    BOOL _success;
+}
+- (void)openLocalFile:(NSString *)path {
+    NSString *parent = [path stringByDeletingLastPathComponent];
+    if (parent.length) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:parent
+                                  withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+    _fd = open([path fileSystemRepresentation], O_WRONLY);
+    _fileHandle = (_fd >= 0) ? [[NSFileHandle alloc] initWithFileDescriptor:_fd
+                                                            closeOnDealloc:NO] : nil;
+}
+- (void)closeLocalFile {
+    if (_fileHandle) { [_fileHandle closeFile]; _fileHandle = nil; }
+    if (_fd >= 0) { close(_fd); _fd = -1; }
+}
+- (NSURLSessionResponseDisposition)URLSession:(NSURLSession *)session
+                               dataTask:(NSURLSessionDataTask *)dataTask
+                               didReceiveResponse:(NSURLResponse *)response
+                                completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+    _totalLength = http_contentLength(response);
+    return completionHandler(NSURLSessionResponseAllow);
+}
+- (void)URLSession:(NSURLSession *)session
+                dataTask:(NSURLSessionDataTask *)dataTask
+   didReceiveData:(NSData *)data {
+    if (!_fileHandle) return;
+    @try {
+        [_fileHandle writeData:data];
+        // 累加已下载量 (data.length 已通过写入检查, 直接累加)
+        _currentLength += (int64_t)data.length;
+        // 计算瞬时速率
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        if (_lastSampleTime == 0) {
+            _lastSampleTime = now;
+            _lastSampleBytes = _currentLength;
+        }
+        int64_t speed = 0;
+        NSTimeInterval dt = now - _lastSampleTime;
+        if (dt >= 0.5) {
+            speed = (int64_t)((double)(_currentLength - _lastSampleBytes) / dt);
+            _lastSampleTime = now;
+            _lastSampleBytes = _currentLength;
+        }
+        // 注: 进度回调不由委托线程触发, 而是 httpDownloadSync 主调用线程
+        // 通过轮询 _currentLength / _totalLength 在自身 NSRunLoop 上触发,
+        // 保证 Lua 进度回调在 Lua 线程上执行(避免跨线程访问 lua_State)。
+    } @catch (NSException *e) {
+        _lastError = [NSError errorWithDomain:@"TSHTTPDownload" code:1
+                                     userInfo:@{NSLocalizedDescriptionKey: e.reason ?: @"写文件失败"}];
+    }
+}
+- (void)URLSession:(NSURLSession *)session
+                task:(NSURLSessionTask *)task
+   didCompleteWithError:(NSError *)error {
+    if (error && !_lastError) _lastError = error;
+    _success = (error == nil && _lastError == nil);
+    [self closeLocalFile];
+    // 注: 写 _finished (property `finished` 的 backing ivar), 而非 _complete,
+    // 两者是不同 ivar, httpDownloadSync 的 while (!del.finished) 等此值。
+    _finished = YES;
+}
+@end
+
 @implementation TSToolExecutor
 
 + (instancetype)shared {
@@ -644,84 +731,7 @@ static int64_t http_contentLength(NSURLResponse *resp) {
     return (int64_t)[v longLongValue];
 }
 
-@interface TSHTTPDownloadDelegate : NSObject<NSURLSessionDataDelegate>
-@property (atomic, assign) int64_t totalLength;     // -1 表示未知
-@property (atomic, assign) int64_t currentLength;   // delegate 线程写, 任意线程读
-@property (atomic, readonly) BOOL success;
-@property (atomic, readonly) BOOL finished;         // 委托回调结束(成功或失败)
-@property (atomic, readonly, copy) NSError *lastError;
-@end
 
-@implementation TSHTTPDownloadDelegate {
-@public
-    NSFileHandle *_fileHandle;
-    int _fd;
-    int64_t _lastSampleBytes;
-    NSTimeInterval _lastSampleTime;
-    NSError *_lastError;
-    BOOL _complete;
-    BOOL _success;
-}
-- (void)openLocalFile:(NSString *)path {
-    NSString *parent = [path stringByDeletingLastPathComponent];
-    if (parent.length) {
-        [[NSFileManager defaultManager] createDirectoryAtPath:parent
-                                  withIntermediateDirectories:YES attributes:nil error:nil];
-    }
-    [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-    _fd = open([path fileSystemRepresentation], O_WRONLY);
-    _fileHandle = (_fd >= 0) ? [[NSFileHandle alloc] initWithFileDescriptor:_fd
-                                                            closeOnDealloc:NO] : nil;
-}
-- (void)closeLocalFile {
-    if (_fileHandle) { [_fileHandle closeFile]; _fileHandle = nil; }
-    if (_fd >= 0) { close(_fd); _fd = -1; }
-}
-- (NSURLSessionResponseDisposition)URLSession:(NSURLSession *)session
-                               dataTask:(NSURLSessionDataTask *)dataTask
-                               didReceiveResponse:(NSURLResponse *)response
-                                completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
-    _totalLength = http_contentLength(response);
-    return completionHandler(NSURLSessionResponseAllow);
-}
-- (void)URLSession:(NSURLSession *)session
-                dataTask:(NSURLSessionDataTask *)dataTask
-   didReceiveData:(NSData *)data {
-    if (!_fileHandle) return;
-    @try {
-        [_fileHandle writeData:data];
-        // 累加已下载量 (data.length 已通过写入检查, 直接累加)
-        _currentLength += (int64_t)data.length;
-        // 计算瞬时速率
-        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        if (_lastSampleTime == 0) {
-            _lastSampleTime = now;
-            _lastSampleBytes = _currentLength;
-        }
-        int64_t speed = 0;
-        NSTimeInterval dt = now - _lastSampleTime;
-        if (dt >= 0.5) {
-            speed = (int64_t)((double)(_currentLength - _lastSampleBytes) / dt);
-            _lastSampleTime = now;
-            _lastSampleBytes = _currentLength;
-        }
-        // 注: 进度回调不由委托线程触发, 而是 httpDownloadSync 主调用线程
-        // 通过轮询 _currentLength / _totalLength 在自身 NSRunLoop 上触发,
-        // 保证 Lua 进度回调在 Lua 线程上执行(避免跨线程访问 lua_State)。
-    } @catch (NSException *e) {
-        _lastError = [NSError errorWithDomain:@"TSHTTPDownload" code:1
-                                     userInfo:@{NSLocalizedDescriptionKey: e.reason ?: @"写文件失败"}];
-    }
-}
-- (void)URLSession:(NSURLSession *)session
-                task:(NSURLSessionTask *)task
-   didCompleteWithError:(NSError *)error {
-    if (error && !_lastError) _lastError = error;
-    _success = (error == nil && _lastError == nil);
-    [self closeLocalFile];
-    _complete = YES;
-}
-@end
 
 - (BOOL)httpDownloadSync:(NSString *)url
                 savePath:(NSString *)localPath
