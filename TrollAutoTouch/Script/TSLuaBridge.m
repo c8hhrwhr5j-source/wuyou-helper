@@ -1749,12 +1749,13 @@ static int l_http_post(lua_State *L) {
     return 3;
 }
 
-/// http.download(地址, 保存路径, [超时秒], [回调函数]) -> bool
+/// http.download(地址, 保存路径, [超时秒], [回调函数]) -> 成功?, 错误信息
 ///   - 同步阻塞, 大文件需等下载完成(回调每 ~200ms 触发一次)。
 ///   - 回调函数签名: function(totalLength, currentLength, downloadSpeed) end
 ///     三参单位字节, speed 为本次回调相对上次的瞬时速率。
 ///   - 回调在 Lua 调用线程上触发(Lua 后台线程), 安全。
-///   - 失败 (URL 无效/写文件失败/超时/网络错误) 返回 false, 不抛错。
+///   - 失败 (URL 无效/写文件失败/超时/网络错误) 返回 (false, 错误信息字符串)。
+///     成功时错误信息为空串。出错时同步 NSLog 完整 NSError, Lua 层拿到简述。
 static int l_http_download(lua_State *L) {
     size_t uLen = 0, pLen = 0;
     const char *uC = luaL_checklstring(L, 1, &uLen);
@@ -1782,11 +1783,14 @@ static int l_http_download(lua_State *L) {
         } : nil
                                                   error:&err];
     if (hasCb) luaL_unref(L, LUA_REGISTRYINDEX, cbRef);
+    NSString *errMsg = @"";
     if (!ok && err) {
-        NSLog(@"[http.download] 失败: %@", err.localizedDescription);
+        errMsg = err.localizedDescription ?: @"下载失败";
+        NSLog(@"[http.download] 失败: %@", errMsg);
     }
     lua_pushboolean(L, ok);
-    return 1;
+    lua_pushstring(L, errMsg.UTF8String);
+    return 2;
 }
 
 /// sys.setFloatBallPoint(x, y)
