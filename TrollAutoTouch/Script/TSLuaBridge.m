@@ -1753,6 +1753,9 @@ static int l_http_post(lua_State *L) {
 ///   - 同步阻塞, 大文件需等下载完成(回调每 ~200ms 触发一次)。
 ///   - 回调函数签名: function(totalLength, currentLength, downloadSpeed) end
 ///     三参单位字节, speed 为本次回调相对上次的瞬时速率。
+///   - 回调返回 true 立即取消下载 (与原版 http.lua 语义一致);
+///     返回 nil/false 继续下载。脚本被主线程 stop 时也会取消 (避免 Lua 线程已停但
+///     ObjC 仍在轮询的死等)。
 ///   - 回调在 Lua 调用线程上触发(Lua 后台线程), 安全。
 ///   - 失败 (URL 无效/写文件失败/超时/网络错误) 返回 (false, 错误信息字符串)。
 ///     成功时错误信息为空串。出错时同步 NSLog 完整 NSError, Lua 层拿到简述。
@@ -1773,13 +1776,25 @@ static int l_http_download(lua_State *L) {
     BOOL ok = [[TSToolExecutor shared] httpDownloadSync:url
                                                savePath:savePath
                                              timeoutSec:timeout
-                                               progress:hasCb ? ^(int64_t total, int64_t current, int64_t speed) {
+                                               progress:hasCb ? ^BOOL(int64_t total, int64_t current, int64_t speed) {
             // 在 Lua 调用线程上, 安全可调 lua_State
+            // 1) 主线程 stop 标志 → 立即取消
+            if (_stopRequested) return YES;
+            // 2) 调 Lua callback 取返回值 (pcall 避免 callback 抛错炸 lua_State)
             lua_rawgeti(L, LUA_REGISTRYINDEX, cbRef);
             lua_pushinteger(L, (lua_Integer)total);
             lua_pushinteger(L, (lua_Integer)current);
             lua_pushinteger(L, (lua_Integer)speed);
-            lua_call(L, 3, 0);
+            if (lua_pcall(L, 3, 1, 0) != LUA_OK) {
+                size_t len = 0;
+                const char *em = lua_tolstring(L, -1, &len);
+                NSLog(@"[http.download] 回调错误: %@", luaToNSString(em, len));
+                lua_pop(L, 1);
+                return NO;
+            }
+            BOOL abort = lua_toboolean(L, -1);
+            lua_pop(L, 1);
+            return abort;
         } : nil
                                                   error:&err];
     if (hasCb) luaL_unref(L, LUA_REGISTRYINDEX, cbRef);
