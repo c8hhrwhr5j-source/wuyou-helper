@@ -158,6 +158,25 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     _totalLength = http_contentLength(response);
     // completionHandler 是 void(^)(NSURLSessionResponseDisposition), 调用后
     // 返回 void, 不能作为 NSURLSessionResponseDisposition 方法的 return 值。
+    NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]]
+                                ? (NSHTTPURLResponse *)response : nil;
+    NSInteger statusCode = httpResp.statusCode;
+    if (statusCode < 200 || statusCode >= 300) {
+        // 非 2xx 视为下载失败: 阻止后续 data 写入本地文件, 并把 status code
+        // 透传给 Lua 调用方 (避免把 404 HTML 错误页当成有效下载产物)。
+        _success = NO;
+        _lastError = [NSError errorWithDomain:@"TSHTTPDownload"
+                                         code:statusCode
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                    [NSString stringWithFormat:@"HTTP %ld", (long)statusCode],
+                                                @"TSHTTPStatusCode": @(statusCode)}];
+        completionHandler(NSURLSessionResponseCancel);
+        // 显式 cancel, 确保 didCompleteWithError 触发 (NSURLErrorCancelled),
+        // 配合 didCompleteWithError 中 `if (error && !_lastError)` 的保护,
+        // 我们预设的 _lastError 不会被取消错误覆盖, _success 也会被算成 NO。
+        [dataTask cancel];
+        return NSURLSessionResponseCancel;
+    }
     completionHandler(NSURLSessionResponseAllow);
     return NSURLSessionResponseAllow;
 }
