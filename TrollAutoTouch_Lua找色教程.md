@@ -98,6 +98,113 @@ App 常驻音量键监听（需在设置中开启 TAS 服务）：
 - 每 5000 条 Lua 指令检查一次停止钩子（死循环也能被中断）
 - 点击 App 内"停止"按钮 / 悬浮窗停止按钮 / 音量键菜单中的"停止"
 
+### 1.4 脚本运行状态查询 `script.isPaused` / `script.isRunning`
+
+查询 TrollAutoTouch **宿主脚本引擎**自身的运行状态——区分于 `app.isRunning()`（那个查的是“被操作的目标 App 进程是否在跑”，比如游戏进程；这里查的是“本 App 跑的 Lua 脚本本身”）。
+
+```lua
+script.isRunning()    -- → boolean  脚本是否在运行
+script.isPaused()     -- → boolean  脚本是否被暂停
+```
+
+| 函数 | 含义 |
+|---|---|
+| `script.isRunning()` | 脚本是否正在运行（与 APP 内脚本列表里显示的“运行中”状态一致；不含“已派发但还没开跑”和“已停止但未退出”两个边缘窗口） |
+| `script.isPaused()` | 脚本是否被暂停。触发暂停的来源：音量键菜单里的“暂停/继续”、主界面/悬浮球/HUD 上的暂停按钮 |
+
+#### 典型用法：精确等待恢复
+
+`isPaused()` 主要用于**超时控制**——脚本内部可以用它准确判定暂停状态，避免用“两次调用间隔”这种启发式阈值去猜。
+
+例如宝图任务单轮 40\~70 秒，传统 30 秒超时阈值会误判任务为暂停；改用 `script.isPaused()` 即可：
+
+```lua
+-- 等到恢复运行（取消暂停），单次上限 15 秒
+function waitWhilePaused(deadline)
+    while script.isPaused() and sys.mtime() < deadline do
+        mSleep(200)
+    end
+end
+
+-- 等待恢复，带最长 60 秒超时
+waitWhilePaused(sys.mtime() + 60000)
+if script.isPaused() then
+    -- 60 秒还没恢复，说明用户已离开或在决定是否继续
+    logStr("暂停超过 60 秒仍未恢复，跳过本轮")
+    return
+end
+```
+
+#### 典型用法：循环体内主动响应暂停
+
+```lua
+-- 长循环中：每次切片前检查暂停, 让用户在按暂停后能立即冻结进度
+while not done do
+    if script.isPaused() then
+        -- 暂停中: 不消耗任何业务逻辑, 一直睡到恢复
+        while script.isPaused() do
+            mSleep(200)
+        end
+    end
+    -- ... 业务逻辑 ...
+end
+```
+
+#### 实现说明
+
+- 两个函数都是同步直读 `TSLuaBridge.shared` 里的 `isRunning` / `isPaused` 状态位（KVO-free），无锁、无阻塞，可高频调用。
+- `isRunning` 仅在脚本**真正开始执行**后置为 YES、**真正退出**后置为 NO；与 UI 上的"运行中"标完全同步。
+- 与 `app.isRunning(bid)`（查目标 App 进程）语义独立，**不要混用**。
+
+### 1.5 设备重启后自动恢复服务（SLC 重大位置变化监听）
+
+设备重启 / 被系统杀进程后，TrollAutoTouch **会在后台自动重新拉起**——TAS 服务、8080 远程访问端口、后台保活链全部自动接管，**不需要手动去点 App 图标**。挂机脚本在设备重启后可继续工作。
+
+#### 工作机制
+
+通过 iOS 系统的 **SLC（Significant Location Changes，重大位置变化）** 监听实现，是非越狱 TrollStore 下唯一可用的"重启后自动恢复"通道：
+
+1. App 首次启动时调用 `startMonitoringSignificantLocationChanges` 注册 SLC
+2. 该注册由 iOS 系统守护进程持久化记录，**跨进程终止、跨设备重启持久**存在
+3. 设备重启后第一次发生**基站切换 / 移动约 500 米**时，系统自动在后台拉起 App 进程
+4. App 进程的 `didFinishLaunching` 无条件启动 TAS 服务 + 8080 端口 + 整个保活链
+
+#### 实操效果
+
+| 场景 | 表现 |
+|---|---|
+| 手动滑掉 App 卡片 / 系统因内存杀进程 | 系统 SLC 通知到达时自动后台拉起，服务自动恢复 |
+| 设备重启 | 重启后首次基站切换（开机搜网注册一般就算一次）时自动后台拉起 |
+| App 在后台运行中 | 完全无影响，行为照旧 |
+| 用户在设置页**手动关闭 TAS 服务** | 同时注销 SLC，不会再有自动拉起（不违背用户意图） |
+| 用户**从主屏上划强杀 App** | iOS 安全策略要求必须手动打开一次 App，SLC 才会恢复自启能力 |
+
+#### 局限（如实说明）
+
+- **不是开机秒起**：需要一次触发事件（基站切换 / 移动）。手机重启后会自动搜网注册基站，这通常就触发一次；**设备完全静止可能延迟数十分钟到几小时**。
+- **拉起在后台进行**：进程被拉起时处于后台态，脚本**不会自动启动**（脚本运行需用户主动触发），但 TAS 服务 / 8080 端口 / 保活链全部恢复——这正是挂机脚本最需要的能力。
+- **SLC 不暴露为 Lua API**：这是宿主 App 的系统级注册，不对脚本开放任何开关。脚本作者无需关心，行为全自动。
+
+#### 实机验证方法
+
+设备重启 → 不点 App 图标 → 等待几分钟 → 在电脑浏览器访问 `http://手机 IP:8080/`，能打开即说明服务已自动恢复。
+
+同时可在 App 内「查看系统日志」找 `touch.log`，搜下面任一行确认（启动被 SLC 拉起时自动写入）：
+
+```
+[App] 由定位事件(SLC)系统后台拉起, 服务自动恢复
+[定位保活] startUpdatingLocation 已调用, SLC 重启自启监听已注册
+```
+
+如果日志里没有这两行而服务却恢复了，可能是上一次 SLC 注册尚未失效 + 服务原本就在运行；这时日志安静是正常现象，不影响结论。
+
+#### 实现说明（了解即可）
+
+- `TSLocationKeepAlive.start` 在每次服务启动时同时调用 `startUpdatingLocation`（持续定位，主保活通道）+ `startMonitoringSignificantLocationChanges`（SLC，重启自启监听）
+- `stop` **刻意不注销 SLC**——`appWillTerminate` / `dealloc` 等终止路径会被调用，如果一并注销 SLC，重启自启会失效
+- 单独提供 `stopSystemRelaunchWatch` 方法，专供设置页用户**手动关闭 TAS 服务**时调用，避免违背用户意图的自动拉起
+- 真正"开机瞬间自启"需要 `LaunchDaemon`（要求 platform 身份，仅越狱可实现），TrollStore 非越狱下不可能
+
 ---
 
 ## 2. 找色函数（核心）
@@ -1038,6 +1145,161 @@ sys.palyAudio("/var/mobile/touch/res/done.wav")
 
 ---
 
+## 7.8 VPN 连接检测 `sys.isVPNConnected` / `sys.vpnState`
+
+检测设备当前是否连接了 VPN（WireGuard、IKEv2、小火箭、Surge 等均支持）。**同步立即返回，不联网、不阻塞**。
+
+```lua
+sys.isVPNConnected()    -- → boolean  是否连接 VPN
+sys.vpnState()          -- → table    检测详情
+```
+
+### `vpnState` 返回值
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `connected` | boolean | 是否连接 VPN |
+| `method` | string | 命中的判定层，见下表 |
+| `interface` | string | 隧道接口名（如 `utun4`），代理模式为空串 |
+
+| `method` 值 | 含义 |
+|---|---|
+| `path` | **权威判定**：Network.framework 网络路径中存在承载路由的 `utun` 隧道接口（系统级 VPN 均覆盖） |
+| `utun` | 兜底：`getifaddrs` 枚举到带可路由地址的 `utun` 接口（分流 VPN） |
+| `proxy` | 兜底：系统全局代理已启用（仅代理模式工具，如 HTTP/SOCKS/PAC 代理） |
+| `unknown` | 路径监听尚未上报首帧（仅 App 启动后毫秒级窗口，之后不会再出现） |
+
+### 示例
+
+```lua
+-- 开跑前强制检查 VPN
+if not sys.isVPNConnected() then
+    sys.toast("未连接 VPN，请先开启 VPN 再运行脚本")
+    return
+end
+
+-- 调试: 查看命中哪一层判定
+local st = sys.vpnState()
+logStr(string.format("VPN=%s method=%s interface=%s",
+    tostring(st.connected), st.method, st.interface))
+
+-- 挂机循环中周期性守护: 断线就报警/停脚本
+while true do
+    if not sys.isVPNConnected() then
+        sys.toast("VPN 已断开！")
+        sys.palyAudio(file.resDir() .. "/alert.mp3")
+        break
+    end
+    -- ... 正常挂机逻辑 ...
+    mSleep(30000)
+end
+```
+
+### 实现说明
+
+- **三层判定**：① `NWPathMonitor` 常驻监听系统网络路径（App 启动即开启，VPN 连接/断开由系统主动推送刷新缓存）；② `getifaddrs` 枚举带可路由地址的 `utun` 接口（已排除 169.254 链路本地 / `fe80::` / `::1`，空闲 `utun` 不误报）；③ 系统全局代理（含按接口区分的 `__SCOPED__` 配置）。
+- 层①是 Apple 官方网络路径状态，**无需任何 entitlement**，TrollStore 环境完整可用，是免越狱下最可靠的方案；②③仅作补充覆盖。
+- `sys.isVPNConnected()` 直接读缓存，脚本内可高频调用，无性能开销。
+
+---
+
+## 7.9 HTTP 模块 `http.get` / `http.post` / `http.download`
+
+替代原 `sys.ftpDownload`（FTP 模块已删除）。走标准 HTTPS/HTTP，基于系统 `NSURLSession`，同步阻塞、UTF-8 解码。
+
+### 7.9.1 `http.get` 发送 GET 请求
+
+```lua
+状态码, 返回头, 内容 = http.get(地址, [超时时间], [请求头])
+```
+
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `地址` | ✅ | — | 完整 URL（不会自动 URL 编码，需自行处理） |
+| `超时时间` | ❌ | 60 | 秒。底层 NSURLSession 超时 |
+| `请求头` | ❌ | TAS 默认 UA | Lua 表 `{["User-Agent"]="...", ["Cookie"]="..."}`, 可省 |
+
+**返回值**：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `状态码` | integer | HTTP 响应码（如 200、404）；网络错误时为 0 |
+| `返回头` | table | 响应头键值表，`{Server="nginx", Content-Type="text/html", ...}` |
+| `内容` | string | 响应体 UTF-8 字符串（失败时为错误描述） |
+
+**示例**：
+
+```lua
+local code, header, body = http.get("https://www.baidu.com", 30, {
+    ["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+})
+if code == 200 then
+    print(header)       -- 打印头部信息
+    print(body)         -- 打印网页内容
+end
+```
+
+### 7.9.2 `http.post` 发送 POST 请求
+
+```lua
+状态码, 返回头, 内容 = http.post(地址, [超时时间], [请求头], [请求参数])
+```
+
+参数同 `http.get`，最后一个 `请求参数` 是 form-urlencoded 字符串（如 `"username=test&password=123"`）。脚本不需要显式设置 `Content-Type`，实现自动加 `application/x-www-form-urlencoded`。
+
+**示例**：
+
+```lua
+local code, header, body = http.post("https://www.baidu.com", 30, {
+    ["User-Agent"] = "Mozilla/5.0 ..."
+}, "username=1237489&password=237348")
+if code == 200 then
+    print(body)
+end
+```
+
+### 7.9.3 `http.download` 下载文件
+
+```lua
+下载是否成功 = http.download(地址, 保存路径, [超时时间], [回调函数])
+```
+
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `地址` | ✅ | — | 文件 URL |
+| `保存路径` | ✅ | — | 本地绝对路径，父目录不存在会自动创建 |
+| `超时时间` | ❌ | 60 | 秒 |
+| `回调函数` | ❌ | nil | `function(totalLength, currentLength, downloadSpeed) end`，约每 200 ms 触发一次 |
+
+**回调三参均为整数，单位字节**。`downloadSpeed` 是本次回调相对上次的瞬时速率，可直接用于"下载进度条"展示。
+
+**示例**：
+
+```lua
+-- 下载视频到相册
+local savePath = "/var/mobile/Media/svip/res/55.mp4"
+local status = http.download("http://tk.taobao6.vip/EC/video/5.mp4", savePath, 10,
+        function(totalLength, currentLength, downloadSpeed)
+            print(string.format("文件总大小:%.2fMB 当前已完成:%.2fMB 当前下载速度:%.2fMB/s",
+                totalLength/1024/1024, currentLength/1024/1024, downloadSpeed/1024/1024))
+        end)
+if status then
+    local s, e = mobile.saveVideoFileToAlbum(savePath)
+    print(s and "保存到相册成功" or "保存到相册失败 error: " .. tostring(e))
+end
+```
+
+### 实现说明
+
+- **同步阻塞**：`http.get`/`http.post`/`http.download` 都是同步调用，脚本会在该行等待网络完成；100 MB 文件在普通带宽下约几秒到十几秒，挂机脚本一般可接受。
+- **进度回调安全**：下载的进度触发与下载任务是分开的。下载在后台 `NSURLSession` 委托线程上推进，已下载字节原子累加；进度回调在 **Lua 调用线程**（200 ms 周期的 `NSTimer`）上触发，**不会跨线程访问 lua_State**。
+- **不支持重定向自动跳转**：调用方需自己处理 3xx；若需跟随重定向，请告知，可以扩展。
+- **HTTPS / TLS**：走系统证书链，自签名证书需客户端单独信任。
+- **Body 编码**：响应体按 UTF-8 解码，失败回退 ISO-8859-1；服务端 GBK 编码的中文响应会乱码（目前未实现按 `Content-Type` charset 切换）。
+- **请求体仅 form-urlencoded**：未实现 multipart/form-data、JSON 等 content type 直传；如需 JSON，自己 base64 或原始字符串放在 `请求参数` 字段，并在 `请求头` 中显式覆盖 `Content-Type`。
+
+---
+
 ## 8. 屏幕方向与坐标系
 
 ### 8.1 屏幕尺寸 `getScreenSize`
@@ -1930,6 +2192,8 @@ end
 | `sys.osVersion()` | 系统版本 |
 | `sys.model()` | 设备型号 |
 | `sys.getIP()` | WiFi IP |
+| `sys.isVPNConnected()` | 是否连接 VPN → boolean |
+| `sys.vpnState()` | VPN 检测详情 → table (connected/method/interface) |
 | `sys.battery()` | 电量 0~1 |
 | `sys.mtime()` | 毫秒级时间戳 → number |
 | `sys.availableMemory()` | 系统可用内存 (字节) → number |
@@ -1940,6 +2204,19 @@ end
 | `sys.alert(msg)` | 阻塞弹窗 |
 | `sys.toast(msg)` | 屏幕悬浮提示 |
 | `sys.setFloatBallPoint(x, y)` | 移动悬浮球 |
+
+### HTTP / 下载
+
+| 函数 | 说明 |
+|---|---|
+| `http.get(url, [timeout], [headers])` | HTTP GET → code, headers, body |
+| `http.post(url, [timeout], [headers], [body])` | HTTP POST (form-urlencoded) → code, headers, body |
+| `http.download(url, savePath, [timeout], [progressFn])` | HTTP 下载 → boolean, 进度 (total, cur, speed) |
+
+### 设备与控制
+
+| 函数 | 说明 |
+|---|---|
 | `device.udid()` | 设备 UDID → string / nil |
 | `device.serialNumber()` | 设备序列号 → string / nil |
 | `device.turnOnAssistiveTouch()` | 启用辅助触控 → boolean |
@@ -1964,6 +2241,15 @@ end
 | `app.open(bid)` | 打开 App → boolean |
 | `app.close(bid)` | 关闭 App → boolean |
 | `app.inputText(text)` | 输入文本 → boolean |
+
+### 脚本运行状态
+
+| 函数 | 说明 |
+|---|---|
+| `script.isRunning()` | 宿主脚本引擎是否正在运行脚本 → boolean |
+| `script.isPaused()` | 脚本是否被暂停 → boolean（音量键菜单/悬浮球/HUD 上的暂停按钮触发） |
+
+> 与 `app.isRunning(bid)` 语义独立：那个查的是“被操作的目标 App 进程”，这里查的是“本 App 跑的 Lua 脚本本身”。详见 1.4 节。
 
 ### UI 树节点
 
@@ -2041,6 +2327,7 @@ end
 | `sys` | `device` | 系统信息 |
 | `app` | - | 应用管理 |
 | `appNode` | - | UI 树节点 |
+| `http` | - | HTTP / 下载 |
 | `json` | - | JSON 编解码 |
 | `str` | - | 字符串工具 |
 | `file` | - | 文件操作 |

@@ -139,24 +139,33 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)httpPost:(NSString *)url body:(NSData *)body contentType:(NSString *)contentType
       completion:(void(^)(NSData * _Nullable data, NSError * _Nullable error))completion;
 
-/// FTP 单文件下载 (明文标准 FTP, 被动模式, IPv4, 同步阻塞)
-/// @param host     FTP 服务器主机名或 IPv4 地址
-/// @param port     FTP 控制端口, 传 0 表示用默认 21
-/// @param user     用户名(匿名传 @"anonymous")
-/// @param password 密码(匿名传 @"anonymous@")
-/// @param remotePath 远端文件路径(从 FTP 根目录算起的绝对或相对路径)
-/// @param localPath  本地保存绝对路径, 父目录不存在会自动创建
-/// @param error     失败时填入错误信息(可传 nil)
-/// @return 成功返回 YES, 失败返回 NO 并填 error
-/// @note 协议层基于 BSD socket 自实现(NSURLSession 不支持 FTP), 仅 IPv4 / PASV;
-///       不支持 FTPS (TLS) 加密; 文件名假设 UTF-8 编码; SIZE/PASV/RETR 走标准 RFC 959/3659。
-- (BOOL)ftpDownloadHost:(NSString *)host
-                   port:(uint16_t)port
-                   user:(NSString *)user
-               password:(NSString *)password
-             remotePath:(NSString *)remotePath
-              localPath:(NSString *)localPath
-                  error:(NSError **)error;
+/// 同步 HTTP GET (用于 Lua http.get)
+/// 内部用 dispatch_semaphore 把 NSURLSession 异步回调同步化, 阻塞当前线程。
+/// 返回 NSDictionary:
+///   @{@"status": NSNumber(int), @"headers": NSDictionary<NSString*, NSString*>, @"body": NSString}
+/// 失败或网络错误 status=0, headers=@{}, body=错误描述。
+- (NSDictionary *)httpGetSync:(NSString *)url
+                  timeoutSec:(NSTimeInterval)timeoutSec
+                     headers:(nullable NSDictionary<NSString *, NSString *> *)headers;
+
+/// 同步 HTTP POST (用于 Lua http.post), body 为 form-urlencoded 字符串。
+/// 返回结构同 httpGetSync。
+- (NSDictionary *)httpPostSync:(NSString *)url
+                   timeoutSec:(NSTimeInterval)timeoutSec
+                      headers:(nullable NSDictionary<NSString *, NSString *> *)headers
+                  requestBody:(NSString *)requestBody;
+
+/// 同步 HTTP 下载文件 (用于 Lua http.download)
+/// 父目录不存在自动创建。progress 回调每次有数据到达时触发, 三参为
+/// (totalLength, currentLength, downloadSpeed), 单位字节; speed 为
+/// 本次回调相对上次回调的瞬时速率。成功返回 YES。
+- (BOOL)httpDownloadSync:(NSString *)url
+                savePath:(NSString *)localPath
+              timeoutSec:(NSTimeInterval)timeoutSec
+                progress:(nullable void(^)(int64_t totalLength,
+                                          int64_t currentLength,
+                                          int64_t downloadSpeed))progress
+                   error:(NSError **)error;
 
 #pragma mark - 设备工具
 

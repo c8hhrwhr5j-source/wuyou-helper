@@ -547,300 +547,271 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     }] resume];
 }
 
-#pragma mark - FTP 下载 (明文标准 FTP, 同步阻塞)
+#pragma mark - HTTP 同步请求 (用于 Lua http.get / http.post)
 
-// ── FTP 协议工具函数 ──
-// 全部用 BSD socket 自实现是因为 iOS 的 NSURLSession 不支持 ftp:// scheme。
-
-// 从 FTP 控制连接读一行(以 \r\n 结尾), 直到拿到 "NNN " 形式的最终响应行
-// (RFC 959 多行响应的中间行是 "NNN-", 末行是 "NNN "), 返回 3 位响应码,
-// 把 "NNN " 之后的描述文本写入 outText (outTextCap 含终止符)。
-// 失败/关闭/超时返回 -1。
-static int ftp_read_response(int sock, char *outText, size_t outTextCap) {
-    char line[1024];
-    for (;;) {
-        size_t pos = 0;
-        for (;;) {
-            char c = 0;
-            ssize_t n = recv(sock, &c, 1, 0);
-            if (n <= 0) return -1;       // EOF 或 recv 错误/超时
-            if (c == '\n') break;
-            if (pos < sizeof(line) - 1) line[pos++] = c;
-        }
-        if (pos > 0 && line[pos-1] == '\r') pos--;
-        line[pos] = '\0';
-        if (pos < 4) continue;          // 不足 4 字符(应至少 "NNN-x"), 跳过
-        if (line[3] == ' ') {           // 末行: "NNN text"
-            int code = (line[0]-'0')*100 + (line[1]-'0')*10 + (line[2]-'0');
-            if (outText && outTextCap > 0) {
-                size_t copyLen = pos - 4;
-                if (copyLen >= outTextCap) copyLen = outTextCap - 1;
-                memcpy(outText, line + 4, copyLen);
-                outText[copyLen] = '\0';
-            }
-            return code;
-        }
-        // 中间行: "NNN-text" 继续读
-    }
+/// 把 NSDictionary<NSHTTPHeader*> 转成表头(用于"返回头")
+static NSDictionary *http_responseHeaders(NSURLResponse *resp) {
+    if (![resp isKindOfClass:[NSHTTPURLResponse class]]) return @{};
+    NSDictionary *h = ((NSHTTPURLResponse *)resp).allHeaderFields;
+    return h ?: @{};
 }
 
-// 发送一行 FTP 命令(末尾自动追加 \r\n)并读取一次响应。
-// 返回响应码, 描述文本写入 outText。返回 -1 表示发送/读取失败。
-static int ftp_send_cmd(int sock, const char *cmd, char *outText, size_t outTextCap) {
-    NSMutableData *d = [NSMutableData dataWithBytes:cmd length:strlen(cmd)];
-    [d appendBytes:"\r\n" length:2];
-    if (send(sock, d.bytes, d.length, 0) != (ssize_t)[d length]) return -1;
-    return ftp_read_response(sock, outText, outTextCap);
+/// HTTP body → 字符串(失败回退 latin1)
+static NSString *http_bodyToString(NSData *data) {
+    if (data.length == 0) return @"";
+    // 优先 UTF-8 (中国大陆 Web 默认编码), 失败回退 ASCII/Latin-1
+    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (s) return s;
+    return [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] ?: @"";
 }
 
-// 设置 socket 的收发超时(秒)
-static void ftp_set_timeout(int sock, int sec) {
-    struct timeval tv = { sec, 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+/// 通用 HTTP 同步执行器 (GET / POST 共用)
+///   requestBody == nil → GET, 否则 POST (Content-Type 用 application/x-www-form-urlencoded)
+///   返回结构: { status:int, headers:NSDictionary, body:string }
+static NSDictionary *http_performSync(NSString *url,
+                                       NSTimeInterval timeoutSec,
+                                       NSDictionary<NSString *, NSString *> *headers,
+                                       NSString *requestBody) {
+    NSURL *u = [NSURL URLWithString:url];
+    if (!u) {
+        return @{ @"status": @0, @"headers": @{}, @"body": @"URL 无效" };
+    }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:u
+                                                       cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                                   timeoutInterval:timeoutSec];
+    req.HTTPMethod = requestBody ? @"POST" : @"GET";
+    if (requestBody) {
+        req.HTTPBody = [requestBody dataUsingEncoding:NSUTF8StringEncoding];
+        [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    }
+    // 默认 UA: TAS 头信息
+    NSMutableDictionary *allHeaders = [NSMutableDictionary dictionary];
+    allHeaders[@"User-Agent"] = @"TrollAutoTouch/1.0 (TAS)";
+    allHeaders[@"Accept"]     = @"*/*";
+    if (headers) [allHeaders addEntriesFromDictionary:headers];
+    [allHeaders enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *v, BOOL *stop) {
+        if (v.length) [req setValue:v forHTTPHeaderField:k];
+    }];
+
+    __block NSData *outData = nil;
+    __block NSURLResponse *outResp = nil;
+    __block NSError *outErr = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+                                                                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
+        outData = data; outResp = resp; outErr = error;
+        dispatch_semaphore_signal(sem);
+    }];
+    [task resume];
+    // 调用方线程 (Lua 后台线程) 阻塞等待; NSURLSession 回调在其 delegate queue
+    // 上跑, 与当前线程不冲突, 无死锁风险。
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
+    if (outErr) {
+        return @{ @"status": @0,
+                  @"headers": @{},
+                  @"body": [NSString stringWithFormat:@"网络错误: %@", outErr.localizedDescription] };
+    }
+    NSInteger code = 0;
+    if ([outResp isKindOfClass:[NSHTTPURLResponse class]]) {
+        code = ((NSHTTPURLResponse *)outResp).statusCode;
+    }
+    return @{ @"status": @(code),
+              @"headers": http_responseHeaders(outResp),
+              @"body": http_bodyToString(outData) };
 }
 
-// 包装 errno 为 NSError
-static NSError *ftp_error(int errCode, NSString *msg) {
-    return [NSError errorWithDomain:@"TSFTP" code:errCode
-                           userInfo:@{NSLocalizedDescriptionKey: msg ?: @"FTP 操作失败"}];
+- (NSDictionary *)httpGetSync:(NSString *)url
+                  timeoutSec:(NSTimeInterval)timeoutSec
+                     headers:(NSDictionary<NSString *, NSString *> *)headers {
+    return http_performSync(url, timeoutSec, headers, nil);
 }
 
-- (BOOL)ftpDownloadHost:(NSString *)host
-                   port:(uint16_t)port
-                   user:(NSString *)user
-               password:(NSString *)password
-             remotePath:(NSString *)remotePath
-              localPath:(NSString *)localPath
-                  error:(NSError **)error
-{
-    if (host.length == 0 || remotePath.length == 0 || localPath.length == 0) {
-        if (error) *error = ftp_error(1, @"参数缺失 (host/remotePath/localPath 必填)");
-        return NO;
-    }
-    if (port == 0) port = 21;
-    if (user.length == 0) user = @"anonymous";
-    if (password.length == 0) password = @"anonymous@";
-    const int timeoutSec = 30;
+- (NSDictionary *)httpPostSync:(NSString *)url
+                   timeoutSec:(NSTimeInterval)timeoutSec
+                      headers:(NSDictionary<NSString *, NSString *> *)headers
+                  requestBody:(NSString *)requestBody {
+    return http_performSync(url, timeoutSec, headers, requestBody ?: @"");
+}
 
-    // ── 1. 解析 host (支持域名/IPv4) ──
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;          // 仅 IPv4 (PASV 协议最简单)
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    int gai = getaddrinfo(host.UTF8String, NULL, &hints, &res);
-    if (gai != 0 || !res) {
-        if (error) *error = ftp_error(2, [NSString stringWithFormat:@"域名解析失败: %s", gai == 0 ? "无结果" : gai_strerror(gai)]);
-        if (res) freeaddrinfo(res);
-        return NO;
-    }
-    struct sockaddr_in ctrlAddr;
-    memcpy(&ctrlAddr, res->ai_addr, sizeof(ctrlAddr));
-    ctrlAddr.sin_port = htons(port);
-    freeaddrinfo(res);
+#pragma mark - HTTP 下载 (用于 Lua http.download, 同步阻塞, 带进度回调)
 
-    // ── 2. 控制 socket 连接 ──
-    int ctrl = socket(AF_INET, SOCK_STREAM, 0);
-    if (ctrl < 0) {
-        if (error) *error = ftp_error(3, @"socket() 创建失败");
-        return NO;
-    }
-    ftp_set_timeout(ctrl, timeoutSec);
-    if (connect(ctrl, (struct sockaddr *)&ctrlAddr, sizeof(ctrlAddr)) != 0) {
-        int e = errno;
-        NSString *m = [NSString stringWithFormat:@"连接 %@:%u 失败: %s", host, port, strerror(e)];
-        close(ctrl);
-        if (error) *error = ftp_error(4, m);
-        return NO;
-    }
+/// 解析 HTTP 响应头 Content-Length; 没有就返回 -1 (未知大小)
+static int64_t http_contentLength(NSURLResponse *resp) {
+    if (![resp isKindOfClass:[NSHTTPURLResponse class]]) return -1;
+    NSString *v = ((NSHTTPURLResponse *)resp).allHeaderFields[@"Content-Length"];
+    if (!v.length) return -1;
+    return (int64_t)[v longLongValue];
+}
 
-    // ── 3. 读取欢迎横幅 220 ──
-    char resp[1024];
-    int code = ftp_read_response(ctrl, resp, sizeof(resp));
-    if (code != 220) {
-        close(ctrl);
-        if (error) *error = ftp_error(5, [NSString stringWithFormat:@"非 220 欢迎: %d %s", code, resp]);
-        return NO;
-    }
+@interface TSHTTPDownloadDelegate : NSObject<NSURLSessionDataDelegate>
+@property (atomic, assign) int64_t totalLength;     // -1 表示未知
+@property (atomic, assign) int64_t currentLength;   // delegate 线程写, 任意线程读
+@property (atomic, readonly) BOOL success;
+@property (atomic, readonly) BOOL finished;         // 委托回调结束(成功或失败)
+@property (atomic, readonly, copy) NSError *lastError;
+@end
 
-    // ── 4. USER ──
-    char userBuf[256];
-    snprintf(userBuf, sizeof(userBuf), "USER %s", user.UTF8String);
-    code = ftp_send_cmd(ctrl, userBuf, resp, sizeof(resp));
-    if (code != 331 && code != 230) {       // 331 需密码; 230 已登录(匿名直接过)
-        close(ctrl);
-        if (error) *error = ftp_error(6, [NSString stringWithFormat:@"USER 失败: %d %s", code, resp]);
-        return NO;
+@implementation TSHTTPDownloadDelegate {
+@public
+    NSFileHandle *_fileHandle;
+    int _fd;
+    int64_t _lastSampleBytes;
+    NSTimeInterval _lastSampleTime;
+    NSError *_lastError;
+    BOOL _complete;
+    BOOL _success;
+}
+- (void)openLocalFile:(NSString *)path {
+    NSString *parent = [path stringByDeletingLastPathComponent];
+    if (parent.length) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:parent
+                                  withIntermediateDirectories:YES attributes:nil error:nil];
     }
-    if (code == 331) {
-        // ── 5. PASS ──
-        char passBuf[256];
-        snprintf(passBuf, sizeof(passBuf), "PASS %s", password.UTF8String);
-        code = ftp_send_cmd(ctrl, passBuf, resp, sizeof(resp));
-        if (code != 230) {
-            close(ctrl);
-            if (error) *error = ftp_error(7, [NSString stringWithFormat:@"PASS 失败 (账号或密码错误): %d %s", code, resp]);
-            return NO;
+    [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+    _fd = open([path fileSystemRepresentation], O_WRONLY);
+    _fileHandle = (_fd >= 0) ? [[NSFileHandle alloc] initWithFileDescriptor:_fd
+                                                            closeOnDealloc:NO] : nil;
+}
+- (void)closeLocalFile {
+    if (_fileHandle) { [_fileHandle closeFile]; _fileHandle = nil; }
+    if (_fd >= 0) { close(_fd); _fd = -1; }
+}
+- (NSURLSessionResponseDisposition)URLSession:(NSURLSession *)session
+                               dataTask:(NSURLSessionDataTask *)dataTask
+                               didReceiveResponse:(NSURLResponse *)response
+                                completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+    _totalLength = http_contentLength(response);
+    return completionHandler(NSURLSessionResponseAllow);
+}
+- (void)URLSession:(NSURLSession *)session
+                dataTask:(NSURLSessionDataTask *)dataTask
+   didReceiveData:(NSData *)data {
+    if (!_fileHandle) return;
+    @try {
+        [_fileHandle writeData:data];
+        // 累加已下载量 (data.length 已通过写入检查, 直接累加)
+        _currentLength += (int64_t)data.length;
+        // 计算瞬时速率
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        if (_lastSampleTime == 0) {
+            _lastSampleTime = now;
+            _lastSampleBytes = _currentLength;
         }
-    }
-
-    // ── 6. TYPE I (二进制, 后续 RETR 按字节流读) ──
-    code = ftp_send_cmd(ctrl, "TYPE I", resp, sizeof(resp));
-    if (code != 200) {
-        close(ctrl);
-        if (error) *error = ftp_error(8, [NSString stringWithFormat:@"TYPE I 失败: %d %s", code, resp]);
-        return NO;
-    }
-
-    // ── 7. SIZE 远端文件 (RFC 3659, best-effort) ──
-    char sizeBuf[1024];
-    snprintf(sizeBuf, sizeof(sizeBuf), "SIZE %s", remotePath.UTF8String);
-    code = ftp_send_cmd(ctrl, sizeBuf, resp, sizeof(resp));
-    int64_t expectedSize = -1;
-    if (code == 213) {
-        expectedSize = strtoll(resp, NULL, 10);
-    }
-    // 550 = 文件不存在, 直接终止
-    if (code == 550) {
-        close(ctrl);
-        if (error) *error = ftp_error(9, [NSString stringWithFormat:@"远端文件不存在: %@", remotePath]);
-        return NO;
-    }
-
-    // ── 8. PASV 解析数据通道地址 ──
-    code = ftp_send_cmd(ctrl, "PASV", resp, sizeof(resp));
-    if (code != 227) {
-        close(ctrl);
-        if (error) *error = ftp_error(10, [NSString stringWithFormat:@"PASV 失败: %d %s", code, resp]);
-        return NO;
-    }
-    char *p = strchr(resp, '(');
-    if (!p) {
-        close(ctrl);
-        if (error) *error = ftp_error(11, @"PASV 响应未含地址括号");
-        return NO;
-    }
-    int h1=0, h2=0, h3=0, h4=0, p1=0, p2=0;
-    if (sscanf(p, "(%d,%d,%d,%d,%d,%d)", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
-        close(ctrl);
-        if (error) *error = ftp_error(12, [NSString stringWithFormat:@"PASV 地址解析失败: %s", resp]);
-        return NO;
-    }
-    char dataIP[64];
-    snprintf(dataIP, sizeof(dataIP), "%d.%d.%d.%d", h1, h2, h3, h4);
-    uint16_t dataPort = (uint16_t)(p1 * 256 + p2);
-
-    // ── 9. 连接数据 socket ──
-    struct sockaddr_in dataAddr;
-    memset(&dataAddr, 0, sizeof(dataAddr));
-    dataAddr.sin_family = AF_INET;
-    dataAddr.sin_port = htons(dataPort);
-    inet_pton(AF_INET, dataIP, &dataAddr.sin_addr);
-    int data = socket(AF_INET, SOCK_STREAM, 0);
-    if (data < 0) {
-        close(ctrl);
-        if (error) *error = ftp_error(13, @"data socket() 创建失败");
-        return NO;
-    }
-    ftp_set_timeout(data, timeoutSec);
-    if (connect(data, (struct sockaddr *)&dataAddr, sizeof(dataAddr)) != 0) {
-        int e = errno;
-        NSString *m = [NSString stringWithFormat:@"连接数据通道 %s:%d 失败: %s",
-                       dataIP, dataPort, strerror(e)];
-        close(data);
-        close(ctrl);
-        if (error) *error = ftp_error(14, m);
-        return NO;
-    }
-
-    // ── 10. RETR ──
-    char retrBuf[1024];
-    snprintf(retrBuf, sizeof(retrBuf), "RETR %s", remotePath.UTF8String);
-    code = ftp_send_cmd(ctrl, retrBuf, resp, sizeof(resp));
-    if (code != 150 && code != 125) {
-        close(data);
-        close(ctrl);
-        if (error) *error = ftp_error(15, [NSString stringWithFormat:@"RETR 失败: %d %s", code, resp]);
-        return NO;
-    }
-
-    // ── 11. 确保本地目录存在, 创建空文件 ──
-    NSString *parentDir = [localPath stringByDeletingLastPathComponent];
-    if (parentDir.length) {
-        [[NSFileManager defaultManager] createDirectoryAtPath:parentDir
-            withIntermediateDirectories:YES attributes:nil error:nil];
-    }
-    int fd = open([localPath fileSystemRepresentation], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        int e = errno;
-        NSString *m = [NSString stringWithFormat:@"创建本地文件失败: %s", strerror(e)];
-        close(data);
-        close(ctrl);
-        if (error) *error = ftp_error(16, m);
-        return NO;
-    }
-
-    // ── 12. 边读数据 socket 边写本地文件, 写完循环到 EOF ──
-    char buf[8192];
-    int64_t total = 0;
-    BOOL writeFail = NO;
-    while (1) {
-        ssize_t n = recv(data, buf, sizeof(buf), 0);
-        if (n == 0) break;                // 对端正常关闭 → 传输结束
-        if (n < 0) {
-            if (errno == EINTR) continue;  // 被信号打断, 重试
-            int e = errno;
-            NSString *m = [NSString stringWithFormat:@"数据通道 recv 失败: %s", strerror(e)];
-            writeFail = YES;
-            if (error) *error = ftp_error(17, m);
-            break;
+        int64_t speed = 0;
+        NSTimeInterval dt = now - _lastSampleTime;
+        if (dt >= 0.5) {
+            speed = (int64_t)((double)(_currentLength - _lastSampleBytes) / dt);
+            _lastSampleTime = now;
+            _lastSampleBytes = _currentLength;
         }
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t w = write(fd, buf + off, (size_t)(n - off));
-            if (w <= 0) {
-                if (errno == EINTR) continue;
-                int e = errno;
-                NSString *m = [NSString stringWithFormat:@"本地 write 失败: %s", strerror(e)];
-                writeFail = YES;
-                if (error) *error = ftp_error(18, m);
-                break;
-            }
-            off += w;
-        }
-        if (writeFail) break;
-        total += n;
+        // 注: 进度回调不由委托线程触发, 而是 httpDownloadSync 主调用线程
+        // 通过轮询 _currentLength / _totalLength 在自身 NSRunLoop 上触发,
+        // 保证 Lua 进度回调在 Lua 线程上执行(避免跨线程访问 lua_State)。
+    } @catch (NSException *e) {
+        _lastError = [NSError errorWithDomain:@"TSHTTPDownload" code:1
+                                     userInfo:@{NSLocalizedDescriptionKey: e.reason ?: @"写文件失败"}];
     }
-    close(fd);
-    close(data);
+}
+- (void)URLSession:(NSURLSession *)session
+                task:(NSURLSessionTask *)task
+   didCompleteWithError:(NSError *)error {
+    if (error && !_lastError) _lastError = error;
+    _success = (error == nil && _lastError == nil);
+    [self closeLocalFile];
+    _complete = YES;
+}
+@end
 
-    // ── 13. 等待控制连接 226 Transfer complete ──
-    code = ftp_read_response(ctrl, resp, sizeof(resp));
-    BOOL transferOk = (code == 226 || code == 250);
-    if (writeFail || !transferOk) {
-        if (!writeFail && error && *error == nil) {
-            *error = ftp_error(19, [NSString stringWithFormat:@"传输结束码异常: %d %s", code, resp]);
-        }
-        close(ctrl);
+- (BOOL)httpDownloadSync:(NSString *)url
+                savePath:(NSString *)localPath
+              timeoutSec:(NSTimeInterval)timeoutSec
+                progress:(void (^)(int64_t, int64_t, int64_t))progress
+                   error:(NSError **)error {
+    NSURL *u = [NSURL URLWithString:url];
+    if (!u) {
+        if (error) *error = [NSError errorWithDomain:@"TSHTTPDownload" code:1
+                                           userInfo:@{NSLocalizedDescriptionKey: @"URL 无效"}];
         return NO;
     }
-
-    // ── 14. SIZE 校验(若服务器支持) ──
-    if (expectedSize >= 0 && total != expectedSize) {
-        if (error) *error = ftp_error(20,
-            [NSString stringWithFormat:@"传输字节数与 SIZE 不符: 实际 %lld, 期望 %lld",
-             (long long)total, (long long)expectedSize]);
-        close(ctrl);
+    if (localPath.length == 0) {
+        if (error) *error = [NSError errorWithDomain:@"TSHTTPDownload" code:2
+                                           userInfo:@{NSLocalizedDescriptionKey: @"保存路径不能为空"}];
         return NO;
     }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:u
+                                                       cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                                   timeoutInterval:timeoutSec];
+    req.HTTPMethod = @"GET";
 
-    // ── 15. QUIT ──
-    ftp_send_cmd(ctrl, "QUIT", resp, sizeof(resp));
-    close(ctrl);
+    TSHTTPDownloadDelegate *del = [TSHTTPDownloadDelegate new];
+    [del openLocalFile:localPath];
+    if (!del->_fileHandle) {
+        if (error) *error = [NSError errorWithDomain:@"TSHTTPDownload" code:3
+                                           userInfo:@{NSLocalizedDescriptionKey:
+                                                       [NSString stringWithFormat:@"无法写入本地文件: %@", localPath]}];
+        return NO;
+    }
+    NSOperationQueue *q = [NSOperationQueue new];
+    q.maxConcurrentOperationCount = 1;
+    q.name = @"TSHTTPDownload";
 
-    NSLog(@"[FTP] 下载完成: %@:%u%@ -> %@ (%lld bytes)",
-          host, port, remotePath, localPath, (long long)total);
+    // 主调用线程 (Lua 后台线程) 阻塞等待; 同时通过 NSRunLoop 轮询进度。
+    // NSURLSession 委托回调在自己的 OperationQueue 上跑(与 Lua 线程独立),
+    // 累加 _currentLength; 进度调度由 Lua 线程上 NSTimer 触发, 保证 Lua
+    // 进度回调在调用线程执行(避免跨线程访问 lua_State)。
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
+                                                          delegate:del
+                                                     delegateQueue:q];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req];
+    [task resume];
+
+    // 进度采样上下文 (主线程 = Lua 调用线程上)
+    __block int64_t lastSampleBytes = 0;
+    __block NSTimeInterval lastSampleTime = [NSDate timeIntervalSinceReferenceDate];
+    __weak TSHTTPDownloadDelegate *weakDel = del;
+
+    void (^fireProgress)(void) = ^{
+        TSHTTPDownloadDelegate *d = weakDel;
+        if (!d || d.finished) return;
+        int64_t cur = d.currentLength;
+        int64_t total = d.totalLength;
+        int64_t speed = 0;
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        NSTimeInterval dt = now - lastSampleTime;
+        if (dt > 0) {
+            speed = (int64_t)((double)(cur - lastSampleBytes) / dt);
+        }
+        lastSampleTime = now;
+        lastSampleBytes = cur;
+        if (progress) progress(total, cur, speed);
+    };
+
+    // 200ms 周期 NSTimer, 加到当前线程 RunLoop(Lua 线程)的 CommonModes
+    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.2
+                                                     repeats:YES
+                                                        block:^(NSTimer *t) { fireProgress(); }];
+    [[NSRunLoop currentRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+
+    // 立即触发一次进度回调 (让调用方拿到首帧 total)
+    fireProgress();
+
+    // 主调用线程: 通过 RunLoop 短轮询, 同时让 timer 周期性触发进度回调
+    while (!del.finished) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+
+    [timer invalidate];
+    [session invalidateAndCancel];
+
+    if (!del.success) {
+        if (error) *error = del.lastError ?: [NSError errorWithDomain:@"TSHTTPDownload" code:99
+                                                                userInfo:@{NSLocalizedDescriptionKey: @"下载失败"}];
+        return NO;
+    }
+    // 最终回调: 让 Lua 拿到 100% 与最终速率
+    if (progress) progress(del.totalLength, del.currentLength, 0);
     return YES;
 }
 

@@ -1668,50 +1668,124 @@ static int l_sys_vpnState(lua_State *L) {
     return 1;
 }
 
-/// sys.ftpDownload(host, port, user, pass, remotePath, localPath) -> bool, [errMsg]
-/// FTP 单文件下载 (明文标准 FTP, 同步阻塞)。底层用 BSD socket 自实现协议,
-/// NSURLSession 不支持 FTP。返回 true=成功; 失败返回 false + 错误描述。
-///   host        FTP 服务器域名或 IPv4
-///   port        控制端口(可省略, 默认 21)
-///   user        用户名(匿名传 "anonymous")
-///   pass        密码(匿名传 "anonymous@")
-///   remotePath  远端路径(从 FTP 根目录算起)
-///   localPath   本地绝对保存路径, 父目录不存在自动创建
-/// 仅 IPv4 / PASV 被动模式, 不支持 FTPS 加密, 文件名按 UTF-8 编码。
-static int l_sys_ftpDownload(lua_State *L) {
-    size_t hLen = 0, uLen = 0, pLen = 0, rLen = 0, lLen = 0;
-    const char *hC = luaL_checklstring(L, 1, &hLen);
-    int port = (int)luaL_optinteger(L, 2, 21);
-    const char *uC = luaL_checklstring(L, 3, &uLen);
-    const char *pC = luaL_checklstring(L, 4, &pLen);
-    const char *rC = luaL_checklstring(L, 5, &rLen);
-    const char *lC = luaL_checklstring(L, 6, &lLen);
-
-    NSString *host    = [[NSString alloc] initWithBytes:hC length:hLen encoding:NSUTF8StringEncoding];
-    NSString *user    = [[NSString alloc] initWithBytes:uC length:uLen encoding:NSUTF8StringEncoding];
-    NSString *pass    = [[NSString alloc] initWithBytes:pC length:pLen encoding:NSUTF8StringEncoding];
-    NSString *remote  = [[NSString alloc] initWithBytes:rC length:rLen encoding:NSUTF8StringEncoding];
-    NSString *local   = [[NSString alloc] initWithBytes:lC length:lLen encoding:NSUTF8StringEncoding];
-
-    NSError *err = nil;
-    BOOL ok = [[TSToolExecutor shared] ftpDownloadHost:host
-                                                  port:(uint16_t)port
-                                                  user:user
-                                              password:pass
-                                            remotePath:remote
-                                             localPath:local
-                                                 error:&err];
-    if (ok) {
-        lua_pushboolean(L, YES);
-        return 1;
-    }
-    lua_pushboolean(L, NO);
-    lua_pushstring(L, (err.localizedDescription ?: @"未知错误").UTF8String);
-    return 2;
-}
-
 static int l_sys_battery(lua_State *L) {
     lua_pushnumber(L, [[TSDeviceInfo shared] batteryLevel]);
+    return 1;
+}
+
+// ────────────────────────────── http 模块 ──────────────────────────────
+// http.get / http.post / http.download
+// 全部走 TSToolExecutor 的同步 HTTP 实现, NSURLSession 异步回调用
+// dispatch_semaphore 阻塞到调用线程上(Lua 后台线程)。
+
+/// 把 Lua 表({key=value, ...}) 转 NSMutableDictionary<NSString*, NSString*>
+/// 仅取标量键值, 列表/嵌套表忽略。headers=nil 时返回 nil。
+static NSDictionary<NSString *, NSString *> *http_luaTableToHeaders(lua_State *L, int idx) {
+    if (!lua_istable(L, idx)) return nil;
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+            size_t kLen = 0, vLen = 0;
+            const char *k = lua_tolstring(L, -2, &kLen);
+            const char *v = lua_tolstring(L, -1, &vLen);
+            if (k && v) {
+                NSString *key = [[NSString alloc] initWithBytes:k length:kLen encoding:NSUTF8StringEncoding];
+                NSString *val = [[NSString alloc] initWithBytes:v length:vLen encoding:NSUTF8StringEncoding];
+                if (key && val) dict[key] = val;
+            }
+        }
+        lua_pop(L, 1);
+    }
+    return dict.count ? dict : nil;
+}
+
+/// http.get(地址, [超时秒], [请求头]) -> 状态码, 返回头, 内容
+///   - 同步阻塞。脚本会在此调用上等待, 网络不通/超时按 NSURLSession
+///     默认超时(60s)算。
+///   - 请求头省略时使用 TAS 默认 UA。
+///   - 返回值: status:int, headers:table, body:string
+///     失败时 status=0, body=错误描述字符串。
+static int l_http_get(lua_State *L) {
+    size_t uLen = 0;
+    const char *uC = luaL_checklstring(L, 1, &uLen);
+    NSTimeInterval timeout = (NSTimeInterval)luaL_optnumber(L, 2, 60);
+    NSDictionary *headers = http_luaTableToHeaders(L, 3);
+    NSString *url = [[NSString alloc] initWithBytes:uC length:uLen encoding:NSUTF8StringEncoding];
+    NSDictionary *resp = [[TSToolExecutor shared] httpGetSync:url
+                                                    timeoutSec:timeout
+                                                       headers:headers];
+    lua_pushinteger(L, (lua_Integer)[resp[@"status"] intValue]);
+    _pushNSObjectToLua(L, resp[@"headers"]);
+    NSString *body = resp[@"body"] ?: @"";
+    lua_pushstring(L, body.UTF8String);
+    return 3;
+}
+
+/// http.post(地址, [超时秒], [请求头], [请求参数]) -> 状态码, 返回头, 内容
+///   - 请求参数是 form-urlencoded 字符串(如 "k=v&k2=v2"), 自动加
+///     Content-Type: application/x-www-form-urlencoded。空字符串视为无 body。
+static int l_http_post(lua_State *L) {
+    size_t uLen = 0;
+    const char *uC = luaL_checklstring(L, 1, &uLen);
+    NSTimeInterval timeout = (NSTimeInterval)luaL_optnumber(L, 2, 60);
+    NSDictionary *headers = http_luaTableToHeaders(L, 3);
+
+    NSString *bodyStr = nil;
+    if (lua_type(L, 4) == LUA_TSTRING) {
+        size_t bLen = 0;
+        const char *bC = lua_tolstring(L, 4, &bLen);
+        if (bC) bodyStr = [[NSString alloc] initWithBytes:bC length:bLen encoding:NSUTF8StringEncoding];
+    }
+    NSString *url = [[NSString alloc] initWithBytes:uC length:uLen encoding:NSUTF8StringEncoding];
+    NSDictionary *resp = [[TSToolExecutor shared] httpPostSync:url
+                                                     timeoutSec:timeout
+                                                        headers:headers
+                                                    requestBody:bodyStr ?: @""];
+    lua_pushinteger(L, (lua_Integer)[resp[@"status"] intValue]);
+    _pushNSObjectToLua(L, resp[@"headers"]);
+    NSString *body = resp[@"body"] ?: @"";
+    lua_pushstring(L, body.UTF8String);
+    return 3;
+}
+
+/// http.download(地址, 保存路径, [超时秒], [回调函数]) -> bool
+///   - 同步阻塞, 大文件需等下载完成(回调每 ~200ms 触发一次)。
+///   - 回调函数签名: function(totalLength, currentLength, downloadSpeed) end
+///     三参单位字节, speed 为本次回调相对上次的瞬时速率。
+///   - 回调在 Lua 调用线程上触发(Lua 后台线程), 安全。
+///   - 失败 (URL 无效/写文件失败/超时/网络错误) 返回 false, 不抛错。
+static int l_http_download(lua_State *L) {
+    size_t uLen = 0, pLen = 0;
+    const char *uC = luaL_checklstring(L, 1, &uLen);
+    const char *pC = luaL_checklstring(L, 2, &pLen);
+    NSTimeInterval timeout = (NSTimeInterval)luaL_optnumber(L, 3, 60);
+    NSString *url    = [[NSString alloc] initWithBytes:uC length:uLen encoding:NSUTF8StringEncoding];
+    NSString *savePath = [[NSString alloc] initWithBytes:pC length:pLen encoding:NSUTF8StringEncoding];
+    int cbRef = LUA_NOREF;
+    BOOL hasCb = (lua_type(L, 4) == LUA_TFUNCTION);
+    if (hasCb) {
+        lua_pushvalue(L, 4);
+        cbRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    NSError *err = nil;
+    BOOL ok = [[TSToolExecutor shared] httpDownloadSync:url
+                                               savePath:savePath
+                                             timeoutSec:timeout
+                                               progress:hasCb ? ^(int64_t total, int64_t current, int64_t speed) {
+            // 在 Lua 调用线程上, 安全可调 lua_State
+            lua_rawgeti(L, LUA_REGISTRYINDEX, cbRef);
+            lua_pushinteger(L, (lua_Integer)total);
+            lua_pushinteger(L, (lua_Integer)current);
+            lua_pushinteger(L, (lua_Integer)speed);
+            lua_call(L, 3, 0);
+        } : nil
+                                                  error:&err];
+    if (hasCb) luaL_unref(L, LUA_REGISTRYINDEX, cbRef);
+    if (!ok && err) {
+        NSLog(@"[http.download] 失败: %@", err.localizedDescription);
+    }
+    lua_pushboolean(L, ok);
     return 1;
 }
 
@@ -2915,7 +2989,6 @@ static void lua_register_all(lua_State *L) {
         {"getIP",       l_sys_getIP},
         {"isVPNConnected", l_sys_isVPNConnected},
         {"vpnState",    l_sys_vpnState},
-        {"ftpDownload", l_sys_ftpDownload},
         {"battery",     l_sys_battery},
         {"alert",       l_sys_alert},
         {"alertButtons",l_sys_alertButtons},
@@ -2931,6 +3004,16 @@ static void lua_register_all(lua_State *L) {
     };
     luaL_newlib(L, sysLib);
     lua_setglobal(L, "sys");
+
+    // ── http 模块 ──
+    static const luaL_Reg httpLib[] = {
+        {"get",      l_http_get},
+        {"post",     l_http_post},
+        {"download", l_http_download},
+        {NULL, NULL}
+    };
+    luaL_newlib(L, httpLib);
+    lua_setglobal(L, "http");
 
     // ── device 模块 ──
     static const luaL_Reg deviceLib[] = {
