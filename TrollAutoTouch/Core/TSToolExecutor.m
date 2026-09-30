@@ -35,6 +35,14 @@ extern int posix_spawnattr_set_persona_gid_np(posix_spawnattr_t * __restrict, gi
 static const uint32_t POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE = 1;
 static const uid_t    POSIX_SPAWN_PERSONA_ID_ROOT       = 99;
 
+// ── 文件内 HTTP 静态工具函数的前向声明 ──
+// TSHTTPDownloadDelegate (@implementation 在 @implementation TSToolExecutor 之前)
+// 的 URLSession:dataTask:didReceiveResponse:completionHandler: 会调用
+// http_contentLength(), 而 http_contentLength() 的函数体在 @implementation
+// TSToolExecutor 内 (后续 L640 附近) 才定义。ISO C99 不允许隐式函数声明,
+// 必须前向声明。
+static int64_t http_contentLength(NSURLResponse *resp);
+
 // libproc / proc_info 声明(macOS 专用头文件，iOS SDK 中不存在)
 // 这些函数在 iOS 运行时存在但头文件中未公开
 #ifndef PROC_PIDPATHINFO_MAXSIZE
