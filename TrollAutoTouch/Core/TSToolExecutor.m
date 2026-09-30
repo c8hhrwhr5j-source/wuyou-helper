@@ -156,7 +156,10 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
                                didReceiveResponse:(NSURLResponse *)response
                                 completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
     _totalLength = http_contentLength(response);
-    return completionHandler(NSURLSessionResponseAllow);
+    // completionHandler 是 void(^)(NSURLSessionResponseDisposition), 调用后
+    // 返回 void, 不能作为 NSURLSessionResponseDisposition 方法的 return 值。
+    completionHandler(NSURLSessionResponseAllow);
+    return NSURLSessionResponseAllow;
 }
 - (void)URLSession:(NSURLSession *)session
                 dataTask:(NSURLSessionDataTask *)dataTask
