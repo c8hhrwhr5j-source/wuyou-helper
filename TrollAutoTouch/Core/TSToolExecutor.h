@@ -159,12 +159,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 父目录不存在自动创建。progress 回调每次有数据到达时触发, 三参为
 /// (totalLength, currentLength, downloadSpeed), 单位字节; speed 为
 /// 本次回调相对上次回调的瞬时速率。成功返回 YES。
-/// progress 返回 YES 立即取消当前下载 (用于 Lua 端 callback 返回 true 中止)。
-/// 返回值被忽略或回调为 nil 时, 视为"不取消"。
 - (BOOL)httpDownloadSync:(NSString *)url
                 savePath:(NSString *)localPath
               timeoutSec:(NSTimeInterval)timeoutSec
-                progress:(nullable BOOL(^)(int64_t totalLength,
+                progress:(nullable void(^)(int64_t totalLength,
                                           int64_t currentLength,
                                           int64_t downloadSpeed))progress
                    error:(NSError **)error;

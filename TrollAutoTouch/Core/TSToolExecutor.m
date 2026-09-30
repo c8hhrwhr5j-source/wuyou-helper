@@ -135,7 +135,6 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     NSTimeInterval _lastSampleTime;
     NSError *_lastError;
     BOOL _success;
-    NSURLSessionDataTask *_dataTask;   // 由 httpDownloadSync 在创建后赋值, fireProgress 用于主动 cancel
 }
 - (void)openLocalFile:(NSString *)path {
     NSString *parent = [path stringByDeletingLastPathComponent];
@@ -805,7 +804,6 @@ static int64_t http_contentLength(NSURLResponse *resp) {
                                                           delegate:del
                                                      delegateQueue:q];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:req];
-    del->_dataTask = task;     // fireProgress 用它实现"progress 回调返回 true 即取消"
     [task resume];
 
     // 进度采样上下文 (主线程 = Lua 调用线程上)
@@ -813,13 +811,9 @@ static int64_t http_contentLength(NSURLResponse *resp) {
     __block NSTimeInterval lastSampleTime = [NSDate timeIntervalSinceReferenceDate];
     __weak TSHTTPDownloadDelegate *weakDel = del;
 
-    // 用户主动中止标志: progress 回调返回 YES 时设为 YES; 之后 timer 不再 fireProgress,
-    // task 立即 cancel。RunLoop 50ms 轮询也会跳出循环。
-    __block BOOL aborted = NO;
-
     void (^fireProgress)(void) = ^{
         TSHTTPDownloadDelegate *d = weakDel;
-        if (!d || d.finished || aborted) return;
+        if (!d || d.finished) return;
         int64_t cur = d.currentLength;
         int64_t total = d.totalLength;
         int64_t speed = 0;
@@ -830,16 +824,7 @@ static int64_t http_contentLength(NSURLResponse *resp) {
         }
         lastSampleTime = now;
         lastSampleBytes = cur;
-        if (progress && progress(total, cur, speed)) {
-            // 用户通过 progress 回调主动中止下载
-            aborted = YES;
-            NSError *cancelErr = [NSError errorWithDomain:@"TSHTTPDownload" code:4
-                                              userInfo:@{NSLocalizedDescriptionKey:
-                                                             @"下载被取消 (progress 回调返回 true)"}];
-            d->_lastError = cancelErr;
-            d->_success = NO;
-            [d->_dataTask cancel];
-        }
+        if (progress) progress(total, cur, speed);
     };
 
     // 200ms 周期 NSTimer, 加到当前线程 RunLoop(Lua 线程)的 CommonModes
@@ -852,7 +837,7 @@ static int64_t http_contentLength(NSURLResponse *resp) {
     fireProgress();
 
     // 主调用线程: 通过 RunLoop 短轮询, 同时让 timer 周期性触发进度回调
-    while (!del.finished && !aborted) {
+    while (!del.finished) {
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     }
@@ -860,18 +845,13 @@ static int64_t http_contentLength(NSURLResponse *resp) {
     [timer invalidate];
     [session invalidateAndCancel];
 
-    if (aborted) {
-        if (error) *error = del.lastError ?: [NSError errorWithDomain:@"TSHTTPDownload" code:4
-                                                          userInfo:@{NSLocalizedDescriptionKey: @"下载被取消"}];
-        return NO;
-    }
     if (!del.success) {
         if (error) *error = del.lastError ?: [NSError errorWithDomain:@"TSHTTPDownload" code:99
                                                                 userInfo:@{NSLocalizedDescriptionKey: @"下载失败"}];
         return NO;
     }
-    // 最终回调: 让 Lua 拿到 100% 与最终速率 (progress 返回值不再用于取消——即将结束)
-    if (progress) (void)progress(del.totalLength, del.currentLength, 0);
+    // 最终回调: 让 Lua 拿到 100% 与最终速率
+    if (progress) progress(del.totalLength, del.currentLength, 0);
     return YES;
 }
 
