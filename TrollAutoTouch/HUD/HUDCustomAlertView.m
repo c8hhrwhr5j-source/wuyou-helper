@@ -29,6 +29,9 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 @property (nonatomic, strong) UIView *buttonContainer;
 @property (nonatomic, assign) NSTimeInterval timeout;
 @property (nonatomic, assign) BOOL finished;
+@property (nonatomic, strong) UILabel *countdownLabel;      // 卡片右上角倒计时
+@property (nonatomic, strong) NSTimer *countdownTimer;
+@property (nonatomic, assign) CFAbsoluteTime countdownDeadline;
 
 @end
 
@@ -48,6 +51,7 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
         _resultBlock = resultBlock;
         _timeout = timeout;
         _finished = NO;
+        _countdownDeadline = CFAbsoluteTimeGetCurrent() + timeout;
         self.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
 
         _alertTitle = [title copy];
@@ -95,6 +99,17 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 
     CGFloat contentW = cardW - kCardPadding * 2;
     CGFloat y = kCardPadding;
+
+    // 倒计时标签 (超时>0 时显示于卡片右上角, 实时刷新"N秒后自动关闭")
+    _countdownLabel = nil;
+    if (_timeout > 0) {
+        _countdownLabel = [[UILabel alloc] initWithFrame:CGRectMake(kCardPadding, 8.0, contentW, 14.0)];
+        _countdownLabel.font = [UIFont systemFontOfSize:11.0];
+        _countdownLabel.textColor = [UIColor colorWithWhite:0.55 alpha:1.0];
+        _countdownLabel.textAlignment = NSTextAlignmentRight;
+        y = 8.0 + 14.0 + 4.0;
+        [self _updateCountdownText];
+    }
 
     // 标题
     BOOL hasTitle = (title.length > 0);
@@ -150,6 +165,7 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
     _cardView.layer.borderColor = [UIColor colorWithWhite:0.32 alpha:1.0].CGColor;
     _cardView.layer.borderWidth = 0.5;
 
+    if (_countdownLabel) [_cardView addSubview:_countdownLabel];
     if (_titleLabel)   [_cardView addSubview:_titleLabel];
     if (_messageLabel) [_cardView addSubview:_messageLabel];
     if (_buttonContainer) [_cardView addSubview:_buttonContainer];
@@ -204,6 +220,7 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 
     if (_timeout > 0) {
         __weak typeof(self) weakSelf = self;
+        // 精确超时关闭 (保持原有行为: 到点未点击返回 nil)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_timeout * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             __strong typeof(self) self = weakSelf;
@@ -211,7 +228,29 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
                 [self _finishWithResult:nil];
             }
         });
+        // 倒计时文字刷新 (仅显示用, 不影响超时精度)
+        _countdownTimer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                                           repeats:YES
+                                                             block:^(NSTimer *t) {
+            __strong typeof(self) self = weakSelf;
+            if (!self || self.finished) {
+                [t invalidate];
+                return;
+            }
+            [self _updateCountdownText];
+        }];
+        [self _updateCountdownText];
     }
+}
+
+// 刷新右上角倒计时文字; 后台时 flush 让 SBS 远程上下文同步更新
+- (void)_updateCountdownText {
+    if (!_countdownLabel) return;
+    double remaining = _countdownDeadline - CFAbsoluteTimeGetCurrent();
+    if (remaining < 0) remaining = 0;
+    _countdownLabel.text = [NSString stringWithFormat:@"%.0f秒后自动关闭", ceil(remaining)];
+    Class tx = NSClassFromString(@"CATransaction");
+    if (tx && [tx respondsToSelector:@selector(flush)]) { [tx flush]; }
 }
 
 - (void)_buttonTapped:(UIButton *)sender {
@@ -222,6 +261,9 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
 - (void)_finishWithResult:(NSString *)result {
     if (_finished) return;
     _finished = YES;
+
+    [_countdownTimer invalidate];
+    _countdownTimer = nil;
 
     // App 在后台时跳过淡出动画直接移除+回调: 动画 completion 在后台可能
     // 延迟, 导致 resultBlock 迟迟不触发 (presentAlert 会一直等, 最坏 75s 超时),
@@ -253,6 +295,10 @@ static const CGFloat kMsgGap        = 16.0;   // 内容与按钮间距
             block(result);
         }
     }];
+}
+
+- (void)dealloc {
+    [_countdownTimer invalidate];
 }
 
 @end
