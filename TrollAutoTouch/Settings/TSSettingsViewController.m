@@ -287,6 +287,16 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     }
 }
 
+// 系统日志(touch.log)开关: 关 → 不再记录/显示并删除文件; 开 → 恢复记录。
+// "查看系统日志"按钮始终保留, 打开后可看到开关开启后的日志。
+- (void)_toggleSysLog:(BOOL)on {
+    [TSLogStore setTouchLogEnabled:on];
+    if (on) {
+        [[TSLogStore shared] append:@"[TAS] 系统日志已开启"];
+    }
+    [_tableView reloadData];
+}
+
 #pragma mark - 设备信息 / 版本 / 包名
 
 - (NSString *)_deviceInfoDetail {
@@ -328,7 +338,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 1; // 卡密: 注册状态
     if (section == 1) return 3; // TAS 服务 + 悬浮窗口 + 服务地址
-    if (section == 2) return 4; // 通用: 查看脚本日志 + 查看系统日志 + 查看应用包名 + 性能面板
+    if (section == 2) return 5; // 通用: 系统日志开关 + 查看脚本日志 + 查看系统日志 + 查看应用包名 + 性能面板
     return 3;                    // 设备信息: 设备 + 版本号 + 包名
 }
 
@@ -341,7 +351,7 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.section == 0) return UITableViewAutomaticDimension; // 卡密状态行(可能两行文字)
-    if (ip.section == 2 && ip.row == 3) return 160;
+    if (ip.section == 2 && ip.row == 4) return 160;
     if (ip.section == 3) return UITableViewAutomaticDimension;
     return 44;
 }
@@ -388,9 +398,9 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         return c;
     }
 
-    // ── 通用区: 查看日志 + 查看应用包名 + 性能面板 ──
+    // ── 通用区: 系统日志开关 + 查看日志 + 查看应用包名 + 性能面板 ──
     if (ip.section == 2) {
-        if (ip.row == 3) {
+        if (ip.row == 4) {
             // 性能面板: 作为表格行随主界面上下滑动
             UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"perf"];
             c.backgroundColor = [TSColors card];
@@ -411,10 +421,19 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
         c.textLabel.textColor = [TSColors label];
         c.textLabel.font = [UIFont systemFontOfSize:15];
         if (ip.row == 0) {
+            // 系统日志开关: 控制程序自身日志(touch.log)是否记录, 默认关闭
+            TSSwitchCell *sc = [tv dequeueReusableCellWithIdentifier:@"switch"];
+            sc.iconView.image = [self _icon:@"list.bullet.rectangle"];
+            sc.titleLabel.text = @"系统日志";
+            [sc.sw setOn:[TSLogStore touchLogEnabled] animated:NO];
+            __weak typeof(self) ws = self;
+            sc.onToggle = ^(BOOL on) { [ws _toggleSysLog:on]; };
+            return sc;
+        } else if (ip.row == 1) {
             // 查看脚本日志: main.lua 主动 log/logStr/print (debug.log)
             c.textLabel.text = @"查看脚本日志";
             c.imageView.image = [self _icon:@"text.bubble"];
-        } else if (ip.row == 1) {
+        } else if (ip.row == 2) {
             // 查看系统日志: 程序自身日志 (touch.log)
             c.textLabel.text = @"查看系统日志";
             c.imageView.image = [self _icon:@"list.bullet.rectangle"];
@@ -492,16 +511,17 @@ static NSString *const kTASServiceEnabledKey = @"TASServiceEnabled";
     }
 
     if (ip.section == 2) {
-        if (ip.row == 3) return; // 性能面板行
-        if (ip.row == 2) {
+        if (ip.row == 0) return; // 系统日志开关行
+        if (ip.row == 4) return; // 性能面板行
+        if (ip.row == 3) {
             // 查看应用包名: 跳转应用列表页
             TSAppListViewController *vc = [[TSAppListViewController alloc] init];
             [self.navigationController pushViewController:vc animated:YES];
             return;
         }
-        // row0 = 查看脚本日志(debug.log), row1 = 查看系统日志(touch.log)
+        // row1 = 查看脚本日志(debug.log), row2 = 查看系统日志(touch.log)
         TSLogViewController *vc = [[TSLogViewController alloc]
-                                   initWithMode:(ip.row == 0 ? @"script" : @"system")];
+                                   initWithMode:(ip.row == 1 ? @"script" : @"system")];
         [self.navigationController pushViewController:vc animated:YES];
         return;
     }

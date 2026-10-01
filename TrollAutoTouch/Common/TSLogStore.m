@@ -15,6 +15,10 @@ static const NSUInteger kFileFlushBatch = 50;   // 攒满 50 条批量落盘
 // 不靠文件大小估算, 所以不会出现"说是 500 行实际几千行"的情况。
 static const NSUInteger kMaxLogFileLines = 500;
 
+// 系统日志(touch.log)开关的持久化 key。默认关: 程序自身日志不进内存/不落盘,
+// 节省 IO 与存储; 设置页"查看系统日志"按钮保留, 需要排查问题时可随时打开。
+static NSString *const kTouchLogEnabledKey = @"TSTouchLogEnabled";
+
 // 日志文件写入队列(串行)，避免阻塞主线程
 static dispatch_queue_t LogFileQueue(void) {
     static dispatch_queue_t q;
@@ -76,6 +80,40 @@ static NSArray<NSString *> *TSNonEmptyLines(NSString *content) {
     return inst;
 }
 
+#pragma mark - 系统日志开关
+
++ (BOOL)touchLogEnabled {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    return [ud objectForKey:kTouchLogEnabledKey] ? [ud boolForKey:kTouchLogEnabledKey] : NO;
+}
+
++ (void)setTouchLogEnabled:(BOOL)enabled {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:enabled forKey:kTouchLogEnabledKey];
+    [ud synchronize];
+    if (!enabled) {
+        // 关闭: 丢弃内存中的程序自身日志并删除 touch.log 文件。
+        // _logs 是 touch+debug 合并数组(无来源标记), 直接重建为 debug 部分。
+        [[TSLogStore shared] _discardTouchLogs];
+    }
+}
+
+/// 丢弃程序自身日志: 清内存(_touchLogs/_filePending + 合并数组重建为脚本日志) + 删 touch.log。
+- (void)_discardTouchLogs {
+    NSString *touchPath = self.logFilePath;
+    @synchronized (self) {
+        [_touchLogs removeAllObjects];
+        [_filePending removeAllObjects];
+        _touchSeqTotal = 0;
+        [_logs removeAllObjects];
+        [_logs addObjectsFromArray:_debugLogs];
+    }
+    dispatch_sync(LogFileQueue(), ^{
+        LogFileLines()[touchPath] = @0;
+        [[NSFileManager defaultManager] removeItemAtPath:touchPath error:nil];
+    });
+}
+
 - (instancetype)init {
     self = [super init];
     if (self) {
@@ -93,7 +131,14 @@ static NSArray<NSString *> *TSNonEmptyLines(NSString *content) {
 /// 两个日志文件分别加载到对应来源数组, 并合并进 _logs。
 - (void)_loadHistoryFromFile {
     [TSPaths ensureDirectoriesExist];
-    [self _loadFile:self.logFilePath into:_touchLogs seq:&_touchSeqTotal];
+    if ([[self class] touchLogEnabled]) {
+        [self _loadFile:self.logFilePath into:_touchLogs seq:&_touchSeqTotal];
+    } else {
+        // 系统日志关闭: 不加载历史并删除残留文件, 保证"查看系统日志"为空
+        dispatch_async(LogFileQueue(), ^{
+            [[NSFileManager defaultManager] removeItemAtPath:self.logFilePath error:nil];
+        });
+    }
     [self _loadFile:self.debugLogFilePath into:_debugLogs seq:&_debugSeqTotal];
 }
 
@@ -214,6 +259,11 @@ static NSArray<NSString *> *TSNonEmptyLines(NSString *content) {
 - (void)append:(NSString *)message toFile:(NSString *)fileName {
     if (message.length == 0) return;
     if (fileName.length == 0) fileName = @"touch.log";
+
+    // 系统日志开关关闭: 程序自身日志(touch.log)整体丢弃 —— 不进内存、不落盘。
+    // 脚本日志(debug.log)不受影响。
+    BOOL isDebug = [fileName isEqualToString:@"debug.log"];
+    if (!isDebug && ![[self class] touchLogEnabled]) return;
 
     NSString *line = [NSString stringWithFormat:@"[%@] %@",
                       [LogTimeFormatter() stringFromDate:[NSDate date]], message];

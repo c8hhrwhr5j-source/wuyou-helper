@@ -50,6 +50,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 程序自身日志文件完整路径 /var/mobile/touch/log/touch.log
 @property (nonatomic, readonly) NSString *logFilePath;
 
+/// 系统日志(touch.log)总开关, 默认关闭。
+/// 关闭时程序自身日志不进内存、不落盘、启动不加载历史, 并删除已存在的 touch.log;
+/// 脚本日志(debug.log)不受影响。设置页保留"查看系统日志"入口, 随时可再打开。
++ (BOOL)touchLogEnabled;
++ (void)setTouchLogEnabled:(BOOL)enabled;
+
 /// main.lua 主动日志文件完整路径 /var/mobile/touch/log/debug.log
 @property (nonatomic, readonly) NSString *debugLogFilePath;
 
