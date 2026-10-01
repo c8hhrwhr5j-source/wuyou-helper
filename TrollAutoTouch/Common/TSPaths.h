@@ -27,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 仅供"整包加密项目(.tas)"运行时存放一次性临时资源(图片/音频等非源码)。
 /// 其中的 .lua 源码只驻内存、绝不写入该目录; 运行结束即整体删除, App 冷启动再兜底清空。
 + (NSString *)runtimeDir;
+/// 脚本网页设置页目录 /var/mobile/touch/lua/ui/<脚本名>/index.html
++ (NSString *)uiDir;
 
 /// 确保所有目录存在（首次启动时创建）
 + (void)ensureDirectoriesExist;

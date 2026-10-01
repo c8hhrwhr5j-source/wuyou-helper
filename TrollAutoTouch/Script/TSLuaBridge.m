@@ -2508,6 +2508,20 @@ static int l_file_exists(lua_State *L) {
     return 1;
 }
 
+/// file.mkdir(path) → boolean
+/// 创建目录（自动创建缺失的中间目录），目录已存在也返回 true。
+/// 供脚本把"网页设置页"等文件落到设备目录（如 lua/ui/<脚本名>/）。
+static int l_file_mkdir(lua_State *L) {
+    const char *path = luaL_checkstring(L, 1);
+    NSError *err = nil;
+    BOOL ok = [[NSFileManager defaultManager] createDirectoryAtPath:@(path)
+                                            withIntermediateDirectories:YES
+                                                            attributes:nil
+                                                                 error:&err];
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
 static int l_file_delete(lua_State *L) {
     const char *path = luaL_checkstring(L, 1);
     NSError *err = nil;
@@ -3113,6 +3127,7 @@ static void lua_register_all(lua_State *L) {
         {"read",    l_file_read},
         {"write",   l_file_write},
         {"exists",  l_file_exists},
+        {"mkdir",   l_file_mkdir},
         {"delete",  l_file_delete},
         {"documentsDir", l_file_documentsDir},
         {"touchDir", l_file_touchDir},  // /var/mobile/touch
