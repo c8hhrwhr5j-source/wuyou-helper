@@ -1478,21 +1478,35 @@ end
 #### 实现说明
 
 - **`isScreenLocked`**：通过 Darwin 通知 `com.apple.springboard.lockstate` 的 `notify_get_state` 查询，SpringBoard 维护此状态值（1=锁定，0=解锁）。
-- **`unlockScreen`**：
-  1. 点亮背光：按 `SpringBoardServices → BackBoardServices → GraphicsServices` 顺序依次尝试
-     `SBSSetBacklightLevel(1.0)` / `BKSDisplaySetBacklightFactor(1.0)` / `GSEventSetBacklightLevel(1.0)`
-     （函数前缀决定了它在哪个框架里：`SBS*` 只在 SpringBoardServices，`BKS*` 只在 BackBoardServices）
-  2. 等待 300ms 让背光亮起
-  3. 发送 Home 键事件（复用 `TSKeyboardInjector.pressHome`），无密码设备会直接进桌面
-  4. **复查**：之后最多等 1.5 秒轮询 `isScreenLocked`，真的解锁才返回 `true`
+- **`unlockScreen`**（2026-10 按原版 TrollAutoScript 2.3.6 引擎重写，逆向依据见下）：
+  1. 先用 SpringBoardServices 的 `SBGetScreenLockStatus(port, &locked, &passcode)` 问一次：拿到"是否锁定"**和**"是否设了密码"
+  2. 设了密码 → 直接记日志返回 `false`（第三方 App 不可能代输密码）
+  3. 主通路：**HID 连按 3 次 Home**（`IOHIDEventCreateKeyboardEvent(page 0x0C, usage 0x40)` + `IOHIDEventSystemClientDispatchEvent`，
+     与触摸注入同一个 client/senderID）。每按一次就复查一次，解锁立即返回 `true`
+  4. 三次都没解开 → 兜底：点亮背光 + 老 `GSEvent` Home 键，再复查约 1.6 秒
+  5. 全程失败 → 记日志并返回 `false`
+
+> **逆向依据（原版 2.3.6 的 `bin/luaLib`）**：原版 `device.unlockScreen` 是**纯 Lua**写的，源码就嵌在引擎里：
+> ```lua
+> device.unlockScreen = function ()
+>     local isLockStatus, isPasscodeEnabled = device.isScreenLocked()
+>     if isPasscodeEnabled then assert(isPasscodeEnabled, "有密码, 无法解锁") return end
+>     if (isLockStatus) then
+>         key.press("HOMEBUTTON"); key.press("HOMEBUTTON"); key.press("HOMEBUTTON")
+>     end
+> end
+> ```
+> 而 `key.press` 走的是 `IOHIDEventCreateKeyboardEvent` + `IOHIDEventSystemClientDispatchEvent`
+> （luaLib 导入表里可以查到这两个符号），**不是** `GSEventPost` —— 这就是旧实现"只发 GSEvent、完全没反应"的原因。
 
 > **关于密码**：
 > - 设备**没有设置锁屏密码**时，`unlockScreen` 可直接解锁到桌面。
-> - 设备**设置了密码**时，`unlockScreen` 只能唤醒屏幕到锁屏界面，**无法**自动输入密码进桌面。这是 iOS 安全机制决定的，需要用户在挂机前关闭密码。
-> - 返回值已改为**实际复查结果**（旧版恒返回 `true`，脚本无法区分"解锁成功"和"什么都没发生"）。
->   失败时 `touch.log` 会记 `[Device] ⚠ 解锁失败: ...`（含"背光接口均不可用"还是"亮屏+Home 后仍锁定"）。
-> - 非越狱 iOS 不允许第三方进程注入 Home 键/解除锁屏：若日志显示"点亮背光 + Home 键之后仍处于锁定状态"，
->   说明该设备/系统版本下按键注入被系统拒绝（与触摸注入同源的限制），只能靠"设置 → 显示与亮度 → 自动锁定 → 永不"避免锁屏。
+> - 设备**设置了密码**时，直接返回 `false` 并记 `[Device] ⚠ 解锁失败: 设备已设置锁屏密码...`，需要用户在挂机前关闭密码。
+> - 返回值是**实际复查结果**（旧版恒返回 `true`，脚本无法区分"解锁成功"和"什么都没发生"）。
+> - 失败时 `touch.log` 会记 `[Device] ⚠ 解锁失败: ...`，并带上 `HID按键已下发/通道不可用` 和 `密码=有/无/未知`：
+>   - `HID按键=通道不可用` → 说明 HID client 没建起来（和触摸注入同源，看 `touch.status()`）；
+>   - `HID按键=已下发` 但仍锁定 → 事件被系统丢弃，或 Home 用法值不适用于该机型，按日志继续排查。
+> - 万一该机型按 Home 就是解不开，规避办法：设置 → 显示与亮度 → 自动锁定 → **永不**，挂机时根本不会锁屏。
 
 ---
 

@@ -18,6 +18,7 @@
 //
 
 #import "TSKeyboardInjector.h"
+#import "TSHIDEventTouch.h"
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 
@@ -277,10 +278,22 @@ typedef struct {
 
 #pragma mark - 硬件按键
 
-- (void)pressHome {
+- (BOOL)pressHomeViaHID {
+    // 主通道: IOHIDEvent 直发 —— 与原版 TrollAutoScript 引擎 bin/luaLib 里
+    // key.press("HOMEBUTTON") 走的是同一条路(该二进制导入的正是
+    // IOHIDEventCreateKeyboardEvent + IOHIDEventSystemClientDispatchEvent)。
+    return [[TSHIDEventTouch shared] pressHomeButton];
+}
+
+- (void)pressHomeViaGSEvent {
     _postKey(TSKeyCodeHome, 1);
     [NSThread sleepForTimeInterval:0.05];
     _postKey(TSKeyCodeHome, 0);
+}
+
+- (void)pressHome {
+    if ([self pressHomeViaHID]) return;
+    [self pressHomeViaGSEvent];
 }
 
 - (void)pressLock {

@@ -64,6 +64,22 @@ typedef NS_ENUM(NSInteger, TSTouchPhase) {
 /// 用于脚本停止/出错时清理，避免留下"幽灵手指"导致后续真实触摸被系统吞掉。
 - (void)releaseAllTouches;
 
+#pragma mark - 硬件按键注入
+
+/// 注入一个 HID 按键事件(键盘页/消费者页通用)。
+/// usagePage/usage = HID 用法对; down=YES 按下 / NO 抬起。
+/// 返回 NO = 直发通道不可用(HID client 没建起来), 事件根本没发出去。
+///
+/// 依据: 原版 TrollAutoScript 引擎 bin/luaLib 导入的正是
+/// IOHIDEventCreateKeyboardEvent + IOHIDEventSystemClientDispatchEvent ——
+/// 它的 key.press("HOMEBUTTON"/"POWER") 走的是这条通道, 而不是 GSEventPost
+/// (GSEventPost 对 iOS 15 第三方进程的系统按键基本无效)。
+- (BOOL)postKeyEventUsagePage:(uint32_t)usagePage usage:(uint16_t)usage down:(BOOL)down;
+
+/// 按一次 Home 键 (Consumer page 0x0C / usage 0x40 = Menu, 即 iOS 的 Home)。
+/// 返回 NO = 通道不可用, 调用方应回退别的办法。
+- (BOOL)pressHomeButton;
+
 /// 触摸注入通道(自检对照用):
 ///   Auto    = 直发可用则直发, 直发不可用(HID client 建不起来)时回退本应用点击(AX/进程内)
 ///   HIDOnly = 只走 IOHID 直发(用于判定"直发是否被系统受理")

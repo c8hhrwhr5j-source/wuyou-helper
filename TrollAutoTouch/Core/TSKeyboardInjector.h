@@ -35,8 +35,15 @@ typedef NS_ENUM(NSInteger, TSKeyCode) {
 
 #pragma mark - 硬件按键
 
-/// 按 Home 键
+/// 按 Home 键（HID 直发优先，通道不可用时回退 GSEvent）
 - (void)pressHome;
+
+/// 只走 HID 直发（IOHIDEventCreateKeyboardEvent，原版 luaLib 同款通道）。
+/// 返回 NO = 直发通道不可用（HID client 没建起来），事件未发出。
+- (BOOL)pressHomeViaHID;
+
+/// 只走老的 GSEvent 通道（GSEventCreateKeyEvent + GSEventPost）
+- (void)pressHomeViaGSEvent;
 
 /// 锁定屏幕（电源键）
 - (void)pressLock;

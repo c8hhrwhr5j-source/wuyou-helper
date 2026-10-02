@@ -529,30 +529,83 @@ static void _tsEnsureLockStateListener(void) {
     return NO;
 }
 
+// ── SpringBoard 锁屏状态查询 ──
+// 原版 TrollAutoScript 引擎 bin/luaLib 导入的是 SBGetScreenLockStatus(注意: 不是
+// SBSGet..., 前缀只有一个 S), 一次就能拿到"是否锁定"和"是否设了密码"两个值 ——
+// 它的 device.unlockScreen 就是这样先判密码的。
+static mach_port_t (*_tsSBSSpringBoardServerPort)(void) = NULL;
+static void (*_tsSBGetScreenLockStatus)(mach_port_t, int *, int *) = NULL;
+
+static void _tsLoadLockStatusAPI(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/"
+                         "SpringBoardServices", RTLD_LAZY | RTLD_LOCAL);
+        if (!h) return;
+        _tsSBSSpringBoardServerPort = dlsym(h, "SBSSpringBoardServerPort");
+        _tsSBGetScreenLockStatus    = dlsym(h, "SBGetScreenLockStatus");
+    });
+}
+
+/// 读 SpringBoard 的锁屏状态。返回 NO = 接口不可用(调用方用 Darwin 通知兜底)。
+/// locked: 1=锁定 0=解锁; passcode: 1=已设密码 0=无密码。
+- (BOOL)_getScreenLockStatus:(int *)locked passcode:(int *)passcode {
+    _tsLoadLockStatusAPI();
+    if (!_tsSBSSpringBoardServerPort || !_tsSBGetScreenLockStatus) return NO;
+    mach_port_t port = _tsSBSSpringBoardServerPort();
+    if (!port) return NO;
+    int l = 0, p = 0;
+    _tsSBGetScreenLockStatus(port, &l, &p);
+    if (locked)   *locked   = l;
+    if (passcode) *passcode = p;
+    return YES;
+}
+
 - (BOOL)unlockScreen {
-    // 1. 唤醒屏幕(背光): 依次尝试 SpringBoardServices / BackBoardServices / GraphicsServices
-    BOOL woken = [self _wakeScreen];
-    if (!woken) {
-        // 背光没亮时 Home 键通常也不生效, 但仍试一次(部分机型仅需按键即可唤醒)
-        NSLog(@"[Device] ⚠ unlockScreen: 背光唤醒接口均不可用");
-        [[TSLogStore shared] append:
-            @"[Device] ⚠ 解锁: 未能点亮屏幕背光(SpringBoardServices/BackBoardServices/GraphicsServices 均无可用接口)"];
+    // ── 0. 先问 SpringBoard: 锁定状态 + 有没有密码 ──
+    int locked = 0, pass = 0;
+    BOOL haveStatus = [self _getScreenLockStatus:&locked passcode:&pass];
+    if (haveStatus) {
+        if (pass != 0) {
+            NSString *msg = @"[Device] ⚠ 解锁失败: 设备已设置锁屏密码, 第三方 App 无法自动输入密码"
+                             "(请挂机前到 设置→面容/触控 ID 与密码 里关闭密码)";
+            NSLog(@"%@", msg);
+            [[TSLogStore shared] append:msg];
+            return NO;
+        }
+        if (locked == 0) return YES;          // 本来就没锁, 什么都不用做
+    } else if (![self isScreenLocked]) {
+        return YES;                            // 接口不可用: 用 Darwin 通知兜底
     }
 
-    // 2. 发送 Home 键事件取消锁屏 (无密码设备会直接进桌面)
-    //    延迟一点确保背光已亮
-    [NSThread sleepForTimeInterval:0.3];
-    [[TSKeyboardInjector shared] pressHome];
-
-    // 3. 复查是否真的解开(最多等 1.5 秒)。以前恒返回 YES, 脚本无法区分"已解锁"
-    //    和"什么都没发生", 这里按实际状态返回。
-    for (int i = 0; i < 10; i++) {
+    // ── 1. 主通路: HID Home 键连按 3 次 ──
+    // 这就是原版 TrollAutoScript 的做法 —— 它引擎里 device.unlockScreen 的 Lua 源码是:
+    //     key.press("HOMEBUTTON"); key.press("HOMEBUTTON"); key.press("HOMEBUTTON");
+    // 既不点亮背光也不发 GSEvent, 连按三次 Home(按键本身就会唤醒 + 无密码时直接进桌面)。
+    BOOL hidSent = NO;
+    for (int i = 0; i < 3; i++) {
+        if ([[TSKeyboardInjector shared] pressHomeViaHID]) hidSent = YES;
+        [NSThread sleepForTimeInterval:0.25];
+        if (![self isScreenLocked]) return YES;
         [NSThread sleepForTimeInterval:0.15];
+    }
+
+    // ── 2. 兜底: 点亮背光 + 老 GSEvent Home 键 ──
+    [self _wakeScreen];
+    [NSThread sleepForTimeInterval:0.3];
+    [[TSKeyboardInjector shared] pressHomeViaGSEvent];
+    [NSThread sleepForTimeInterval:0.3];
+    [[TSKeyboardInjector shared] pressHomeViaGSEvent];
+    for (int i = 0; i < 8; i++) {
+        [NSThread sleepForTimeInterval:0.2];
         if (![self isScreenLocked]) return YES;
     }
 
-    NSString *msg = @"[Device] ⚠ 解锁失败: 点亮背光 + Home 键之后仍处于锁定状态"
-                     "(非越狱 iOS 不允许第三方进程注入 Home 键/解除锁屏; 若设备设了密码更不可能自动解锁)";
+    NSString *msg = [NSString stringWithFormat:
+        @"[Device] ⚠ 解锁失败: HID Home×3 + 背光唤醒 + GSEvent Home 之后仍处于锁定状态"
+        @" (HID按键%@, 密码=%@)",
+        hidSent ? @"已下发(系统可能未受理)" : @"通道不可用",
+        haveStatus ? (pass ? @"有" : @"无") : @"未知"];
     NSLog(@"%@", msg);
     [[TSLogStore shared] append:msg];
     return NO;

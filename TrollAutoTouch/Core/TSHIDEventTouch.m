@@ -302,6 +302,12 @@ extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEventWithQuality(
 extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, IOHIDEventOptionBits options);
 extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
+// 硬件按键事件(原版 luaLib 的 key.press 同款):
+//   (allocator, timeStamp, usagePage, usage, down, options)
+extern IOHIDEventRef IOHIDEventCreateKeyboardEvent(CFAllocatorRef allocator, uint64_t timeStamp,
+                                                   uint32_t usagePage, uint16_t usage,
+                                                   Boolean down, IOHIDEventOptionBits options);
+
 // 私有字段写入 (ZXTouch 同款)
 extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, IOHIDFloat value);
 extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, int value);
@@ -964,6 +970,34 @@ static BOOL TSAXTapAt(CGFloat x, CGFloat y) {
             });
         }
     }
+}
+
+#pragma mark - 硬件按键注入
+
+// iOS 的 Home 键在 HID 里是"消费者页的 Menu": page 0x0C / usage 0x40
+// (kHIDPage_Consumer / kHIDUsage_Csmr_Menu)。原版 luaLib 的
+// key.press("HOMEBUTTON") 最终落到同一对值上。
+#define kTSHIDPageConsumer   0x000C
+#define kTSHIDUsageHomeMenu  0x0040
+
+- (BOOL)postKeyEventUsagePage:(uint32_t)usagePage usage:(uint16_t)usage down:(BOOL)down {
+    if (!_clientReady || _client == NULL) return NO;
+    IOHIDEventRef ev = IOHIDEventCreateKeyboardEvent(kCFAllocatorDefault, mach_absolute_time(),
+                                                     usagePage, usage, (Boolean)down, 0);
+    if (!ev) return NO;
+    // 与触摸一致: 带上 senderID, 否则 backboardd 可能直接丢弃
+    if (s_senderID != 0) IOHIDEventSetSenderID(ev, s_senderID);
+    IOHIDEventSystemClientDispatchEvent(_client, ev);
+    CFRelease(ev);
+    _dispatchCount += 1;
+    return YES;
+}
+
+- (BOOL)pressHomeButton {
+    if (![self postKeyEventUsagePage:kTSHIDPageConsumer usage:kTSHIDUsageHomeMenu down:YES]) return NO;
+    [NSThread sleepForTimeInterval:0.06];
+    [self postKeyEventUsagePage:kTSHIDPageConsumer usage:kTSHIDUsageHomeMenu down:NO];
+    return YES;
 }
 
 /// 进程内点击 fallback: 仅对本 app 前台 UI 有效。
