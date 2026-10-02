@@ -5,6 +5,7 @@
 
 #import "TSDeviceInfo.h"
 #import "TSKeyboardInjector.h"
+#import "../Common/TSLogStore.h"
 #import <UIKit/UIKit.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -529,11 +530,13 @@ static void _tsEnsureLockStateListener(void) {
 }
 
 - (BOOL)unlockScreen {
-    // 1. 唤醒屏幕: 调用 BackBoardServices 的 SBSSetBacklightLevel
-    //    dlopen 加载避免链接期依赖; 失败则用 GSEvent 兜底
+    // 1. 唤醒屏幕(背光): 依次尝试 SpringBoardServices / BackBoardServices / GraphicsServices
     BOOL woken = [self _wakeScreen];
     if (!woken) {
-        // 唤醒失败时, 后续 Home 键事件可能不生效
+        // 背光没亮时 Home 键通常也不生效, 但仍试一次(部分机型仅需按键即可唤醒)
+        NSLog(@"[Device] ⚠ unlockScreen: 背光唤醒接口均不可用");
+        [[TSLogStore shared] append:
+            @"[Device] ⚠ 解锁: 未能点亮屏幕背光(SpringBoardServices/BackBoardServices/GraphicsServices 均无可用接口)"];
     }
 
     // 2. 发送 Home 键事件取消锁屏 (无密码设备会直接进桌面)
@@ -541,39 +544,51 @@ static void _tsEnsureLockStateListener(void) {
     [NSThread sleepForTimeInterval:0.3];
     [[TSKeyboardInjector shared] pressHome];
 
+    // 3. 复查是否真的解开(最多等 1.5 秒)。以前恒返回 YES, 脚本无法区分"已解锁"
+    //    和"什么都没发生", 这里按实际状态返回。
+    for (int i = 0; i < 10; i++) {
+        [NSThread sleepForTimeInterval:0.15];
+        if (![self isScreenLocked]) return YES;
+    }
+
+    NSString *msg = @"[Device] ⚠ 解锁失败: 点亮背光 + Home 键之后仍处于锁定状态"
+                     "(非越狱 iOS 不允许第三方进程注入 Home 键/解除锁屏; 若设备设了密码更不可能自动解锁)";
+    NSLog(@"%@", msg);
+    [[TSLogStore shared] append:msg];
+    return NO;
+}
+
+/// 在指定私有框架里查一个 void(double) 的背光接口并调到最大亮度(触发唤醒)。
+static BOOL TSSetBacklightVia(void *handle, const char *symbol) {
+    if (!handle || !symbol) return NO;
+    void (*setter)(double) = dlsym(handle, symbol);
+    if (!setter) return NO;
+    setter(1.0);   // 1.0 = 最大亮度, 触发唤醒
     return YES;
 }
 
-// 唤醒屏幕: 优先 BackBoardServices SBSSetBacklightLevel, 备选 GSEventSetBacklightLevel
+// 唤醒屏幕: 按框架→符号逐个尝试。
+// 注意函数名前缀决定它在哪个框架里: SBS* 属于 SpringBoardServices,
+// BKS* 属于 BackBoardServices —— 旧实现把 SBSSetBacklightLevel 拿到
+// BackBoardServices 里查, 必然查不到, "唤醒"这步一直是失败的。
 - (BOOL)_wakeScreen {
-    // 优先 BackBoardServices (iOS 7+ 主流)
-    void *bbh = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
+    // ① SpringBoardServices (SBS 前缀)
+    void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
                        RTLD_LAZY | RTLD_LOCAL);
-    if (bbh) {
-        // 尝试 SBSSetBacklightLevel(double level)
-        void (*setBL)(double) = dlsym(bbh, "SBSSetBacklightLevel");
-        if (setBL) {
-            setBL(1.0);   // 1.0 = 最大亮度, 触发唤醒
-            return YES;
-        }
-        // 备选 BKSDisplaySetBacklightFactor
-        void (*setBF)(double) = dlsym(bbh, "BKSDisplaySetBacklightFactor");
-        if (setBF) {
-            setBF(1.0);
-            return YES;
-        }
-    }
+    if (TSSetBacklightVia(sbs, "SBSSetBacklightLevel")) return YES;
+    if (TSSetBacklightVia(sbs, "BKSDisplaySetBacklightFactor")) return YES;
 
-    // 回退到 GraphicsServices 的 GSEventSetBacklightLevel (老 iOS 版本)
-    void *gsh = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices",
+    // ② BackBoardServices (BKS 前缀)
+    void *bbs = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
                        RTLD_LAZY | RTLD_LOCAL);
-    if (gsh) {
-        void (*gsSetBL)(double) = dlsym(gsh, "GSEventSetBacklightLevel");
-        if (gsSetBL) {
-            gsSetBL(1.0);
-            return YES;
-        }
-    }
+    if (TSSetBacklightVia(bbs, "BKSDisplaySetBacklightFactor")) return YES;
+    if (TSSetBacklightVia(bbs, "SBSSetBacklightLevel")) return YES;
+
+    // ③ GraphicsServices (老 iOS 版本)
+    void *gs = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices",
+                      RTLD_LAZY | RTLD_LOCAL);
+    if (TSSetBacklightVia(gs, "GSEventSetBacklightLevel")) return YES;
+
     return NO;
 }
 

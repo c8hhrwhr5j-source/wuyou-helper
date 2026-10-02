@@ -1445,7 +1445,7 @@ device.unlockScreen()      -- → boolean
 | 函数 | 类型 | 说明 |
 |---|---|---|
 | `device.isScreenLocked()` | boolean | `true` = 屏幕锁定中 |
-| `device.unlockScreen()` | boolean | `true` = 唤醒+解锁事件已发送 |
+| `device.unlockScreen()` | boolean | `true` = 复查确认已解锁；`false` = 1.5 秒后仍锁定(解锁失败) |
 
 #### 示例
 
@@ -1479,14 +1479,20 @@ end
 
 - **`isScreenLocked`**：通过 Darwin 通知 `com.apple.springboard.lockstate` 的 `notify_get_state` 查询，SpringBoard 维护此状态值（1=锁定，0=解锁）。
 - **`unlockScreen`**：
-  1. 调用 BackBoardServices 的 `SBSSetBacklightLevel(1.0)` 唤醒屏幕（备选 `BKSDisplaySetBacklightFactor`，再备选 `GSEventSetBacklightLevel`）
+  1. 点亮背光：按 `SpringBoardServices → BackBoardServices → GraphicsServices` 顺序依次尝试
+     `SBSSetBacklightLevel(1.0)` / `BKSDisplaySetBacklightFactor(1.0)` / `GSEventSetBacklightLevel(1.0)`
+     （函数前缀决定了它在哪个框架里：`SBS*` 只在 SpringBoardServices，`BKS*` 只在 BackBoardServices）
   2. 等待 300ms 让背光亮起
   3. 发送 Home 键事件（复用 `TSKeyboardInjector.pressHome`），无密码设备会直接进桌面
+  4. **复查**：之后最多等 1.5 秒轮询 `isScreenLocked`，真的解锁才返回 `true`
 
 > **关于密码**：
 > - 设备**没有设置锁屏密码**时，`unlockScreen` 可直接解锁到桌面。
 > - 设备**设置了密码**时，`unlockScreen` 只能唤醒屏幕到锁屏界面，**无法**自动输入密码进桌面。这是 iOS 安全机制决定的，需要用户在挂机前关闭密码。
-> - 函数始终返回 `true`（只要唤醒+事件注入完成），调用方应配合 `isScreenLocked` 复查是否真的解锁成功。
+> - 返回值已改为**实际复查结果**（旧版恒返回 `true`，脚本无法区分"解锁成功"和"什么都没发生"）。
+>   失败时 `touch.log` 会记 `[Device] ⚠ 解锁失败: ...`（含"背光接口均不可用"还是"亮屏+Home 后仍锁定"）。
+> - 非越狱 iOS 不允许第三方进程注入 Home 键/解除锁屏：若日志显示"点亮背光 + Home 键之后仍处于锁定状态"，
+>   说明该设备/系统版本下按键注入被系统拒绝（与触摸注入同源的限制），只能靠"设置 → 显示与亮度 → 自动锁定 → 永不"避免锁屏。
 
 ---
 
