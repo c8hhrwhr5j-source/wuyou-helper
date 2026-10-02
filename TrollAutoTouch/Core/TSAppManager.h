@@ -36,6 +36,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (pid_t)     frontPid;
 - (nullable NSString *)frontBid;         // 如 "com.tencent.xin"
 
+/// 上一次 frontBid 取不到时的诊断串(各条通路逐一失败的原因, 供脚本日志排查);
+/// 上一次查询成功时为空串。
+- (NSString *)frontBidDiagnostic;
+
 // ── 应用查询 ──────────────────────────────────────
 - (BOOL)      isInstalled:(NSString *)bundleId;
 - (BOOL)      isRunning:(NSString *)bundleId;

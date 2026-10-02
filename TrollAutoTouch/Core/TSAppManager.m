@@ -131,8 +131,51 @@ static void _loadMobileInstallation(void) {
 }
 
 // ────────────────────────────────────────────────────────────
+#pragma mark - 前台应用辅助 (FrontBoard 显示布局 / 本 App 前后台)
+// ────────────────────────────────────────────────────────────
+
+// FBSDisplayLayoutMonitor 属于私有框架 FrontBoardServices, 未 dlopen 时
+// NSClassFromString 拿不到类。它连接系统显示服务 —— 即使本 App 退到后台, 也能
+// 读到主屏当前布局(悬浮球"后台读前台 App 方向"用的就是这条通路, iOS 15 实测可用)。
+// 布局元素 FBSDisplayLayoutElement 带 bundleIdentifier / isUIApplicationElement,
+// 由此可直接拿到真正的**前台 App**。
+static id TSFBSDisplayLayoutMonitor(void) {
+    static Class monitorClass = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        monitorClass = NSClassFromString(@"FBSDisplayLayoutMonitor");
+        if (!monitorClass) {
+            void *h = dlopen("/System/Library/PrivateFrameworks/"
+                             "FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+            if (h) monitorClass = NSClassFromString(@"FBSDisplayLayoutMonitor");
+        }
+    });
+    if (!monitorClass) return nil;
+    SEL sel = NSSelectorFromString(@"mainDisplayInstance");
+    if (![monitorClass respondsToSelector:sel]) return nil;
+    return [monitorClass performSelector:sel];
+}
+
+/// 本 App 当前是否在前台(UIApplicationStateActive)。
+static BOOL TSAppIsActive(void) {
+    if ([NSThread isMainThread]) {
+        return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
+    }
+    __block BOOL active = NO;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        active = ([UIApplication sharedApplication].applicationState == UIApplicationStateActive);
+    });
+    return active;
+}
+
+// ────────────────────────────────────────────────────────────
 #pragma mark - TSAppManager
 // ────────────────────────────────────────────────────────────
+
+@interface TSAppManager ()
+/// 上一次 frontBid 全部通路都失败时的原因串(诊断用)
+@property (nonatomic, copy, nullable) NSString *frontBidFailureDetail;
+@end
 
 @implementation TSAppManager
 
@@ -186,16 +229,88 @@ static void _loadMobileInstallation(void) {
     return [self pidForBundleId:bid];
 }
 
-- (NSString *)frontBid {
-    _loadSpringBoardServices();
-    if (_SBSSpringBoardServerPort && _SBSCopyFrontmostApplicationDisplayIdentifier) {
-        mach_port_t port = _SBSSpringBoardServerPort();
-        CFStringRef bid = _SBSCopyFrontmostApplicationDisplayIdentifier(port);
-        if (bid) {
-            return CFBridgingRelease(bid);
+/// 通路①: FrontBoard 主屏显示布局 → 前台 App 元素 → bundleIdentifier。
+/// 这是 iOS 15 TrollStore 环境下的主通路: SBSCopyFrontmostApplicationDisplayIdentifier
+/// 在该环境实测恒返回 NULL(前台查询被拒), 而显示布局由系统显示服务维护,
+/// 本 App 退后台照样能读到(悬浮球后台方向检测即依赖它)。
+- (nullable NSString *)_frontBidViaDisplayLayout:(NSMutableArray<NSString *> *)fails {
+    id monitor = TSFBSDisplayLayoutMonitor();
+    if (!monitor) { [fails addObject:@"FB布局:监视器不可用"]; return nil; }
+
+    id layout = nil;
+    SEL curSel = NSSelectorFromString(@"currentLayout");
+    if ([monitor respondsToSelector:curSel]) {
+        layout = [monitor performSelector:curSel];
+    }
+    if (!layout) { [fails addObject:@"FB布局:currentLayout为空"]; return nil; }
+
+    NSArray *elements = nil;
+    @try {
+        elements = [layout valueForKey:@"elements"];
+    } @catch (NSException *e) {
+        elements = nil;
+    }
+    if (![elements isKindOfClass:NSArray.class]) {
+        [fails addObject:@"FB布局:无布局元素"];
+        return nil;
+    }
+
+    for (id el in elements) {
+        NSString *bid = nil;
+        BOOL isAppEl = NO;
+        @try {
+            isAppEl = [[el valueForKey:@"isUIApplicationElement"] boolValue];
+            if (isAppEl) bid = [el valueForKey:@"bundleIdentifier"];
+        } @catch (NSException *e) {
+            bid = nil;
+        }
+        if (isAppEl && [bid isKindOfClass:NSString.class] && bid.length > 0) {
+            return bid;
         }
     }
+    [fails addObject:@"FB布局:无前台App元素"];
     return nil;
+}
+
+/// 通路②: SpringBoardServices 老接口(部分系统/权限组合下返回 NULL)。
+- (nullable NSString *)_frontBidViaSpringBoardServices:(NSMutableArray<NSString *> *)fails {
+    _loadSpringBoardServices();
+    if (!_SBSSpringBoardServerPort)           { [fails addObject:@"SBS:端口函数缺失"]; return nil; }
+    if (!_SBSCopyFrontmostApplicationDisplayIdentifier) {
+        [fails addObject:@"SBS:前台查询符号缺失"]; return nil;
+    }
+    mach_port_t port = _SBSSpringBoardServerPort();
+    if (!port) { [fails addObject:@"SBS:端口为空"]; return nil; }
+    CFStringRef bid = _SBSCopyFrontmostApplicationDisplayIdentifier(port);
+    if (bid) return CFBridgingRelease(bid);
+    [fails addObject:@"SBS:前台查询返回NULL"];
+    return nil;
+}
+
+- (NSString *)frontBid {
+    NSMutableArray<NSString *> *fails = [NSMutableArray array];
+
+    // ① FrontBoard 显示布局(主通路, 后台可用)
+    NSString *bid = [self _frontBidViaDisplayLayout:fails];
+    if (bid.length > 0) { self.frontBidFailureDetail = nil; return bid; }
+
+    // ② SpringBoardServices(老通路)
+    bid = [self _frontBidViaSpringBoardServices:fails];
+    if (bid.length > 0) { self.frontBidFailureDetail = nil; return bid; }
+
+    // ③ 兜底: 本 App 自己就在前台
+    if (TSAppIsActive()) {
+        self.frontBidFailureDetail = nil;
+        return [NSBundle mainBundle].bundleIdentifier;
+    }
+    [fails addObject:@"本App不在前台"];
+
+    self.frontBidFailureDetail = [fails componentsJoinedByString:@" | "];
+    return nil;
+}
+
+- (NSString *)frontBidDiagnostic {
+    return self.frontBidFailureDetail ?: @"";
 }
 
 // ────────────────────────────────────────────────────────────

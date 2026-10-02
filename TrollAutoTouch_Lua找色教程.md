@@ -1607,6 +1607,13 @@ app.inputText("hello")
 | `app.close(bid)` | boolean | 关闭 App |
 | `app.inputText(text)` | boolean | 输入文本 |
 
+> `app.frontBid()` 返回 nil = 三条通路全都没取到。引擎依次尝试:
+> ① FrontBoard 主屏显示布局(主通路 —— 由系统显示服务维护, 本 App 退到后台也读得到前台 App;
+> 悬浮球"后台读前台 App 方向"用的就是它); ② SpringBoardServices 前台查询(iOS 15 TrollStore
+> 环境下常被拒, 恒返回 NULL); ③ 本 App 自己就在前台时返回自身 bundle id。
+> 三条全失败时, 脚本日志(debug.log)会记一行 `⚠ app.frontBid() 取不到前台应用 (...)`,
+> 括号内是各通路逐一失败的原因, 便于定位。
+
 > `app.close(bid)` 传的是 **bundle id**(如 `com.tencent.xin`),不是 App 显示名。
 > 关闭失败时 `touch.log` 会写明原因: `未找到运行进程`(= 没在运行或 bundle id 不对)
 > 或 `kill 返回 Operation not permitted`(= 本 App 无权给其他进程发信号)。

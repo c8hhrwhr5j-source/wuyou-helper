@@ -2028,7 +2028,20 @@ static int l_device_setVolume(lua_State *L) {
 
 static int l_app_frontBid(lua_State *L) {
     NSString *bid = [[TSAppManager shared] frontBid];
-    if (!bid) { lua_pushnil(L); return 1; }
+    if (!bid) {
+        // 取不到 = 功能异常, 必须留下痕迹(脚本日志), 但只记一次: 挂机脚本可能
+        // 每秒调用, 重复刷屏会把真正有用的日志顶掉。
+        static BOOL s_frontBidFailLogged = NO;
+        if (!s_frontBidFailLogged) {
+            s_frontBidFailLogged = YES;
+            NSString *diag = [[TSAppManager shared] frontBidDiagnostic];
+            lua_script_log([NSString stringWithFormat:
+                @"[Lua] ⚠ app.frontBid() 取不到前台应用 (%@)",
+                diag.length > 0 ? diag : @"未知原因"]);
+        }
+        lua_pushnil(L);
+        return 1;
+    }
     lua_pushstring(L, bid.UTF8String);
     return 1;
 }
