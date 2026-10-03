@@ -28,6 +28,7 @@
 
 #import "TSScreenCapture.h"
 #import "TSColorFinder.h"
+#import "../HUD/TSLogWindow.h"
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <unistd.h>
@@ -1820,25 +1821,29 @@ static const char *_gsSurfaceKeys[] = {
               pixelsOut:(uint8_t **)pixelsOut
                   width:(int *)widthOut
                  height:(int *)heightOut {
-    if ([path isEqualToString:@"CARenderServer"]) {
-        return [self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut];
+    // 脚本日志浮动窗口(logWindow)处于"隐藏模式"时, 取到的画面里必须没有它:
+    // 截图前把日志面板从合成层摘掉, 截图后立刻恢复(见 TSLogWindowManager)。
+    // 未开启隐藏模式 / 没有面板时该函数为空操作, 零开销。
+    [[TSLogWindowManager shared] setExcludedFromCapture:YES];
+    BOOL ok = NO;
+    @try {
+        if ([path isEqualToString:@"CARenderServer"]) {
+            ok = [self _captureRenderServerToRGBA:pixelsOut width:widthOut height:heightOut];
+        } else if ([path isEqualToString:@"UIScreenSurface"]) {
+            ok = [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
+        } else if ([path isEqualToString:@"GlobalDisplay"]) {
+            ok = [self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut];
+        } else if ([path isEqualToString:@"SystemWindow"]) {
+            ok = [self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut];
+        } else if ([path isEqualToString:@"IOMFB"]) {
+            ok = [self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut];
+        } else if ([path isEqualToString:@"AppWindow"]) {
+            ok = [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
+        }
+    } @finally {
+        [[TSLogWindowManager shared] setExcludedFromCapture:NO];
     }
-    if ([path isEqualToString:@"UIScreenSurface"]) {
-        return [self _captureUIScreenIOSurfaceToRGBA:pixelsOut width:widthOut height:heightOut];
-    }
-    if ([path isEqualToString:@"GlobalDisplay"]) {
-        return [self _captureGlobalDisplayToRGBA:pixelsOut width:widthOut height:heightOut];
-    }
-    if ([path isEqualToString:@"SystemWindow"]) {
-        return [self _captureSystemWindowToRGBA:pixelsOut width:widthOut height:heightOut];
-    }
-    if ([path isEqualToString:@"IOMFB"]) {
-        return [self _captureFramebufferToRGBA:pixelsOut width:widthOut height:heightOut];
-    }
-    if ([path isEqualToString:@"AppWindow"]) {
-        return [self _captureAppWindowToRGBA:pixelsOut width:widthOut height:heightOut];
-    }
-    return NO;
+    return ok;
 }
 
 - (UIImage *)captureImage {

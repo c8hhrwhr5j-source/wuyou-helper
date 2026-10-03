@@ -57,6 +57,7 @@ NSNotificationName const TSLuaPauseStateChangedNotification = @"TSLuaPauseStateC
 #import "../Core/TSHUDService.h"
 #import "../HUD/TSHUDHost.h"
 #import "../HUD/TSHUDWindow.h"
+#import "../HUD/TSLogWindow.h"
 #import "../Views/TSScriptUIViewController.h"
 #import "TSScriptListViewController.h"
 #import "../Core/TSToolExecutor.h"
@@ -2937,6 +2938,100 @@ static int l_ui_open(lua_State *L) {
     return 1;
 }
 
+#pragma mark - 浮动日志窗口 (logWindow)
+
+// 对齐原版 TrollAutoScript 的 logWindow 模块:
+//   local lw = logWindow.init(x, y [, 宽, 高, 背景透明度, 背景色, 字体色, 字体尺寸])
+//   lw:addLog("文本" [, 文字颜色, 文字尺寸])
+//   lw:release()
+//   logWindow.setHideWindowMode(true)   -- 肉眼可见, 不进找图找色画面
+// 日志窗口对象用"带 metatable 的 Lua 表"表示 (表里 __id 存窗口 id),
+// 不用 userdata, 省去 GC/取值转换的一堆坑。
+#define TS_LOGWINDOW_MT "TSLogWindowObj"
+
+static void ts_logwindow_create_meta(lua_State *L) {
+    if (luaL_newmetatable(L, TS_LOGWINDOW_MT)) {
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -2, "__index");           // __index = 元表自身
+        lua_pushcfunction(L, l_logwin_addLog);
+        lua_setfield(L, -2, "addLog");
+        lua_pushcfunction(L, l_logwin_release);
+        lua_setfield(L, -2, "release");
+    }
+    lua_pop(L, 1);
+}
+
+/// logWindow.init(x, y [, w, h, alpha, bgColor, fontColor, fontSize]) → 日志窗口对象
+static int l_logWindow_init(lua_State *L) {
+    CGFloat x     = (CGFloat)luaL_optnumber(L, 1, 0);
+    CGFloat y     = (CGFloat)luaL_optnumber(L, 2, 0);
+    CGFloat w     = (CGFloat)luaL_optnumber(L, 3, 500);
+    CGFloat h     = (CGFloat)luaL_optnumber(L, 4, 35);
+    CGFloat alpha = (CGFloat)luaL_optnumber(L, 5, 0.5);
+    int     bg    = (int)luaL_optinteger(L, 6, 0x000000);
+    int     fg    = (int)luaL_optinteger(L, 7, 0x00ff00);
+    CGFloat fs    = (CGFloat)luaL_optnumber(L, 8, 12);
+
+    NSInteger wid = [[TSLogWindowManager shared] openAt:CGPointMake(x, y)
+                                                   size:CGSizeMake(w, h)
+                                                  alpha:alpha
+                                                  bgHex:bg
+                                                  fgHex:fg
+                                               fontSize:fs];
+    if (wid <= 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)wid);
+    lua_setfield(L, -2, "__id");
+    luaL_getmetatable(L, TS_LOGWINDOW_MT);
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+/// logWindow.setHideWindowMode(true|false)
+static int l_logWindow_setHideWindowMode(lua_State *L) {
+    BOOL hide = lua_isnone(L, 1) ? YES : (lua_toboolean(L, 1) ? YES : NO);
+    [TSLogWindowManager shared].hideWindowMode = hide;
+    return 0;
+}
+
+/// logWindow.releaseAll() —— 关闭所有日志窗口
+static int l_logWindow_releaseAll(lua_State *L) {
+    [[TSLogWindowManager shared] closeAll];
+    return 0;
+}
+
+/// lw:addLog(文本 [, 文字颜色, 文字尺寸])
+static int l_logwin_addLog(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getfield(L, 1, "__id");
+    NSInteger wid = (NSInteger)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (wid <= 0) return 0;
+    NSString *text = @"";
+    if (lua_isstring(L, 2)) text = @(lua_tostring(L, 2));
+    int hex = lua_isnoneornil(L, 3) ? -1 : (int)luaL_checkinteger(L, 3);
+    CGFloat size = lua_isnoneornil(L, 4) ? 0 : (CGFloat)luaL_checknumber(L, 4);
+    [[TSLogWindowManager shared] appendText:text hex:hex size:size windowId:wid];
+    return 0;
+}
+
+/// lw:release()
+static int l_logwin_release(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getfield(L, 1, "__id");
+    NSInteger wid = (NSInteger)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (wid > 0) {
+        [[TSLogWindowManager shared] closeWindow:wid];
+        lua_pushnil(L);
+        lua_setfield(L, 1, "__id");
+    }
+    return 0;
+}
+
 #pragma mark - 注册
 
 static void lua_register_all(lua_State *L) {
@@ -3192,6 +3287,17 @@ static void lua_register_all(lua_State *L) {
     };
     luaL_newlib(L, uiLib);
     lua_setglobal(L, "ui");
+
+    // ── logWindow 模块 (浮动日志窗口) ──
+    ts_logwindow_create_meta(L);
+    static const luaL_Reg logWindowLib[] = {
+        {"init",              l_logWindow_init},
+        {"setHideWindowMode", l_logWindow_setHideWindowMode},
+        {"releaseAll",        l_logWindow_releaseAll},
+        {NULL, NULL}
+    };
+    luaL_newlib(L, logWindowLib);
+    lua_setglobal(L, "logWindow");
 }
 
 #pragma mark - 执行
@@ -3678,6 +3784,8 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 
     // 兜底：无论脚本如何结束(正常/停止/报错)，都释放所有残留触摸
     [[TSHIDEventTouch shared] releaseAllTouches];
+    // 清理脚本留下的浮动日志窗口, 避免脚本没调 :release() 时面板一直飘在屏幕上
+    [[TSLogWindowManager shared] closeAll];
 
     _stopRequested = NO;
     _pauseRequested = NO;
@@ -3797,6 +3905,8 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     lua_close(L);
 
     [[TSHIDEventTouch shared] releaseAllTouches];
+    // 清理脚本留下的浮动日志窗口
+    [[TSLogWindowManager shared] closeAll];
 
     _stopRequested = NO;
     _pauseRequested = NO;

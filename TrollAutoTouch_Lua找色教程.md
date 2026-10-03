@@ -1928,6 +1928,54 @@ logStr(settings.username)
 
 ---
 
+## 14.5 浮动日志窗口 (logWindow)
+
+在屏幕上开一块**肉眼可见的日志面板**，用来实时看脚本状态。可以对颜色、字体、位置、透明度做配置。
+
+```lua
+logWindow.setHideWindowMode(true)          -- 隐藏模式: 面板肉眼可见, 但不会被截进画面
+
+local w, h = getScreenSize()
+local offset = 200
+local lw = logWindow.init(0, offset, w, h - offset * 2, 0.5, 0x000000, 0x00ff00, 15)
+
+lw:addLog(os.date("[%H:%M:%S] : ") .. "第一条日志")   -- 用默认颜色/尺寸
+lw:addLog(os.date("[%H:%M:%S] : ") .. "红色日志", 0xff0000)
+lw:addLog("大号字", 0xffff00, 20)
+
+sleep(10000)
+lw:release()      -- 释放掉
+```
+
+| 函数 | 说明 |
+|---|---|
+| `logWindow.init(x, y [, 宽, 高, 背景透明度, 背景色, 字体色, 字体尺寸])` | 创建并立即显示一个日志窗口 → 返回**日志窗口对象**（失败返回 `nil`） |
+| `日志窗口对象:addLog(文本 [, 文字颜色, 文字尺寸])` | 追加一行日志 |
+| `日志窗口对象:release()` | 释放（销毁）这个窗口 |
+| `logWindow.setHideWindowMode(true\|false)` | 隐藏模式开关，见下 |
+| `logWindow.releaseAll()` | 一次关闭所有日志窗口 |
+
+参数默认值：宽 `500`、高 `35`、背景透明度 `0.5`、背景色 `0x000000`、字体色 `0x00ff00`、字体尺寸 `12`。
+颜色一律是 `0xRRGGBB` 整数。坐标/尺寸单位是**屏幕逻辑点**（与 `getScreenSize()` / `tap` 同一坐标系）。
+
+#### 隐藏模式 `setHideWindowMode`
+
+- `true`（推荐）：**面板肉眼看得见，但脚本看不见** —— 每次截屏时面板会被临时摘除并提交，
+  所以 `findColor` / `findImage` / `getColor` / `snapshot` 拿到的画面里**没有**这块面板，不会砸坏找图找色。
+- `false`（默认）：面板会被一起截进画面 —— 如果你要"对着日志窗口自己找色/找图"，就用这个。
+
+#### 实现说明
+
+- 所有日志窗口挂在**同一个**全屏透明 `UIWindow` 上（`UIWindowLevelStatusBar+100`），窗口 `hitTest` 恒返回 `nil`、
+  `userInteractionEnabled=NO`，**完全不参与触摸**，不会吞脚本的点击。
+- App 退到后台（脚本在别的 App 上跑）时，走与悬浮球同样的 **SBS 系统级托管**
+  （`SBSAccessibilityWindowHostingController` + `CAContext`，level 10000、`kCAContextIgnoresHitTest`），
+  保证在其它 App / 桌面上依旧肉眼可见。
+- 脚本结束（正常结束 / 停止 / 报错）会自动 `releaseAll()`，脚本忘了 `:release()` 也不会留残影。
+- 面板内部最多保留最近 400 行，长时间挂机不会把内存吃光。
+
+---
+
 ## 15. 全局变量与运行环境
 
 ### 15.1 内置全局变量
@@ -2360,6 +2408,10 @@ end
 | 函数 | 说明 |
 |---|---|
 | `ui.open(html)` | 打开网页设置 UI |
+| `logWindow.init(...)` | 创建浮动日志窗口 → 对象 |
+| `logWindow.setHideWindowMode(b)` | 日志窗口隐藏模式 |
+| `lw:addLog(text [, color, size])` | 日志窗口追加一行 |
+| `lw:release()` | 释放日志窗口 |
 
 ### 模块列表
 
