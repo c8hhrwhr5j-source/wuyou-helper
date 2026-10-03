@@ -38,6 +38,8 @@ static const NSInteger kExtCount  = 3;
 static const CGFloat kBallX       = kBallSize + kGap + kBtnSize * 2 + kGap * 2; // 44+8+44*2+8*2=156
 // 展开后的窗口宽度
 static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
+// 展开后无操作自动收回的等待时长(秒): 点了悬浮球但没点任何按钮时, 到点自动收回
+static const NSTimeInterval kAutoCollapseDelay = 8.0;
 
 // 悬浮球窗口的 rootVC: 固定竖屏, 禁止自动旋转。
 // 否则 app 支持横屏时悬浮球 window 会随设备旋转 (bounds 交换), 与自绘的
@@ -96,6 +98,9 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     BOOL _landscape;
     // 当前界面方向 (3=LandscapeLeft, 4=LandscapeRight), 用于区分旋转方向。
     long long _curOrientation;
+    // 展开后"无操作自动收回"定时器: 展开起 kAutoCollapseDelay 秒内没点任何按钮,
+    // 自动收回面板(避免展开的横条一直挡在屏幕上)。任何收回动作都会取消它。
+    NSTimer *_autoCollapseTimer;
 }
 
 + (instancetype)shared {
@@ -497,8 +502,41 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     }
 }
 
+#pragma mark - 自动收回
+
+/// 展开后启动倒计时 (kAutoCollapseDelay 秒); 重复调用只保留最后一次。
+- (void)_scheduleAutoCollapse {
+    [self _cancelAutoCollapse];
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self _scheduleAutoCollapse]; });
+        return;
+    }
+    _autoCollapseTimer = [NSTimer scheduledTimerWithTimeInterval:kAutoCollapseDelay
+                                                          target:self
+                                                        selector:@selector(_autoCollapseFired:)
+                                                        userInfo:nil
+                                                         repeats:NO];
+}
+
+- (void)_cancelAutoCollapse {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self _cancelAutoCollapse]; });
+        return;
+    }
+    if (_autoCollapseTimer) {
+        [_autoCollapseTimer invalidate];
+        _autoCollapseTimer = nil;
+    }
+}
+
+- (void)_autoCollapseFired:(NSTimer *)timer {
+    _autoCollapseTimer = nil;
+    if (_expanded) [self _collapseAnimated:YES];
+}
+
 - (void)_expandAnimated:(BOOL)animated {
     _expanded = YES;
+    [self _scheduleAutoCollapse];   // 8 秒内没点按钮就自动收回
     // setBallPoint 在收起状态把窗口收缩为球本体 44×44; 展开前恢复展开尺寸并
     // 重排, 否则按钮会排布到窗口外(球在 44 窗格内, 按钮需要展开面板宽度)
     CGSize want = _landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
@@ -543,6 +581,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 }
 
 - (void)_collapseAnimated:(BOOL)animated {
+    [self _cancelAutoCollapse];     // 已经收回(点按钮/点空白/点本体), 取消倒计时
     _expanded = NO;
     UIButton *buttons[] = {_closeBtn, _toggleBtn, _pauseBtn};
     for (int i = 0; i < kExtCount; i++) {
@@ -942,6 +981,7 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 }
 
 - (void)hide {
+    [self _cancelAutoCollapse];
     if (_expanded) [self _collapseAnimated:NO];
     [self _unregisterSBSHosting];
     self.hidden = YES;
