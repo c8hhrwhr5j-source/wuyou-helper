@@ -33,8 +33,15 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)canUseMobileInstallation;
 
 // ── 前台应用 ──────────────────────────────────────
+/// 桌面(SpringBoard)的 bundle id。三条通路都取不到前台 App 时 frontBid 返回它 ——
+/// 停在桌面/锁屏时系统认定的"前台"本来就是 SpringBoard, 这样脚本里 bid 恒为字符串,
+/// 可以直接 if bid ~= APP then 比较, 不用先判 nil。
+FOUNDATION_EXPORT NSString * const TSFrontBidSpringBoard;
+
 - (pid_t)     frontPid;
-- (nullable NSString *)frontBid;         // 如 "com.tencent.xin"
+/// 前台 App bundle id, 如 "com.tencent.xin"。**不返回 nil**:
+/// 停在桌面 / 三条通路全失败时返回 TSFrontBidSpringBoard(失败原因见 frontBidDiagnostic)。
+- (NSString *)frontBid;
 
 /// 上一次 frontBid 取不到时的诊断串(各条通路逐一失败的原因, 供脚本日志排查);
 /// 上一次查询成功时为空串。

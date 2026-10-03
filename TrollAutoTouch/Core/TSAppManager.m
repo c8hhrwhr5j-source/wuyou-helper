@@ -287,6 +287,8 @@ static BOOL TSAppIsActive(void) {
     return nil;
 }
 
+NSString * const TSFrontBidSpringBoard = @"com.apple.springboard";
+
 - (NSString *)frontBid {
     NSMutableArray<NSString *> *fails = [NSMutableArray array];
 
@@ -305,8 +307,12 @@ static BOOL TSAppIsActive(void) {
     }
     [fails addObject:@"本App不在前台"];
 
+    // ④ 三条通路全失败 —— 前台没有任何可识别的第三方 App, 绝大多数情况就是停在桌面
+    //    (SpringBoard 才是"前台")。这里返回桌面 bundle id 而不是 nil: 脚本里
+    //    local bid = app.frontBid(); if bid ~= APP then 才能正常走进分支;
+    //    真出故障时原因串留在 frontBidDiagnostic 里, 脚本日志只提醒一次。
     self.frontBidFailureDetail = [fails componentsJoinedByString:@" | "];
-    return nil;
+    return TSFrontBidSpringBoard;
 }
 
 - (NSString *)frontBidDiagnostic {

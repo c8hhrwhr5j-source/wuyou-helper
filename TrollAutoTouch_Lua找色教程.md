@@ -1600,8 +1600,12 @@ device.setVolume(1.0)   -- 最大音量
 ```lua
 -- 前台应用 Bundle ID
 local bid = app.frontBid()
-if bid then
-    logStr("当前前台: " .. bid)
+logStr("当前前台: " .. bid)
+
+-- 停在桌面时 bid = "com.apple.springboard", 可直接比较
+local APP = "com.xxx.game"
+if bid ~= APP then
+    app.open(APP)
 end
 
 -- 检查应用是否安装
@@ -1620,19 +1624,22 @@ app.inputText("hello")
 
 | 函数 | 返回值 | 说明 |
 |---|---|---|
-| `app.frontBid()` | string / nil | 当前前台 App bundle id |
+| `app.frontBid()` | string | 当前前台 App bundle id（停在桌面时返回 `com.apple.springboard`，恒有值） |
 | `app.isInstalled(bid)` | boolean | 是否安装 |
 | `app.isRunning(bid)` | boolean | 是否正在运行(排查 close 无效的第一步) |
 | `app.open(bid)` | boolean | 打开 App |
 | `app.close(bid)` | boolean | 关闭 App |
 | `app.inputText(text)` | boolean | 输入文本 |
 
-> `app.frontBid()` 返回 nil = 三条通路全都没取到。引擎依次尝试:
-> ① FrontBoard 主屏显示布局(主通路 —— 由系统显示服务维护, 本 App 退到后台也读得到前台 App;
-> 悬浮球"后台读前台 App 方向"用的就是它); ② SpringBoardServices 前台查询(iOS 15 TrollStore
-> 环境下常被拒, 恒返回 NULL); ③ 本 App 自己就在前台时返回自身 bundle id。
-> 三条全失败时, 脚本日志(debug.log)会记一行 `⚠ app.frontBid() 取不到前台应用 (...)`,
-> 括号内是各通路逐一失败的原因, 便于定位。
+> `app.frontBid()` **恒返回字符串, 不会是 nil**, 脚本里可以直接 `if bid ~= APP then`, 不必先判空。
+> 引擎依次尝试三条通路: ① FrontBoard 主屏显示布局(主通路 —— 由系统显示服务维护, 本 App 退到后台
+> 也读得到前台 App; 悬浮球"后台读前台 App 方向"用的就是它); ② SpringBoardServices 前台查询
+> (iOS 15 TrollStore 环境下常被拒, 恒返回 NULL); ③ 本 App 自己就在前台时返回自身 bundle id。
+>
+> 三条全失败时按**停在桌面**处理, 返回 `com.apple.springboard`(桌面的前台本来就是 SpringBoard),
+> 同时脚本日志(debug.log)只记一次 `⚠ app.frontBid() 取不到前台应用, 已按桌面返回 com.apple.springboard (...)`,
+> 括号内是各通路逐一失败的原因, 便于定位。即返回值不再区分"桌面"和"取不到",
+> 需要区分时看日志或用 `app.isRunning(bid)` 自行判断。
 
 > `app.close(bid)` 传的是 **bundle id**(如 `com.tencent.xin`),不是 App 显示名。
 > 关闭失败时 `touch.log` 会写明原因: `未找到运行进程`(= 没在运行或 bundle id 不对)
@@ -2271,7 +2278,7 @@ end
 
 | 函数 | 说明 |
 |---|---|
-| `app.frontBid()` | 前台 App bundle id → string / nil |
+| `app.frontBid()` | 前台 App bundle id → string（桌面时为 `com.apple.springboard`） |
 | `app.isInstalled(bid)` | 是否安装 → boolean |
 | `app.isRunning(bid)` | 是否正在运行 → boolean |
 | `app.open(bid)` | 打开 App → boolean |

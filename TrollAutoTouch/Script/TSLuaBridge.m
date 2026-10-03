@@ -2027,21 +2027,21 @@ static int l_device_setVolume(lua_State *L) {
 #pragma mark - 应用管理
 
 static int l_app_frontBid(lua_State *L) {
+    // frontBid 恒返回字符串: 三条通路都失败(停在桌面 / 取不到)时返回 com.apple.springboard,
+    // 脚本里可以直接 if bid ~= APP then 比较, 不需要先判 nil。
     NSString *bid = [[TSAppManager shared] frontBid];
-    if (!bid) {
-        // 取不到 = 功能异常, 必须留下痕迹(脚本日志), 但只记一次: 挂机脚本可能
-        // 每秒调用, 重复刷屏会把真正有用的日志顶掉。
+    NSString *diag = [[TSAppManager shared] frontBidDiagnostic];
+    if (diag.length > 0) {
+        // diag 非空 = 这次是按"桌面"兜底返回的。属于异常, 必须留下痕迹(脚本日志),
+        // 但只记一次: 挂机脚本可能每秒调用, 重复刷屏会把真正有用的日志顶掉。
         static BOOL s_frontBidFailLogged = NO;
         if (!s_frontBidFailLogged) {
             s_frontBidFailLogged = YES;
-            NSString *diag = [[TSAppManager shared] frontBidDiagnostic];
             lua_script_log([NSString stringWithFormat:
-                @"[Lua] ⚠ app.frontBid() 取不到前台应用 (%@)",
-                diag.length > 0 ? diag : @"未知原因"]);
+                @"[Lua] ⚠ app.frontBid() 取不到前台应用, 已按桌面返回 %@ (%@)", bid, diag]);
         }
-        lua_pushnil(L);
-        return 1;
     }
+    if (bid.length == 0) { lua_pushnil(L); return 1; }   // 理论不可达, 保险
     lua_pushstring(L, bid.UTF8String);
     return 1;
 }
@@ -2889,8 +2889,9 @@ static int l_ui_open(lua_State *L) {
             NSLog(@"[QQ音乐] ui.open(%@): App 不在前台, 先切回前台(1s)再显示", name);
             prevFrontBid = [[TSAppManager shared] frontBid];
             if (prevFrontBid.length == 0 ||
-                [prevFrontBid isEqualToString:[NSBundle mainBundle].bundleIdentifier]) {
-                prevFrontBid = nil; // 本就在本 App / 获取失败, 无需切回
+                [prevFrontBid isEqualToString:[NSBundle mainBundle].bundleIdentifier] ||
+                [prevFrontBid isEqualToString:TSFrontBidSpringBoard]) {
+                prevFrontBid = nil; // 本就在本 App / 停在桌面(前台取不到), 无需切回
             }
             [[TSAppManager shared] openApp:[NSBundle mainBundle].bundleIdentifier];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
