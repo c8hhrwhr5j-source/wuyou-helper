@@ -183,6 +183,8 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
     _mainBtn.frame = CGRectMake([self _ballX] + (kBallSize - kBallVisSize) / 2,
                                 (kBallSize - kBallVisSize) / 2,
                                 kBallVisSize, kBallVisSize);
+    // 悬浮球做成正圆: 状态圈(边框)沿圆周走, 加粗后一眼就能看出运行/暂停
+    _mainBtn.layer.cornerRadius = kBallVisSize / 2.0;
     // 悬浮球图标: QQ 音乐图标 (替换原白色 "T")
     [self _applyQQMusicIconTo:_mainBtn];
     // 悬浮球带拖拽
@@ -388,19 +390,21 @@ static const CGFloat kExpandedW   = kBallX + kBallSize; // 200
 - (void)_refreshButtons {
     // 注意: 按钮 alpha 完全由展开/收起动画管理, 这里只更新图标与可用状态。
     // 主按钮使用 QQ 音乐图标 (黄底绿色音符), 背景改为白色让图标更清晰。
-    // 状态通过边框颜色表示: 灰色=未运行, 绿色=运行中, 橙色=暂停
+    // 状态通过边框(状态圈)表示: 灰色=未运行, 绿色=运行中, 红色=暂停
+    // 圈宽: 球本体只有 28pt, 2pt 在屏幕上太细看不清, 运行中 4pt / 暂停 5pt(更醒目)。
     _mainBtn.backgroundColor = [UIColor whiteColor];
+    _mainBtn.layer.cornerRadius = kBallVisSize / 2.0;   // 正圆, 状态圈沿圆周走
     if (_scriptRunning && _paused) {
-        // 暂停: systemOrangeColor (255,149,0)
-        _mainBtn.layer.borderWidth = 2.0;
-        _mainBtn.layer.borderColor = [UIColor colorWithRed:1.0 green:149.0/255.0 blue:0.0 alpha:1.0].CGColor;
+        // 暂停: 红色 systemRed (255,59,48) + 最粗 —— 一眼看出"停住了"
+        _mainBtn.layer.borderWidth = 5.0;
+        _mainBtn.layer.borderColor = [UIColor colorWithRed:1.0 green:59.0/255.0 blue:48.0/255.0 alpha:1.0].CGColor;
     } else if (_scriptRunning) {
-        // 运行中: systemGreenColor (52,199,89)
-        _mainBtn.layer.borderWidth = 2.0;
+        // 运行中: systemGreenColor (52,199,89) 加粗
+        _mainBtn.layer.borderWidth = 4.0;
         _mainBtn.layer.borderColor = [UIColor colorWithRed:52.0/255.0 green:199.0/255.0 blue:89.0/255.0 alpha:1.0].CGColor;
     } else {
         // 未运行: 灰色边框
-        _mainBtn.layer.borderWidth = 1.5;
+        _mainBtn.layer.borderWidth = 2.0;
         _mainBtn.layer.borderColor = [UIColor colorWithWhite:0.6 alpha:1.0].CGColor;
     }
     // 暂停/恢复: 脚本未运行时灰色禁用
