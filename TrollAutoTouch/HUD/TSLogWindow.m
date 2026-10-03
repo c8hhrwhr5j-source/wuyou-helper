@@ -21,10 +21,18 @@
 //
 
 #import "TSLogWindow.h"
+#import "../Core/TSLogStore.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #import <unistd.h>
+
+// 诊断日志走 touch.log, 便于"面板看不见"时定位是坐标问题还是托管没注册上
+#define TSLogWindowDiag(fmt, ...) do { \
+    NSString *_m = [NSString stringWithFormat:(fmt), ##__VA_ARGS__]; \
+    NSLog(@"[LogWindow] %@", _m); \
+    [[TSLogStore shared] append:[@"[LogWindow] " stringByAppendingString:_m]]; \
+} while (0)
 
 #pragma mark - 小工具
 
@@ -214,9 +222,52 @@ static UIColor *TSLogColorFromHex(int hex) {
     _window = nil;
 }
 
+#pragma mark 脚本方向 (screen.init)
+
+// 旋转内容层到脚本坐标系: 与 TSHUDHost._applyScriptOrientation / TSLuaBridge
+// tsTransformPoint 严格一致的旋转规则 (竖屏为基准, home右/左 ±90°)。
+// 这样 logWindow.init 传的坐标就是脚本坐标(与 tap/findColor/getScreenSize 同源),
+// 横屏脚本里面板位置与文字方向都跟游戏一致。
+- (void)_applyOrientationOnMain {
+    if (!_window || !_container) return;
+    CGRect winBounds = _window.bounds;
+    CGFloat w = CGRectGetWidth(winBounds);
+    CGFloat h = CGRectGetHeight(winBounds);
+    [UIView performWithoutAnimation:^{
+        switch (_scriptOrientation) {
+            case 1: // home 在右: 顺时针 90°
+                _container.transform = CGAffineTransformMakeRotation(M_PI_2);
+                _container.bounds = CGRectMake(0, 0, h, w);
+                _container.center = CGPointMake(w / 2.0, h / 2.0);
+                break;
+            case 2: // home 在左: 逆时针 90°
+                _container.transform = CGAffineTransformMakeRotation(-M_PI_2);
+                _container.bounds = CGRectMake(0, 0, h, w);
+                _container.center = CGPointMake(w / 2.0, h / 2.0);
+                break;
+            default:
+                _container.transform = CGAffineTransformIdentity;
+                _container.bounds = CGRectMake(0, 0, w, h);
+                _container.center = CGPointMake(w / 2.0, h / 2.0);
+                break;
+        }
+    }];
+    TSLogWindowFlushCA();
+}
+
+- (void)setScriptOrientation:(NSInteger)scriptOrientation {
+    if (scriptOrientation < 0 || scriptOrientation > 2) return;
+    _scriptOrientation = scriptOrientation;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try { [self _applyOrientationOnMain]; } @catch (NSException *e) { }
+    });
+}
+
 - (void)_ensureWindowOnMain {
     if (_window) return;
-    CGRect bounds = [UIScreen mainScreen].bounds;
+    // 用 fixedCoordinateSpace: 恒为竖屏(物理方向)尺寸, 不受设备当前旋转影响,
+    // 与 tsPortraitPointSize() 一致, 保证脚本坐标旋转换算的基准稳定。
+    CGRect bounds = [UIScreen mainScreen].fixedCoordinateSpace.bounds;
     TSLogOverlayWindow *w = [[TSLogOverlayWindow alloc] initWithFrame:bounds];
     w.windowLevel = UIWindowLevelStatusBar + 100;   // 高于一切普通界面
     w.backgroundColor = [UIColor clearColor];
@@ -252,6 +303,8 @@ static UIColor *TSLogColorFromHex(int hex) {
     }
     _window = w;
     _container = container;
+    // 应用脚本坐标系方向 (screen.init 可能先于 logWindow.init 调用)
+    [self _applyOrientationOnMain];
     TSLogWindowFlushCA();
 }
 
@@ -283,6 +336,10 @@ static UIColor *TSLogColorFromHex(int hex) {
             wid = _nextId;
             _panels[@(wid)] = panel;
             TSLogWindowFlushCA();
+            TSLogWindowDiag(@"窗口 #%ld 已创建 frame=(%.0f,%.0f,%.0f,%.0f) 屏幕=%.0fx%.0f 方向=%ld",
+                            (long)wid, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+                            _container.bounds.size.width, _container.bounds.size.height,
+                            (long)_scriptOrientation);
         } @catch (NSException *e) {
             wid = 0;
         }
@@ -367,7 +424,12 @@ static UIColor *TSLogColorFromHex(int hex) {
                              "SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
             if (h) sbsClass = NSClassFromString(@"SBSAccessibilityWindowHostingController");
         }
-        if (!sbsClass) { _sbsFailed = YES; return; }
+        if (!sbsClass) {
+            _sbsFailed = YES;
+            TSLogWindowDiag(@"⚠ 系统级托管类不可用 (SBSAccessibilityWindowHostingController 未找到), "
+                            @"日志窗口只能在本 App 前台时可见");
+            return;
+        }
         if (!_sbsHostingCtrl) _sbsHostingCtrl = [[sbsClass alloc] init];
         SEL regSel = NSSelectorFromString(@"registerWindowWithContextID:atLevel:");
         if (![_sbsHostingCtrl respondsToSelector:regSel]) { _sbsFailed = YES; return; }
@@ -381,6 +443,7 @@ static UIColor *TSLogColorFromHex(int hex) {
         }
         _registeredCtxId = ctxId;
         TSLogWindowFlushCA();
+        TSLogWindowDiag(@"系统级托管注册成功 (contextId=%u, level=10000) —— 退到后台/其它 App 上仍可见", ctxId);
     } @catch (NSException *e) {
         _sbsFailed = YES;
     }
@@ -467,6 +530,7 @@ static UIColor *TSLogColorFromHex(int hex) {
             TSLogWindowFlushCA();
             return ctxId;
         }
+        TSLogWindowDiag(@"⚠ CAContext 创建失败 (contextId=0), 无法跨应用显示日志窗口");
     } @catch (NSException *e) {
         _sbsCAContext = nil;
     }

@@ -1956,7 +1956,19 @@ lw:release()      -- 释放掉
 | `logWindow.releaseAll()` | 一次关闭所有日志窗口 |
 
 参数默认值：宽 `500`、高 `35`、背景透明度 `0.5`、背景色 `0x000000`、字体色 `0x00ff00`、字体尺寸 `12`。
-颜色一律是 `0xRRGGBB` 整数。坐标/尺寸单位是**屏幕逻辑点**（与 `getScreenSize()` / `tap` 同一坐标系）。
+颜色一律是 `0xRRGGBB` 整数。
+
+**坐标系（重要）**：第 3、4 个参数是**宽、高**（不是右下角 x2,y2）；x,y,w,h 全部是**脚本坐标系物理像素**，
+与 `tap` / `findColor` / `getScreenSize()` 完全同源，并**随 `screen.init(方向)` 自动旋转** ——
+`screen.init(1)` 横屏脚本里传入的就是横屏坐标，面板位置与文字方向都跟游戏一致。
+
+```lua
+local w, h = getScreenSize()          -- 脚本坐标系下的屏幕像素尺寸
+local lw = logWindow.init(0, 0, w, 120, 0.5, 0x000000, 0x00ff00, 14)
+```
+
+面板被排到屏幕外会**看不见**：此时 `debug.log` 会记一行
+`⚠ logWindow.init 坐标超出屏幕: 传入 (...), 屏幕(脚本坐标系) WxH → 已夹回 (...)`，并自动夹回屏幕内。
 
 #### 隐藏模式 `setHideWindowMode`
 

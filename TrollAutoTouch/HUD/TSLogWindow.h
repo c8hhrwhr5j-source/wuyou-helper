@@ -30,6 +30,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 默认 NO(面板会被截进画面对找图找色产生干扰)。
 @property (nonatomic, assign) BOOL hideWindowMode;
 
+/// 脚本坐标系方向 (对应 Lua screen.init): 0=home在下(竖屏) 1=home在右 2=home在左。
+/// 面板坐标按脚本坐标系解释, 内容层随之旋转 —— 横屏脚本里日志也是横着读的,
+/// 与 tap/findColor/getScreenSize 完全同源。线程安全。
+@property (nonatomic, assign) NSInteger scriptOrientation;
+
 /// 创建一个日志窗口并立即显示。alpha=背景透明度(0.1~1.0), 颜色为 0xRRGGBB。
 /// 返回窗口 id (<=0 = 创建失败)。
 - (NSInteger)openAt:(CGPoint)origin

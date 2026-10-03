@@ -631,6 +631,8 @@ static int l_screen_init(lua_State *L) {
              names[dir], names[tsCurrentOrientation()]]);
     // 联动 HUD: toast/弹窗内容层旋转到与脚本坐标系一致 (横屏游戏时横屏显示)
     [[TSHUDHost shared] setScriptOrientation:dir];
+    // 联动日志窗口: logWindow 的坐标/文字方向同样按脚本坐标系
+    [TSLogWindowManager shared].scriptOrientation = dir;
     return 0;
 }
 
@@ -2962,6 +2964,8 @@ static void ts_logwindow_create_meta(lua_State *L) {
 }
 
 /// logWindow.init(x, y [, w, h, alpha, bgColor, fontColor, fontSize]) → 日志窗口对象
+/// 坐标为**脚本坐标系物理像素**(与 tap/findColor/getScreenSize 同源),
+/// 并随 screen.init 方向旋转; 内部除以 scale 转成 UIKit 逻辑点后布局。
 static int l_logWindow_init(lua_State *L) {
     CGFloat x     = (CGFloat)luaL_optnumber(L, 1, 0);
     CGFloat y     = (CGFloat)luaL_optnumber(L, 2, 0);
@@ -2972,8 +2976,30 @@ static int l_logWindow_init(lua_State *L) {
     int     fg    = (int)luaL_optinteger(L, 7, 0x00ff00);
     CGFloat fs    = (CGFloat)luaL_optnumber(L, 8, 12);
 
-    NSInteger wid = [[TSLogWindowManager shared] openAt:CGPointMake(x, y)
-                                                   size:CGSizeMake(w, h)
+    // 脚本坐标系下的屏幕像素尺寸 (screen.init 后宽高交换), 用于越界检查
+    CGSize scriptPx = screenPixelSize();
+    if (s_scriptOrientation != 0) scriptPx = CGSizeMake(scriptPx.height, scriptPx.width);
+    CGRect rPx = CGRectMake(x, y, w, h);
+    if (CGRectGetMaxX(rPx) > scriptPx.width + 1.0 ||
+        CGRectGetMaxY(rPx) > scriptPx.height + 1.0 ||
+        rPx.origin.x < -1.0 || rPx.origin.y < -1.0) {
+        // 越界是"面板看不见"最常见的原因 —— 直接夹回屏幕内并明确告诉脚本,
+        // 免得面板被排到屏幕外还毫无提示。
+        CGFloat cx = MIN(MAX(rPx.origin.x, 0.0), MAX(0.0, scriptPx.width - 20.0));
+        CGFloat cy = MIN(MAX(rPx.origin.y, 0.0), MAX(0.0, scriptPx.height - 20.0));
+        CGFloat cw = MIN(rPx.size.width,  MAX(20.0, scriptPx.width  - cx));
+        CGFloat ch = MIN(rPx.size.height, MAX(20.0, scriptPx.height - cy));
+        lua_script_log([NSString stringWithFormat:
+            @"[Lua] ⚠ logWindow.init 坐标超出屏幕: 传入 (%.0f,%.0f,%.0f,%.0f), "
+            @"屏幕(脚本坐标系) %.0fx%.0f → 已夹回 (%.0f,%.0f,%.0f,%.0f)。"
+            @"注意参数是 x,y,宽,高(不是右下角坐标)",
+            x, y, w, h, scriptPx.width, scriptPx.height, cx, cy, cw, ch]);
+        x = cx; y = cy; w = cw; h = ch;
+    }
+
+    CGFloat scale = touchScale();   // 脚本用物理像素, 布局用逻辑点
+    NSInteger wid = [[TSLogWindowManager shared] openAt:CGPointMake(x / scale, y / scale)
+                                                   size:CGSizeMake(w / scale, h / scale)
                                                   alpha:alpha
                                                   bgHex:bg
                                                   fgHex:fg
