@@ -21,7 +21,7 @@
 //
 
 #import "TSLogWindow.h"
-#import "../Core/TSLogStore.h"
+#import "../Common/TSLogStore.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
