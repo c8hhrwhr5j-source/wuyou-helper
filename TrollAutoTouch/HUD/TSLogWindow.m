@@ -73,6 +73,7 @@ static UIColor *TSLogColorFromHex(int hex) {
 @property (nonatomic, strong) NSMutableAttributedString *content;
 @property (nonatomic, strong) UIColor *textColor;
 @property (nonatomic, assign) CGFloat fontSize;
+@property (nonatomic, assign) BOOL singleLine;   // YES: 只显示最新一条, 每次写入整体替换
 @end
 
 @implementation TSLogPanel
@@ -81,7 +82,8 @@ static UIColor *TSLogColorFromHex(int hex) {
                         alpha:(CGFloat)alpha
                         bgHex:(int)bgHex
                         fgHex:(int)fgHex
-                     fontSize:(CGFloat)size {
+                     fontSize:(CGFloat)size
+                  singleLine:(BOOL)singleLine {
     self = [super initWithFrame:frame];
     if (self) {
         CGFloat a = MIN(1.0f, MAX(0.0f, (float)alpha));
@@ -93,6 +95,7 @@ static UIColor *TSLogColorFromHex(int hex) {
         _textColor = TSLogColorFromHex(fgHex);
         _fontSize = size > 0 ? size : 12.0;
         _content = [[NSMutableAttributedString alloc] init];
+        _singleLine = singleLine;
 
         UITextView *tv = [[UITextView alloc] initWithFrame:self.bounds];
         tv.backgroundColor = [UIColor clearColor];
@@ -103,6 +106,11 @@ static UIColor *TSLogColorFromHex(int hex) {
         tv.userInteractionEnabled = NO;    // 不可滚动/选择, 纯展示
         tv.textContainerInset = UIEdgeInsetsMake(2, 4, 2, 4);
         tv.textContainer.lineBreakMode = NSLineBreakByCharWrapping;
+        if (_singleLine) {
+            // 单行模式: 超宽尾部截断(显示"..."), 不换行不滚动, 只露最新一条
+            tv.textContainer.lineBreakMode = NSLineBreakByTruncatingTail;
+            tv.scrollEnabled = NO;
+        }
         tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         _textView = tv;
         [self addSubview:tv];
@@ -118,6 +126,14 @@ static UIColor *TSLogColorFromHex(int hex) {
                                                                attributes:@{NSForegroundColorAttributeName: color,
                                                                             NSFontAttributeName: font}];
     if (!attr) return;
+
+    if (self.singleLine) {
+        // 单行模式: 直接替换为最新一条文字, 不追加历史
+        _content = [[NSMutableAttributedString alloc] initWithAttributedString:attr];
+        _textView.attributedText = _content;
+        TSLogWindowFlushCA();
+        return;
+    }
 
     if (_content.length > 0) {
         [_content appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
@@ -315,7 +331,8 @@ static UIColor *TSLogColorFromHex(int hex) {
               alpha:(CGFloat)alpha
               bgHex:(int)bgHex
               fgHex:(int)fgHex
-           fontSize:(CGFloat)fontSize {
+           fontSize:(CGFloat)fontSize
+         singleLine:(BOOL)singleLine {
     __block NSInteger wid = 0;
     [self _onMainSync:^{
         @try {
@@ -329,17 +346,19 @@ static UIColor *TSLogColorFromHex(int hex) {
                                                             alpha:(alpha > 0 ? alpha : 0.5)
                                                             bgHex:bgHex
                                                             fgHex:fgHex
-                                                         fontSize:fontSize];
+                                                         fontSize:fontSize
+                                                      singleLine:singleLine];
             if (!panel) return;
             [_container addSubview:panel];
             _nextId += 1;
             wid = _nextId;
             _panels[@(wid)] = panel;
             TSLogWindowFlushCA();
-            TSLogWindowDiag(@"窗口 #%ld 已创建 frame=(%.0f,%.0f,%.0f,%.0f) 屏幕=%.0fx%.0f 方向=%ld",
+            TSLogWindowDiag(@"窗口 #%ld 已创建 frame=(%.0f,%.0f,%.0f,%.0f) 屏幕=%.0fx%.0f 方向=%ld 模式=%@",
                             (long)wid, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
                             _container.bounds.size.width, _container.bounds.size.height,
-                            (long)_scriptOrientation);
+                            (long)_scriptOrientation,
+                            singleLine ? @"单行" : @"多行");
         } @catch (NSException *e) {
             wid = 0;
         }

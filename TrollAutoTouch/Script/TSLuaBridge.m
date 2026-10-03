@@ -2943,7 +2943,7 @@ static int l_ui_open(lua_State *L) {
 #pragma mark - 浮动日志窗口 (logWindow)
 
 // 对齐原版 TrollAutoScript 的 logWindow 模块:
-//   local lw = logWindow.init(x, y [, 宽, 高, 背景透明度, 背景色, 字体色, 字体尺寸])
+//   local lw = logWindow.init(x, y [, 宽, 高, 背景透明度, 背景色, 字体色, 字体尺寸, 单行模式])
 //   lw:addLog("文本" [, 文字颜色, 文字尺寸])
 //   lw:release()
 //   logWindow.setHideWindowMode(true)   -- 肉眼可见, 不进找图找色画面
@@ -2963,9 +2963,11 @@ static void ts_logwindow_create_meta(lua_State *L) {
     lua_pop(L, 1);
 }
 
-/// logWindow.init(x, y [, w, h, alpha, bgColor, fontColor, fontSize]) → 日志窗口对象
+/// logWindow.init(x, y [, w, h, alpha, bgColor, fontColor, fontSize, singleLine]) → 日志窗口对象
 /// 坐标为**脚本坐标系物理像素**(与 tap/findColor/getScreenSize 同源),
 /// 并随 screen.init 方向旋转; 内部除以 scale 转成 UIKit 逻辑点后布局。
+/// 第 9 个可选参数 singleLine=true 时为单行模式: addLog 每次只显示最新一条文字,
+/// 不追加多行历史 (状态栏式提示); 默认 false = 多行追加滚动。
 static int l_logWindow_init(lua_State *L) {
     CGFloat x     = (CGFloat)luaL_optnumber(L, 1, 0);
     CGFloat y     = (CGFloat)luaL_optnumber(L, 2, 0);
@@ -2975,6 +2977,7 @@ static int l_logWindow_init(lua_State *L) {
     int     bg    = (int)luaL_optinteger(L, 6, 0x000000);
     int     fg    = (int)luaL_optinteger(L, 7, 0x00ff00);
     CGFloat fs    = (CGFloat)luaL_optnumber(L, 8, 12);
+    BOOL singleLine = lua_isnoneornil(L, 9) ? NO : (lua_toboolean(L, 9) ? YES : NO);
 
     // 脚本坐标系下的屏幕像素尺寸 (screen.init 后宽高交换), 用于越界检查
     CGSize scriptPx = screenPixelSize();
@@ -3003,7 +3006,8 @@ static int l_logWindow_init(lua_State *L) {
                                                   alpha:alpha
                                                   bgHex:bg
                                                   fgHex:fg
-                                               fontSize:fs];
+                                               fontSize:fs
+                                             singleLine:singleLine];
     if (wid <= 0) {
         lua_pushnil(L);
         return 1;

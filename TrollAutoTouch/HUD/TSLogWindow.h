@@ -36,13 +36,16 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) NSInteger scriptOrientation;
 
 /// 创建一个日志窗口并立即显示。alpha=背景透明度(0.1~1.0), 颜色为 0xRRGGBB。
+/// singleLine=YES 时窗口为"单行模式": 每次 appendText 直接替换为最新一条文字,
+/// 不追加、不滚动, 适合做状态栏式的单行提示。
 /// 返回窗口 id (<=0 = 创建失败)。
 - (NSInteger)openAt:(CGPoint)origin
                size:(CGSize)size
               alpha:(CGFloat)alpha
               bgHex:(int)bgHex
               fgHex:(int)fgHex
-           fontSize:(CGFloat)fontSize;
+           fontSize:(CGFloat)fontSize
+         singleLine:(BOOL)singleLine;
 
 /// 追加一行日志。hex = 0xRRGGBB; size <= 0 时沿用窗口的字体尺寸。
 - (void)appendText:(NSString *)text hex:(int)hex size:(CGFloat)size windowId:(NSInteger)wid;
