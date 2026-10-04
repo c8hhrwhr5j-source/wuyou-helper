@@ -94,6 +94,14 @@ static volatile BOOL _pauseRequested = NO;
 // encryptedRunDir:     存放图片/音频等非源码资源的一次性临时目录, 运行结束整体删除。
 @property (nonatomic, copy, nullable) NSDictionary<NSString *, NSData *> *encryptedLuaSources;
 @property (nonatomic, copy, nullable) NSString *encryptedRunDir;
+// ── restartScript(): 重启上下文(仅在 _luaQueue 上读写, stop() 会在主线程清空)──
+// requestRestartFromLuaState 在脚本内记录重启目标; runString/runFile/runProject 的
+// @finally 释放运行位后 _handlePendingRestart 用同一目标重新启动。
+@property (nonatomic, copy, nullable) NSString *pendingRestartTarget;   // 项目目录 / .lua / .tas 包
+@property (nonatomic, copy, nullable) NSString *pendingRestartCode;    // 字符串代码(runString)的重启源
+@property (nonatomic, copy, nullable) NSString *currentRunCode;        // 本次字符串执行的代码副本
+- (void)requestRestartFromLuaState:(lua_State *)L;
+- (void)_handlePendingRestart;
 @end
 
 // ── 加密项目虚拟源码表: 按相对路径取数据, iOS 文件系统大小写不敏感, 先精确后忽略大小写 ──
@@ -3062,6 +3070,19 @@ static int l_logwin_release(lua_State *L) {
     return 0;
 }
 
+/// restartScript() —— 重新启动当前脚本。
+/// 语义对齐原版: 调用后**后面的代码不会执行**, 脚本从头重新运行。
+/// 实现: 记录重启目标(加密 .tas 包 / 项目目录 / .lua 文件 / 字符串代码) →
+///       抛错中止当前执行 → runXxx 的 @finally 释放运行位后自动重新启动同一目标。
+static int l_restartScript(lua_State *L) {
+    @autoreleasepool {
+        [[TSLuaBridge shared] requestRestartFromLuaState:L];
+    }
+    // 与音量键"停止"同机制: 通过 lua_pcall 的 longjmp 立即退出当前脚本
+    luaL_error(L, "restartScript: 脚本重启");
+    return 0;   // 不会到达(luaL_error 不返回), 仅消除编译告警
+}
+
 #pragma mark - 注册
 
 static void lua_register_all(lua_State *L) {
@@ -3098,6 +3119,7 @@ static void lua_register_all(lua_State *L) {
         {"touchUseSenderIDAt", l_touch_useSenderIDAt},
         {"touchWatch",         l_touch_watch},
         {"findText",    l_screen_findText},
+        {"restartScript", l_restartScript},
         {NULL, NULL}
     };
     luaL_setfuncs(L, globals, 0);
@@ -3376,6 +3398,65 @@ static BOOL s_scriptSlotBusy = NO;
     }
 }
 
+/// restartScript() 的 Lua 入口: 决定重启目标并记录。在脚本执行线程(_luaQueue)上调用。
+/// 目标优先级: 整包加密项目(.tas 原包, 重新解密运行) > 普通项目目录(_SCRIPT_DIR_)
+///           > 单脚本文件(_SCRIPT_PATH_) > 字符串代码(runString 的代码副本)。
+- (void)requestRestartFromLuaState:(lua_State *)L {
+    NSString *target = nil;
+    if (self.activeEncryptedPackagePath.length > 0) {
+        // 加密项目: _SCRIPT_DIR_ 指向一次性临时目录(运行结束即删), 必须用磁盘上的 .tas 原包
+        target = self.activeEncryptedPackagePath;
+    } else {
+        lua_getglobal(L, "_SCRIPT_DIR_");
+        const char *dirC = lua_tostring(L, -1);
+        if (dirC && [[NSFileManager defaultManager] fileExistsAtPath:@(dirC)]) {
+            target = @(dirC);
+        }
+        lua_pop(L, 1);
+    }
+    if (target.length == 0) {
+        lua_getglobal(L, "_SCRIPT_PATH_");
+        const char *pathC = lua_tostring(L, -1);
+        if (pathC && [[NSFileManager defaultManager] fileExistsAtPath:@(pathC)]) {
+            target = @(pathC);
+        }
+        lua_pop(L, 1);
+    }
+    if (target.length > 0) {
+        self.pendingRestartTarget = target;
+        self.pendingRestartCode = nil;
+    } else {
+        // runString(网页远程代码等)没有磁盘目标: 用代码副本重启
+        self.pendingRestartTarget = nil;
+        self.pendingRestartCode = self.currentRunCode;
+    }
+    // 与"停止"同路径置位, 让脚本遗留的异步任务(http 回调等)一并中止
+    _stopRequested = YES;
+}
+
+/// 释放运行位后由 runString/runFile/runProject 的 @finally 调用: 重启同一脚本。
+/// 此时运行位空闲, runXxx 会重新抢占并派发到串行队列 —— 新一次执行排在当前块之后。
+- (void)_handlePendingRestart {
+    NSString *target = self.pendingRestartTarget;
+    NSString *code = self.pendingRestartCode;
+    self.pendingRestartTarget = nil;
+    self.pendingRestartCode = nil;
+    if (target.length == 0 && code.length == 0) return;
+    lua_log([NSString stringWithFormat:@"[Lua] restartScript: 正在重新启动 %@",
+             target.length > 0 ? target.lastPathComponent : @"(字符串代码)"]);
+    if (code.length > 0) {
+        [self runString:code];
+        return;
+    }
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:target isDirectory:&isDir]) {
+        lua_log([NSString stringWithFormat:@"[Lua] restartScript: 重启目标已不存在: %@", target]);
+        return;
+    }
+    if (isDir) [self runProject:target];
+    else       [self runFile:target];
+}
+
 /// 给 UI 的预检(2026-09-11): 若运行位已被**别的**脚本占用, 提示用户并返回 YES;
 /// 占用者就是 path 本身时返回 YES 但**不提示**(脚本内 ui.open() 弹出的设置页点"开始运行"
 /// 属于同一脚本的设置续跑流程, 设置已保存, 不该提示"请先停止")。
@@ -3418,6 +3499,7 @@ static BOOL s_scriptSlotBusy = NO;
             [self _execute:code filePath:nil];
         } @finally {
             [self _releaseScriptSlot];
+            [self _handlePendingRestart];
         }
     });
 }
@@ -3454,6 +3536,7 @@ static BOOL s_scriptSlotBusy = NO;
             [self _execute:code filePath:path];
         } @finally {
             [self _releaseScriptSlot];
+            [self _handlePendingRestart];
         }
     });
 }
@@ -3489,6 +3572,7 @@ static BOOL s_scriptSlotBusy = NO;
             [self _executeProject:code entryFile:entryFile projectDir:dirPath];
         } @finally {
             [self _releaseScriptSlot];
+            [self _handlePendingRestart];
         }
     });
 }
@@ -3620,6 +3704,9 @@ static BOOL s_scriptSlotBusy = NO;
     // 否则若脚本是死循环(不检查 _stopRequested), 主线程会永远卡在锁上, 整个 App 无响应。
     _stopRequested = YES;
     self.isPaused = NO;
+    // 用户显式停止: 取消尚未执行的 restartScript() 重启请求(用户停止优先于重启)
+    self.pendingRestartTarget = nil;
+    self.pendingRestartCode = nil;
     // 立即补发所有未抬起的触摸，避免脚本被中断后留下"幽灵手指"导致屏幕点击无响应
     [[TSHIDEventTouch shared] releaseAllTouches];
     dispatch_async(_luaQueue, ^{
@@ -3732,6 +3819,8 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     self.isPaused = NO;
     self.runningPath = path;
     self.isRunning = YES;
+    // restartScript() 兜底: 字符串代码(无磁盘路径)重启时用它作为重启源
+    self.currentRunCode = [code copy];
     // 明确标记脚本真正进入执行阶段, 便于远程启动排查
     lua_log([NSString stringWithFormat:@"[Lua] 开始运行: %@",
              path ? path.lastPathComponent : @"(字符串代码)"]);
@@ -3807,7 +3896,12 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     if (pcallRet != LUA_OK) {
         size_t errLen = 0;
         const char *err = lua_tolstring(L, -1, &errLen);
-        lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %@", luaToNSString(err, errLen)]);
+        if (self.pendingRestartTarget.length > 0 || self.pendingRestartCode.length > 0) {
+            // restartScript() 触发的中止不算运行错误
+            lua_log(@"[Lua] restartScript: 当前执行已中止");
+        } else {
+            lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %@", luaToNSString(err, errLen)]);
+        }
         lua_pop(L, 1);
     }
     lua_close(L);
@@ -3822,6 +3916,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     self.isPaused = NO;
     self.runningPath = nil;
     self.isRunning = NO;
+    self.currentRunCode = nil;
     // 脚本结束, 停止后台静音保活 (App 回到正常后台生命周期)
     [[TSAudioKeepAlive shared] stop];
     // 脚本结束, 自动关闭 App 内音量键菜单(若仍在显示)
@@ -3929,7 +4024,12 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     if (pcallRet != LUA_OK) {
         size_t errLen = 0;
         const char *err = lua_tolstring(L, -1, &errLen);
-        lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %@", luaToNSString(err, errLen)]);
+        if (self.pendingRestartTarget.length > 0 || self.pendingRestartCode.length > 0) {
+            // restartScript() 触发的中止不算运行错误
+            lua_log(@"[Lua] restartScript: 当前执行已中止");
+        } else {
+            lua_log([NSString stringWithFormat:@"[Lua] 运行错误: %@", luaToNSString(err, errLen)]);
+        }
         lua_pop(L, 1);
     }
     lua_close(L);
