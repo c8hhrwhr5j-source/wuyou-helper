@@ -542,7 +542,24 @@ static const NSTimeInterval kAutoCollapseDelay = 8.0;
     CGSize want = _landscape ? CGSizeMake(kBallSize, kExpandedW) : CGSizeMake(kExpandedW, kBallSize);
     if (!CGSizeEqualToSize(self.frame.size, want)) {
         CGRect f = self.frame;
+        // 收起窗口(44×44)内球居中: 先记球心, 展开后按球心重定位窗口,
+        // 球的屏幕位置保持不变 (对齐 Android HudBall.expand 的球心算法)。
+        // 若只 clamp 不重定位: 竖屏球心窗口内偏移从 22 变为 _ballX+22 (=178),
+        // 球被 setBallPoint 放在屏幕中部时展开必向贴边方向跳 156pt;
+        // 只有球正好贴边时 clamp 数值巧合抵消 (331-175=156) 才不跳。
+        BOOL fromCollapsed44 = (f.size.width <= kBallSize + 0.5 &&
+                                f.size.height <= kBallSize + 0.5);
+        CGFloat bcx = f.origin.x + kBallSize / 2.0;
+        CGFloat bcy = f.origin.y + kBallSize / 2.0;
         f.size = want;
+        if (fromCollapsed44) {
+            // 展开窗口内球心偏移: 竖屏 (_ballX + kBallSize/2, kBallSize/2);
+            // 横屏 (kBallSize/2, _ballY + kBallSize/2)。
+            CGFloat offX = _landscape ? (kBallSize / 2.0) : ([self _ballX] + kBallSize / 2.0);
+            CGFloat offY = _landscape ? ([self _ballY] + kBallSize / 2.0) : (kBallSize / 2.0);
+            f.origin.x = bcx - offX;
+            f.origin.y = bcy - offY;
+        }
         // 展开后窗口尺寸变大, 必须重新 clamp 位置 (竖屏基准坐标)。
         // 收起贴边时窗口 44×44 (横屏贴右 y=623 / 竖屏贴右 x=331), 展开后若位置
         // 不变, 窗口会超出屏幕 (横屏 623+200=823 > 667), 按钮全排到屏幕外只露叉号。
