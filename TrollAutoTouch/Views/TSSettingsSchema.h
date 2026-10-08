@@ -60,6 +60,9 @@ typedef NS_ENUM(NSInteger, TSSettingsDateMode) {
 
 // ── segmented / select / multi ──
 @property (nonatomic, copy, nullable) NSArray<NSString *> *options;
+// multi 行的候选项 (与 options 区分: segmented 用 options, multi 用 multiOptions,
+// 避免 segmented 行被误用 multi 解释器)
+@property (nonatomic, copy, nullable) NSArray<NSString *> *multiOptions;
 
 // ── text / number ──
 @property (nonatomic, copy, nullable) NSString *keyboardType; // "default"/"url"/"email"/"number"/"decimal"
