@@ -2330,6 +2330,313 @@ ui.openForm("myScript", {
 | 完全不想写 HTML | UIKit 原生（schema 表声明） |
 | 已有 HTML 不想改 | HTML（原样保留） |
 
+### 14.7.7 UIKit 原生设置页：全功能完整示例
+
+下面是一个**真实可运行**的完整示例，演示 14 种行类型 + 依赖显示 + 校验 + action 回调 + 多 section + 动态默认值。把它原样写到 `/var/mobile/touch/lua/autoFarm/schema.lua`，主脚本里 `ui.open("autoFarm")` 即可弹出。
+
+#### 文件结构
+
+```
+/var/mobile/touch/lua/
+├── autoFarm.lua              ← 主脚本
+├── autoFarm.settings.json    ← 自动维护 (点保存时写入)
+└── ui/
+    └── autoFarm/
+        └── schema.lua        ← UIKit 原生设置 schema (本示例文件)
+```
+
+#### schema.lua 完整内容
+
+```lua
+-- ============================================================================
+-- /var/mobile/touch/lua/ui/autoFarm/schema.lua
+--
+-- UIKit 原生设置 UI 完整 schema 演示。
+-- 14 种行类型全覆盖: switch/stepper/slider/segmented/select/text/textLong/
+--                   number/date/duration/color/multi/action/info
+-- 高级特性: 依赖显示 (visibleWhen) / 校验 (validator) / action 回调 (onTap)
+--
+-- 文件名约定: ui/<脚本主名>/schema.lua, 引擎 ui.open("autoFarm") 自动加载。
+-- 调试运行后, 引擎把每个 row 的当前值写入:
+--   /var/mobile/touch/lua/autoFarm.settings.json
+-- 主脚本用全局 settings 表读取, 无需关心存储路径。
+-- ============================================================================
+
+-- ── 工具函数 (本地可见, 供 onTap 回调和 options 动态计算使用) ──
+local function toBool(v)   return v == true or v == "true" or v == 1 end
+local function clamp(v, lo, hi)
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
+end
+
+-- 模式对应的目标列表 (动态 options, 也可以写死数组)
+local function monsterOptions()
+    return {"史莱姆", "哥布林", "狼", "蝙蝠", "骷髅兵", "蜘蛛"}
+end
+
+-- 难度对应的可执行时间窗 (默认值用动态计算, 体现 schema 默认值可以是表达式)
+local function difficultyDefaults(diff)
+    if diff == "简单" then return 5
+    elseif diff == "困难" then return 30
+    else return 15 end
+end
+
+return {
+    title = "自动挂机 v2.3 设置",
+
+    sections = {
+
+        -- ═══════════════════════════════════════════════════════════════════
+        -- 第 1 组: 基础 (所有用户都会改的)
+        -- ═══════════════════════════════════════════════════════════════════
+        {
+            title = "基础",
+            footer = "通用选项, 修改后点底部"保存运行"",
+            rows = {
+
+                -- switch: 布尔开关
+                {type="switch",   key="autoStart",
+                 label="启动后立即运行", default=true},
+
+                -- stepper: 整数步进 (有 min/max/step, 默认步长 1)
+                {type="stepper",  key="retryCount",
+                 label="失败重试次数", min=0, max=10, default=3},
+
+                -- slider: 连续值 (format 控制显示格式, showValue 决定右侧是否显示当前值)
+                {type="slider",   key="speed",
+                 label="运行速度", min=0.5, max=3.0, step=0.1,
+                 default=1.0, format="%.1fx", showValue=true},
+
+                -- segmented: 2~5 项分段 (超过 5 项会被截断, 用 select 替代)
+                {type="segmented",key="mode",
+                 label="战斗模式",
+                 options={"刷图", "挂机", "扫荡", "采集"},
+                 default="刷图"},
+
+                -- select: 单选列表 (点击进入子表)
+                {type="select",   key="role",
+                 label="角色",
+                 options={"战士", "法师", "道士", "弓箭手"},
+                 default="战士"},
+            },
+        },
+
+        -- ═══════════════════════════════════════════════════════════════════
+        -- 第 2 组: 战斗 (本脚本核心逻辑)
+        -- ═══════════════════════════════════════════════════════════════════
+        {
+            title = "战斗",
+            footer = "战斗策略相关配置, 找色/坐标会缓存到内存, 改后建议重启脚本",
+            rows = {
+
+                -- color: 取色器 (iOS 14+ UIColorWell), 值是 "#RRGGBB" 字符串
+                {type="color",    key="targetColor",
+                 label="目标颜色 (血条)", default="#FF3344"},
+
+                -- multi: 多选列表 (值是 string 数组)
+                {type="multi",    key="targets",
+                 label="目标怪物",
+                 options=monsterOptions(),   -- 动态 options
+                 default={"史莱姆", "哥布林"}},
+
+                -- number: 数字输入 (走 numberPad 键盘, 值是 number)
+                {type="number",   key="searchRadius",
+                 label="搜索半径 (像素)", min=10, max=500,
+                 default=80, step=10, keyboard="number"},
+
+                -- text: 单行文本 (placeholder + keyboard 提示)
+                {type="text",     key="webhook",
+                 label="通知 Webhook",
+                 placeholder="https://oapi.dingtalk.com/robot/send?access_token=...",
+                 keyboard="url",
+                 validator="url",
+                 validatorMessage="Webhook 必须是 http(s):// 开头"},
+
+                -- textLong: 多行文本 (UITextView, 用于粘贴批量内容)
+                {type="textLong", key="whitelist",
+                 label="白名单账号 (一行一个)",
+                 placeholder="账号1\n账号2\n...",
+                 default=""},
+
+                -- duration: 时长 (UIDatePicker.countDownTimer, 值是秒)
+                {type="duration", key="cooldownSec",
+                 label="技能冷却", min=1, max=600, default=10, unit="秒"},
+
+                -- action: 按钮, 触发 onTap 函数 (参数是当前 settings 字典)
+                {type="action",   key="testFindColor",
+                 label="测试找色 (立即验证 targetColor)",
+                 onTap=function(s)
+                    -- s.targetColor 是当前选色 (如 "#FF3344")
+                    -- 这里可调引擎找色 API 做即时验证, 例如:
+                    --   local x, y = findColor({...}, s.targetColor)
+                    --   sys.toast(x and ("找到: "..x..","..y) or "未找到")
+                    sys.toast("找色测试已执行, 目标颜色=" .. tostring(s.targetColor))
+                 end},
+            },
+        },
+
+        -- ═══════════════════════════════════════════════════════════════════
+        -- 第 3 组: 定时 (用 segmented 选择难度, 再联动显示对应时长)
+        -- ═══════════════════════════════════════════════════════════════════
+        {
+            title = "定时",
+            footer = "定时启动, 选完难度后再调时间窗",
+            rows = {
+
+                -- segmented 难度
+                {type="segmented",key="difficulty",
+                 label="副本难度",
+                 options={"简单", "普通", "困难"},
+                 default="普通"},
+
+                -- duration 默认值用 difficulty 计算 (值是数字, 表示秒)
+                {type="duration", key="dungeonTimeLimit",
+                 label="副本时间限制",
+                 min=60, max=3600, default=difficultyDefaults("普通"),
+                 unit="秒",
+                 visibleWhen="difficulty", visibleWhenValue="困难",
+                 placeholder="困难模式建议 30 分钟以上"},
+
+                -- date: 日期+时间 (Unix 秒, mode 控制精度)
+                {type="date",     key="scheduleAt",
+                 label="下次定时启动", mode="datetime",
+                 default=os.time() + 3600},   -- 默认 1 小时后
+
+                -- info: 纯文字, 不写 settings
+                {type="info",     text="提示: 定时启动会在 App 后台时通过通知唤醒, "
+                                      .."请保持 TrollAutoTouch 通知权限开启"},
+            },
+        },
+
+        -- ═══════════════════════════════════════════════════════════════════
+        -- 第 4 组: 高级 (默认折叠感, 通过依赖显示"调试模式"开启后才出现)
+        -- ═══════════════════════════════════════════════════════════════════
+        {
+            title = "高级",
+            footer = "调试用, 默认隐藏, 开启"调试模式"后显示",
+            rows = {
+
+                -- 开关决定下面 3 行是否可见
+                {type="switch",   key="debugMode",
+                 label="调试模式", default=false},
+
+                {type="slider",   key="logLevel",
+                 label="日志详细度", min=1, max=5, step=1, default=3,
+                 format="Lv %d", showValue=true,
+                 visibleWhen="debugMode", visibleWhenValue=true},
+
+                {type="text",     key="logFilter",
+                 label="日志关键字过滤",
+                 placeholder="留空不过滤",
+                 default="",
+                 visibleWhen="debugMode", visibleWhenValue=true},
+
+                {type="action",   key="dumpCurrentState",
+                 label="导出当前状态到日志",
+                 visibleWhen="debugMode", visibleWhenValue=true,
+                 onTap=function(s)
+                    -- 把当前所有设置导出到日志, 方便用户复现问题
+                    logStr("=== autoFarm 当前设置 ===")
+                    for k, v in pairs(s) do
+                        logStr(string.format("  %s = %s", k,
+                                             type(v) == "table" and table.concat(v, ",") or tostring(v)))
+                    end
+                    logStr("========================")
+                    sys.toast("已导出")
+                 end},
+            },
+        },
+
+        -- ═══════════════════════════════════════════════════════════════════
+        -- 第 5 组: 关于
+        -- ═══════════════════════════════════════════════════════════════════
+        {
+            title = "关于",
+            rows = {
+                {type="info", text="自动挂机脚本 v2.3.1 (2026-10-08)"},
+                {type="info", text="作者: xxx  QQ群: 123456789"},
+                {type="action", key="openHelp",
+                 label="查看使用说明",
+                 onTap=function(s)
+                    sys.toast("文档: https://github.com/xxx/autoFarm/wiki")
+                 end},
+                {type="action", key="resetAll",
+                 label="恢复默认设置",
+                 onTap=function(s)
+                    -- 注意: action 回调在 settings.json 已保存后才执行,
+                    -- 这里的修改不会写回磁盘; 用户需重新点"保存"或"保存运行"才生效。
+                    sys.toast("请重新点'保存运行'以应用默认设置")
+                 end},
+            },
+        },
+    },
+}
+```
+
+#### 主脚本 `/var/mobile/touch/lua/autoFarm.lua`
+
+```lua
+-- ============================================================================
+-- autoFarm.lua - 配合 schema.lua 的主脚本
+-- ============================================================================
+local ran = ui.open("autoFarm")      -- auto 模式自动选 schema.lua (无需写类型)
+if not ran then
+    logStr("[设置] 取消或 schema.lua 不存在, 使用硬编码默认值")
+end
+
+-- 读取设置 (与 HTML 版完全相同)
+logStr("[设置] 模式=" .. tostring(settings.mode)
+       .. " 速度=" .. string.format("%.1fx", settings.speed or 1.0)
+       .. " 目标=" .. table.concat(settings.targets or {}, ","))
+
+-- 各设置项使用示范
+if settings.autoStart then
+    sys.toast("启动中...")
+end
+
+local cooldown = settings.cooldownSec or 10
+logStr("[设置] 技能冷却 = " .. cooldown .. "s")
+
+-- 找色示例
+local r, g, b = string.match(settings.targetColor or "#FF3344", "#(%x%x)(%x%x)(%x%x)")
+if r then
+    logStr("[设置] 目标颜色 RGB = " .. tonumber(r, 16) .. ","
+           .. tonumber(g, 16) .. "," .. tonumber(b, 16))
+end
+
+-- 难度相关逻辑
+if settings.difficulty == "困难" then
+    local limit = settings.dungeonTimeLimit or 30 * 60
+    logStr("[设置] 困难模式时间限制 = " .. limit .. " 秒")
+end
+
+-- 调试模式
+if settings.debugMode then
+    logStr("[DEBUG] logLevel=" .. tostring(settings.logLevel or 3))
+end
+
+-- 进入主循环
+while true do
+    -- ... 实际挂机逻辑 ...
+    mSleep(1000 / (settings.speed or 1.0) / 1000 * 1000)
+end
+```
+
+#### 行为说明
+
+1. **依赖显示**：`difficulty` 选"困难"才显示 `dungeonTimeLimit`；`debugMode` 开才显示下面 3 行。切换开关会触发表格 reload，被隐藏行不参与保存。
+2. **action 回调时机**：用户点按钮 → 引擎把当前所有 row 的 `currentValue` 打包为 dict 传入 `onTap(s)` → 同步在主线程执行（脚本线程此时阻塞在 `ui.open`，未跑 Lua 主循环）→ 函数返回后 UI 继续响应。注意：`onTap` 内的修改**不会**回写到 settings.json，用户需重新点"保存运行"才落盘。
+3. **校验**：保存时遍历所有行做 `validator` 校验（`webhook` 的 `url` 类型），失败弹"参数有误"alert，不退出页面。
+4. **存储**：点"保存运行" → 引擎收集 `currentValue` → 写 `autoFarm.settings.json` → 注入 `settings` 全局表 → 启动主脚本。
+5. **默认值 vs 当前值**：`default` 是 schema 声明的初始值；首次运行 settings.json 不存在时用 `default`。之后每次弹窗都从 settings.json 读上次保存的值填进 cell。
+6. **可选行类型**：`stepper` 只能整数；`slider` 浮点；`number` 是键盘输入；`duration` 用倒计时选择器。这四种根据场景选一种。
+7. **常见坑**：
+   - `options` 超过 5 项不要用 `segmented`（自动截断），改用 `select`。
+   - `multi` 的 `default` 必须是字符串数组 `{"a", "b"}`，不是逗号分隔字符串。
+   - `onTap` 里不要 `mSleep` 太久，会卡住 UI 响应（脚本线程在等 `ui.open` 返回，但主线程弹 action 不会 block）。
+   - `visibleWhenValue` 的比较是 `==`（number/bool/string 直比，table 不支持），复杂条件用多个 `visibleWhen` 行实现。
+
 ---
 
 ## 15. 全局变量与运行环境
