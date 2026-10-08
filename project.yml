@@ -80,7 +80,7 @@ targets:
       properties:
         CFBundleDisplayName: QQ音乐
         CFBundleVersion: "1"
-        CFBundleShortVersionString: "1.0.0"
+        CFBundleShortVersionString: "1.1.0"
         # 后台保活(2026-08-28 二轮实测修正 + 逆向 AutoGoRunner app-release.ipa 确认):
         # 用户实测: 仅 audio 静音播放 + URLSession 认证挂起时, iOS 16.x 上
         # AVPlayer静音=1 且 backgroundTimeRemaining 剩余-1秒, 后台约10秒后仍被系统强杀

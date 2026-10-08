@@ -33,6 +33,7 @@ typedef NS_ENUM(NSInteger, TSSettingsRowType) {
     TSSettingsRowTypeMulti     = 12, // 多选列表
     TSSettingsRowTypeAction    = 13, // 动作按钮
     TSSettingsRowTypeInfo      = 14, // 静态说明文字
+    TSSettingsRowTypeCheckbox  = 15, // 复选框 (bool, UIButton 打勾样式, 点击整行可切换)
 };
 
 typedef NS_ENUM(NSInteger, TSSettingsDateMode) {

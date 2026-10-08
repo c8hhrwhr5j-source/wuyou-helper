@@ -2034,7 +2034,7 @@ TrollAutoTouch 提供**两套**并存的设置 UI，**脚本作者可显式选�
 | 维度 | HTML 网页 UI（`index.html`） | UIKit 原生 UI（`schema.lua`） |
 |---|---|---|
 | 文件路径 | `/var/mobile/touch/lua/ui/<name>/index.html` | `/var/mobile/touch/lua/ui/<name>/schema.lua` |
-| 渲染方式 | `WKWebView` + `http://127.0.0.1` 内嵌 HTTP 服务 | `UITableView` + 各 UIKit 控件（UISwitch / UISlider / UIDatePicker / UIColorWell …） |
+| 渲染方式 | `WKWebView` + `http://127.0.0.1` 内嵌 HTTP 服务 | `UITableView` + 各 UIKit 控件（UISwitch / 复选框 / UISlider / UIDatePicker / UIColorWell …） |
 | **后台渲染** | ❌ App 在后台时 WKWebView 内容无法提交到系统层 → 设置页空白 | ✅ 纯 UIKit 视图，可在游戏等任意前台 App 之上**直接显示**，无需切回本 App |
 | 布局自由度 | 完全自由（HTML/CSS/JS） | 受限（受 UIKit 控件形状约束），但风格统一、Apple HIG |
 | 上手成本 | 写 HTML/JS | 写一个 Lua 表声明 |
@@ -2194,6 +2194,7 @@ return {
             rows = {
                 -- 行类型见下表
                 {type="switch",   key="autoStart",  label="自动启动",     default=true},
+                {type="checkbox", key="pickUp",     label="自动拾取",     default=true},
                 {type="slider",   key="speed",      label="运行速度",     min=0.5, max=2.0, step=0.1, default=1.0, format="%.1fx", showValue=true},
                 {type="stepper",  key="retry",      label="失败重试",     min=0, max=10, default=3},
                 {type="segmented",key="mode",       label="模式",         options={"快速","安全","自定义"}, default="快速"},
@@ -2218,6 +2219,7 @@ return {
 | type | 必填 | 常用可选字段 | 控件 / 写入值类型 |
 |---|---|---|---|
 | `switch` | key, label | default | `UISwitch` → bool |
+| `checkbox` | key, label | default | 复选框（圆角方框打 ✓，点整行可切换）→ bool |
 | `stepper` | key, label, min, max | default, step | `UIStepper` → number |
 | `slider` | key, label, min, max | default, step, format, showValue | `UISlider` → number |
 | `segmented` | key, label, options | default | `UISegmentedControl` → string |
@@ -2231,6 +2233,30 @@ return {
 | `multi` | key, label, options | default (array) | 点击进入子表 → array of string |
 | `action` | key, label | onTap (function) | `UIButton` → 触发 Lua 函数 |
 | `info` | text | — | 纯文字, 不写 settings |
+
+#### `checkbox`（复选框）与 `switch`（开关）的区别和选型
+
+两者的值**完全相同**（都是 bool，写入 settings.json 后脚本里 `settings.xxx == true/false`），可以随时互相改，不影响已保存的配置。区别只在**外观与交互**：
+
+| 维度 | `switch` | `checkbox` |
+|---|---|---|
+| 外观 | iOS 系统设置风格的绿/灰滑动开关 | 右侧 28pt 圆角方框，选中填充蓝色并打 ✓ |
+| 触控范围 | 只能拨动右侧开关本身 | 点复选框**或整行文字**都能切换 |
+| 语义建议 | "模式/状态"类：启动前检查、调试模式 | "清单勾选"类：任务开关、权限授权、批量选项 |
+| 值落盘 | 未给 default 且从未拨动时不写 key | 未给 default 时默认 false，key 一定会写入 |
+
+```lua
+-- 任务清单场景: 一排勾选项, 点任务名即可开关, 比一排 switch 更直观
+{type="checkbox", key="task_shimen",   label="师门任务",   default=true},
+{type="checkbox", key="task_baotu",    label="宝图任务",   default=false},
+{type="checkbox", key="task_wabao",    label="挖宝任务",   default=true},
+
+-- 状态开关场景: 仍然用 switch 更符合 iOS 习惯
+{type="switch",   key="vpnCheck",      label="启动前检查 VPN", default=false},
+```
+
+> 注意：`checkbox` 需要 App **1.1.0 及以上**版本。旧引擎不认识此类型会把整行跳过（表单里不显示），
+> 分发脚本给旧引擎用户时，建议用 `sys.version()` 探测后回退到 `switch`。
 
 #### 高级特性
 
@@ -2332,7 +2358,7 @@ ui.openForm("myScript", {
 
 ### 14.7.7 UIKit 原生设置页：全功能完整示例
 
-下面是一个**真实可运行**的完整示例，演示 14 种行类型 + 依赖显示 + 校验 + action 回调 + 多 section + 动态默认值。把它原样写到 `/var/mobile/touch/lua/autoFarm/schema.lua`，主脚本里 `ui.open("autoFarm")` 即可弹出。
+下面是一个**真实可运行**的完整示例，演示 15 种行类型 + 依赖显示 + 校验 + action 回调 + 多 section + 动态默认值。把它原样写到 `/var/mobile/touch/lua/autoFarm/schema.lua`，主脚本里 `ui.open("autoFarm")` 即可弹出。
 
 #### 文件结构
 
@@ -2352,7 +2378,7 @@ ui.openForm("myScript", {
 -- /var/mobile/touch/lua/ui/autoFarm/schema.lua
 --
 -- UIKit 原生设置 UI 完整 schema 演示。
--- 14 种行类型全覆盖: switch/stepper/slider/segmented/select/text/textLong/
+-- 15 种行类型全覆盖: switch/checkbox/stepper/slider/segmented/select/text/textLong/
 --                   number/date/duration/color/multi/action/info
 -- 高级特性: 依赖显示 (visibleWhen) / 校验 (validator) / action 回调 (onTap)
 --
@@ -2398,6 +2424,11 @@ return {
                 -- switch: 布尔开关
                 {type="switch",   key="autoStart",
                  label="启动后立即运行", default=true},
+
+                -- checkbox: 复选框 (值同 switch 也是 bool, 点整行可切换,
+                --             适合"任务清单/批量勾选", 需要 App >= 1.1.0)
+                {type="checkbox", key="autoRepair",
+                 label="耐久不足自动修理", default=true},
 
                 -- stepper: 整数步进 (有 min/max/step, 默认步长 1)
                 {type="stepper",  key="retryCount",
@@ -2630,7 +2661,7 @@ end
 3. **校验**：保存时遍历所有行做 `validator` 校验（`webhook` 的 `url` 类型），失败弹"参数有误"alert，不退出页面。
 4. **存储**：点"保存运行" → 引擎收集 `currentValue` → 写 `autoFarm.settings.json` → 注入 `settings` 全局表 → 启动主脚本。
 5. **默认值 vs 当前值**：`default` 是 schema 声明的初始值；首次运行 settings.json 不存在时用 `default`。之后每次弹窗都从 settings.json 读上次保存的值填进 cell。
-6. **可选行类型**：`stepper` 只能整数；`slider` 浮点；`number` 是键盘输入；`duration` 用倒计时选择器。这四种根据场景选一种。
+6. **可选行类型**：`stepper` 只能整数；`slider` 浮点；`number` 是键盘输入；`duration` 用倒计时选择器。这四种根据场景选一种。布尔值有 `switch`（状态开关）和 `checkbox`（清单打勾，App ≥ 1.1.0）两种外观，值完全等价可随时互换。
 7. **常见坑**：
    - `options` 超过 5 项不要用 `segmented`（自动截断），改用 `select`。
    - `multi` 的 `default` 必须是字符串数组 `{"a", "b"}`，不是逗号分隔字符串。

@@ -3,7 +3,7 @@
 //  TrollAutoTouch
 //
 //  UIKit 原生设置页实现: UITableView 分组列表 + 各类型控件 cell。
-//  14 种 row 类型对应 14 套 cell 子视图, 单一 TSSettingsCell 复用,
+//  15 种 row 类型对应 15 套 cell 子视图, 单一 TSSettingsCell 复用,
 //  prepareForReuse 重置, 按 type 应用子视图 (可见性 + frame + 事件)。
 //
 //  数据流:
@@ -197,6 +197,7 @@ static BOOL TSValueEqual(id a, id b) {
 @property (nonatomic, strong) UILabel *titleLabel;
 // 各类型控件
 @property (nonatomic, strong) UISwitch *switchView;
+@property (nonatomic, strong) UIButton *checkboxView;   // 复选框 (UIButton selected 模拟打勾)
 @property (nonatomic, strong) UIStepper *stepperView;
 @property (nonatomic, strong) UILabel *stepperValueLabel;
 @property (nonatomic, strong) UISlider *sliderView;
@@ -243,7 +244,7 @@ static BOOL TSValueEqual(id a, id b) {
     //    (attempt to insert nil object) → SIGABRT 整个 App 闪退 (点/滑动列表触发复用即崩)。
     //    改用 C 数组 + 判空遍历, nil 安全终止。
     UIView *lazyViews[] = {
-        self.switchView, self.stepperView, self.stepperValueLabel,
+        self.switchView, self.checkboxView, self.stepperView, self.stepperValueLabel,
         self.sliderView, self.sliderValueLabel, self.segmentedView,
         self.textField, self.textView, self.datePicker,
         self.disclosureButton, self.colorSwatch, self.actionButton,
@@ -263,6 +264,26 @@ static BOOL TSValueEqual(id a, id b) {
         [self.contentView addSubview:self.switchView];
     }
     self.switchView.hidden = NO;
+}
+- (void)_ensureCheckbox {
+    if (!self.checkboxView) {
+        self.checkboxView = [UIButton buttonWithType:UIButtonTypeCustom];
+        self.checkboxView.layer.cornerRadius = 6;
+        self.checkboxView.layer.borderWidth = 1.5;
+        self.checkboxView.layer.masksToBounds = YES;
+        self.checkboxView.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+        [self.checkboxView setTitle:@"✓" forState:UIControlStateSelected];
+        [self.checkboxView setTitle:@"" forState:UIControlStateNormal];
+        [self.checkboxView setTitleColor:[UIColor whiteColor] forState:UIControlStateSelected];
+        [self.checkboxView addTarget:self action:@selector(_onCheckboxToggle) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:self.checkboxView];
+    }
+    self.checkboxView.hidden = NO;
+    [self _styleCheckbox:self.checkboxView.isSelected];
+}
+- (void)_styleCheckbox:(BOOL)on {
+    self.checkboxView.backgroundColor = on ? [UIColor systemBlueColor] : [UIColor clearColor];
+    self.checkboxView.layer.borderColor = (on ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
 }
 - (void)_ensureStepper {
     if (!self.stepperView) {
@@ -403,6 +424,13 @@ static BOOL TSValueEqual(id a, id b) {
             [self _ensureSwitch];
             id v = TSValueForKey(row);
             self.switchView.on = [v boolValue];
+        } break;
+        case TSSettingsRowTypeCheckbox: {
+            [self _ensureCheckbox];
+            BOOL on = [TSValueForKey(row) boolValue];
+            self.checkboxView.selected = on;
+            [self _styleCheckbox:on];
+            row.currentValue = @(on);
         } break;
         case TSSettingsRowTypeStepper: {
             [self _ensureStepper];
@@ -553,6 +581,9 @@ static BOOL TSValueEqual(id a, id b) {
         case TSSettingsRowTypeSwitch:
             self.switchView.frame = CGRectMake(w - right - 51, (h - 31) / 2, 51, 31);
             break;
+        case TSSettingsRowTypeCheckbox:
+            self.checkboxView.frame = CGRectMake(w - right - 28, (h - 28) / 2, 28, 28);
+            break;
         case TSSettingsRowTypeStepper: {
             self.stepperValueLabel.frame = CGRectMake(ctrlX, ctrlY, ctrlW - 94, ctrlH);
             self.stepperView.frame = CGRectMake(w - right - 94, (h - 32) / 2, 94, 32);
@@ -585,6 +616,13 @@ static BOOL TSValueEqual(id a, id b) {
 
 - (void)_onSwitchChange {
     self.row.currentValue = @(self.switchView.isOn);
+    [self.vc refreshAfterValueChange];
+}
+- (void)_onCheckboxToggle {
+    BOOL next = !self.checkboxView.isSelected;
+    self.checkboxView.selected = next;
+    [self _styleCheckbox:next];
+    self.row.currentValue = @(next);
     [self.vc refreshAfterValueChange];
 }
 - (void)_onStepperChange {
@@ -1020,6 +1058,17 @@ static BOOL TSValueEqual(id a, id b) {
     TSSettingsRow *r = [self _rowAtIndexPath:ip];
     [cell applyWithRow:r vc:self];
     return cell;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    // checkbox 行支持点击整行切换 (打勾控件只有 28pt, 任务清单场景用户习惯点文字)
+    [tv deselectRowAtIndexPath:ip animated:NO];
+    TSSettingsRow *r = [self _rowAtIndexPath:ip];
+    if (r.type == TSSettingsRowTypeCheckbox) {
+        TSSettingsCell *cell = (TSSettingsCell *)[tv cellForRowAtIndexPath:ip];
+        if ([cell isKindOfClass:[TSSettingsCell class]]) {
+            [cell _onCheckboxToggle];
+        }
+    }
 }
 
 #pragma mark - 底部按钮

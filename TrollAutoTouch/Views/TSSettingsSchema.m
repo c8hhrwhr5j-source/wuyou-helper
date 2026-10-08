@@ -163,6 +163,7 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
     else if ([typeStr isEqualToString:@"multi"])    type = TSSettingsRowTypeMulti;
     else if ([typeStr isEqualToString:@"action"])   type = TSSettingsRowTypeAction;
     else if ([typeStr isEqualToString:@"info"])     type = TSSettingsRowTypeInfo;
+    else if ([typeStr isEqualToString:@"checkbox"])  type = TSSettingsRowTypeCheckbox;
     else {
         if (error) *error = [NSError errorWithDomain:TSSettingsSchemaErrorDomain
                                                   code:2
@@ -249,6 +250,13 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
         row.multiOptions = row.options;
         row.options = nil;
         if (!row.defaultValue) row.defaultValue = @[];
+    }
+
+    // checkbox: 无 default 时默认 false, 保证保存时键一定写入 settings.json
+    //   (switch 无 default 时 currentValue 为 nil 不落盘, checkbox 场景是任务清单,
+    //    每个 key 都应存在, 这里补 @NO)
+    if (type == TSSettingsRowTypeCheckbox) {
+        if (![row.defaultValue isKindOfClass:[NSNumber class]]) row.defaultValue = @NO;
     }
 
     // action 回调
