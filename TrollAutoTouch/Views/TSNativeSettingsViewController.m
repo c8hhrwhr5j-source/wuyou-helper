@@ -238,12 +238,19 @@ static BOOL TSValueEqual(id a, id b) {
 
 - (void)prepareForReuse {
     [super prepareForReuse];
-    for (UIView *v in @[self.switchView, self.stepperView, self.stepperValueLabel,
-                        self.sliderView, self.sliderValueLabel, self.segmentedView,
-                        self.textField, self.textView, self.datePicker,
-                        self.disclosureButton, self.colorSwatch, self.actionButton,
-                        self.infoLabel]) {
-        v.hidden = YES;
+    // 子控件全部懒创建, 复用前可能只有一个被创建过 —— 其余是 nil。
+    // ⚠️ 不能用 @[...] 数组字面量收集: 含 nil 会直接抛 NSInvalidArgumentException
+    //    (attempt to insert nil object) → SIGABRT 整个 App 闪退 (点/滑动列表触发复用即崩)。
+    //    改用 C 数组 + 判空遍历, nil 安全终止。
+    UIView *lazyViews[] = {
+        self.switchView, self.stepperView, self.stepperValueLabel,
+        self.sliderView, self.sliderValueLabel, self.segmentedView,
+        self.textField, self.textView, self.datePicker,
+        self.disclosureButton, self.colorSwatch, self.actionButton,
+        self.infoLabel, nil,
+    };
+    for (NSUInteger i = 0; i < sizeof(lazyViews) / sizeof(lazyViews[0]) && lazyViews[i]; i++) {
+        lazyViews[i].hidden = YES;
     }
     self.hintLabel.hidden = YES;
     self.hintLabel.text = nil;
