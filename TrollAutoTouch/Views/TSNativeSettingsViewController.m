@@ -22,6 +22,20 @@
 #import "TSLuaBridge.h"
 #import "TSLogStore.h"
 #import <objc/runtime.h>
+#import "lua.h"
+
+// 桥接函数 (定义在 TSLuaBridge.m, 通过 _tsCurrentLuaState 访问 Lua 栈)
+extern void TSLuaInvokeActionWithCurrentSettings(int ref, NSDictionary *settingsDict);
+extern void TSLuaUnrefAction(int ref);
+
+#pragma mark - Cell delegate 协议
+// TSSettingsCell 只能通过此协议访问 view controller, 避免 cell 文件需要 import
+// view controller 的 class extension (解耦)
+@protocol TSNativeSettingsCellDelegate <NSObject>
+- (void)refreshAfterValueChange;
+- (void)openSubListForRow:(TSSettingsRow *)row;
+- (void)invokeActionForRow:(TSSettingsRow *)row;
+@end
 
 #pragma mark - 辅助
 
@@ -197,7 +211,7 @@ static BOOL TSValueEqual(id a, id b) {
 @property (nonatomic, strong) UILabel *hintLabel;     // 提示/警告
 
 @property (nonatomic, weak) TSSettingsRow *row;
-@property (nonatomic, weak) TSNativeSettingsViewController *vc;
+@property (nonatomic, weak) id<TSNativeSettingsCellDelegate> vc;
 
 @end
 
@@ -371,7 +385,7 @@ static BOOL TSValueEqual(id a, id b) {
 
 #pragma mark - 应用行
 
-- (void)applyWithRow:(TSSettingsRow *)row vc:(TSNativeSettingsViewController *)vc {
+- (void)applyWithRow:(TSSettingsRow *)row vc:(id<TSNativeSettingsCellDelegate>)vc {
     self.row = row;
     self.vc = vc;
     self.titleLabel.text = row.label;
@@ -633,7 +647,8 @@ static BOOL TSValueEqual(id a, id b) {
 #pragma mark - 主 view controller
 
 @interface TSNativeSettingsViewController () <UITableViewDataSource, UITableViewDelegate,
-                                                UIColorPickerViewControllerDelegate>
+                                                UIColorPickerViewControllerDelegate,
+                                                TSNativeSettingsCellDelegate>
 
 @property (nonatomic, strong) TSSettingsSchema *schema;
 @property (nonatomic, strong) UITableView *tableView;
