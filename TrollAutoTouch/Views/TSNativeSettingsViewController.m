@@ -23,6 +23,7 @@
 #import "TSLogStore.h"
 #import <objc/runtime.h>
 #import "lua.h"
+#import "lauxlib.h"   // LUA_NOREF (-2) / LUA_REFNIL 在此头
 
 // 桥接函数 (定义在 TSLuaBridge.m, 通过 _tsCurrentLuaState 访问 Lua 栈)
 extern void TSLuaInvokeActionWithCurrentSettings(int ref, NSDictionary *settingsDict);
@@ -89,7 +90,7 @@ static BOOL TSValueEqual(id a, id b) {
 /// 单选列表 (从 options 里选一项, 写入 row.currentValue = 选中字符串)
 @interface TSSelectListVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, weak) TSSettingsRow *row;
-@property (nonatomic, weak) TSNativeSettingsViewController *parent;
+@property (nonatomic, weak) id<TSNativeSettingsCellDelegate> parent;
 @property (nonatomic, strong) UITableView *tableView;
 @end
 
@@ -128,7 +129,7 @@ static BOOL TSValueEqual(id a, id b) {
 /// 多选列表 (子页面勾选多个, 完成时写回 array)
 @interface TSMultiListVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, weak) TSSettingsRow *row;
-@property (nonatomic, weak) TSNativeSettingsViewController *parent;
+@property (nonatomic, weak) id<TSNativeSettingsCellDelegate> parent;
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) NSMutableSet<NSString *> *selected;
 @end
