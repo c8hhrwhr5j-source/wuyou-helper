@@ -164,6 +164,7 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
     else if ([typeStr isEqualToString:@"action"])   type = TSSettingsRowTypeAction;
     else if ([typeStr isEqualToString:@"info"])     type = TSSettingsRowTypeInfo;
     else if ([typeStr isEqualToString:@"checkbox"])  type = TSSettingsRowTypeCheckbox;
+    else if ([typeStr isEqualToString:@"checkGroup"]) type = TSSettingsRowTypeCheckGroup;
     else {
         if (error) *error = [NSError errorWithDomain:TSSettingsSchemaErrorDomain
                                                   code:2
@@ -257,6 +258,16 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
     //    每个 key 都应存在, 这里补 @NO)
     if (type == TSSettingsRowTypeCheckbox) {
         if (![row.defaultValue isKindOfClass:[NSNumber class]]) row.defaultValue = @NO;
+    }
+
+    // checkGroup: 多选色块组 (值为 string 数组, 复用 options 作为候选项)
+    //   columns = 每行几个色块 (默认 3), default 必须是数组
+    if (type == TSSettingsRowTypeCheckGroup) {
+        row.columns = (NSInteger)tsSchema_getNumberField(L, idx, "columns", 3);
+        if (row.columns < 1) row.columns = 1;
+        if (row.columns > 5) row.columns = 5;
+        if (!row.options) row.options = @[];
+        if (![row.defaultValue isKindOfClass:[NSArray class]]) row.defaultValue = @[];
     }
 
     // action 回调

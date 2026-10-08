@@ -3,7 +3,7 @@
 //  TrollAutoTouch
 //
 //  UIKit 原生设置页实现: UITableView 分组列表 + 各类型控件 cell。
-//  15 种 row 类型对应 15 套 cell 子视图, 单一 TSSettingsCell 复用,
+//  16 种 row 类型对应 16 套 cell 子视图, 单一 TSSettingsCell 复用,
 //  prepareForReuse 重置, 按 type 应用子视图 (可见性 + frame + 事件)。
 //
 //  数据流:
@@ -197,7 +197,9 @@ static BOOL TSValueEqual(id a, id b) {
 @property (nonatomic, strong) UILabel *titleLabel;
 // 各类型控件
 @property (nonatomic, strong) UISwitch *switchView;
-@property (nonatomic, strong) UIButton *checkboxView;   // 复选框 (UIButton selected 模拟打勾)
+@property (nonatomic, strong) UIButton *checkboxView;   // 复选框 (右侧色块, 选中=蓝色填充)
+@property (nonatomic, strong) UIView *chipContainer;    // checkGroup 的色块容器
+@property (nonatomic, strong) NSMutableArray<UIButton *> *chipButtons; // 当前色块按钮
 @property (nonatomic, strong) UIStepper *stepperView;
 @property (nonatomic, strong) UILabel *stepperValueLabel;
 @property (nonatomic, strong) UISlider *sliderView;
@@ -242,16 +244,20 @@ static BOOL TSValueEqual(id a, id b) {
     // 子控件全部懒创建, 复用前可能只有一个被创建过 —— 其余是 nil。
     // ⚠️ 不能用 @[...] 数组字面量收集: 含 nil 会直接抛 NSInvalidArgumentException
     //    (attempt to insert nil object) → SIGABRT 整个 App 闪退 (点/滑动列表触发复用即崩)。
-    //    改用 C 数组 + 判空遍历, nil 安全终止。
+    //    改用 C 数组 + **逐个判空**遍历。
+    // ⚠️ 历史 bug: 循环条件写成 `i < count && lazyViews[i]`, 第 0 个元素为 nil 时
+    //    整个循环立即退出 → 旧 cell 的控件全都没被隐藏 → 新行叠旧行"重影"
+    //    (复选框 ✓ 出现在 segmented/info 行上, info 文字叠在 50pt 行上)。
+    //    必须遍历完整长度, 每个元素单独判空。
     UIView *lazyViews[] = {
         self.switchView, self.checkboxView, self.stepperView, self.stepperValueLabel,
         self.sliderView, self.sliderValueLabel, self.segmentedView,
         self.textField, self.textView, self.datePicker,
         self.disclosureButton, self.colorSwatch, self.actionButton,
-        self.infoLabel, nil,
+        self.infoLabel, self.chipContainer, nil,
     };
-    for (NSUInteger i = 0; i < sizeof(lazyViews) / sizeof(lazyViews[0]) && lazyViews[i]; i++) {
-        lazyViews[i].hidden = YES;
+    for (NSUInteger i = 0; i < sizeof(lazyViews) / sizeof(lazyViews[0]); i++) {
+        if (lazyViews[i]) lazyViews[i].hidden = YES;
     }
     self.hintLabel.hidden = YES;
     self.hintLabel.text = nil;
@@ -268,22 +274,87 @@ static BOOL TSValueEqual(id a, id b) {
 - (void)_ensureCheckbox {
     if (!self.checkboxView) {
         self.checkboxView = [UIButton buttonWithType:UIButtonTypeCustom];
-        self.checkboxView.layer.cornerRadius = 6;
+        self.checkboxView.layer.cornerRadius = 7;
         self.checkboxView.layer.borderWidth = 1.5;
         self.checkboxView.layer.masksToBounds = YES;
-        self.checkboxView.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-        [self.checkboxView setTitle:@"✓" forState:UIControlStateSelected];
-        [self.checkboxView setTitle:@"" forState:UIControlStateNormal];
-        [self.checkboxView setTitleColor:[UIColor whiteColor] forState:UIControlStateSelected];
         [self.checkboxView addTarget:self action:@selector(_onCheckboxToggle) forControlEvents:UIControlEventTouchUpInside];
         [self.contentView addSubview:self.checkboxView];
     }
     self.checkboxView.hidden = NO;
     [self _styleCheckbox:self.checkboxView.isSelected];
 }
+/// 单选复选框: 只用颜色表达选中 (选中=蓝底白边, 未选=空心灰边), 不打 ✓
 - (void)_styleCheckbox:(BOOL)on {
     self.checkboxView.backgroundColor = on ? [UIColor systemBlueColor] : [UIColor clearColor];
     self.checkboxView.layer.borderColor = (on ? [UIColor systemBlueColor] : [UIColor separatorColor]).CGColor;
+}
+
+#pragma mark - checkGroup (多选色块)
+
+- (void)_ensureChipContainer {
+    if (!self.chipContainer) {
+        self.chipContainer = [[UIView alloc] init];
+        [self.contentView addSubview:self.chipContainer];
+    }
+    self.chipContainer.hidden = NO;
+}
+/// 色块样式: 选中 = 蓝底白字, 未选 = 浅灰底深色字 (靠颜色区分, 无勾选标记)
+- (void)_styleChip:(UIButton *)chip selected:(BOOL)on {
+    chip.selected = on;
+    chip.backgroundColor = on ? [UIColor systemBlueColor] : [UIColor secondarySystemBackgroundColor];
+    [chip setTitleColor:(on ? [UIColor whiteColor] : [UIColor labelColor]) forState:UIControlStateNormal];
+    [chip setTitleColor:(on ? [UIColor whiteColor] : [UIColor labelColor]) forState:UIControlStateSelected];
+    chip.layer.borderWidth = on ? 0 : 0.5;
+    chip.layer.borderColor = [UIColor separatorColor].CGColor;
+}
+/// 按当前值重建色块按钮 (行数随 options 变化, 直接重建最省心)
+- (void)_rebuildChipsForRow:(TSSettingsRow *)row {
+    [self _ensureChipContainer];
+    for (UIButton *b in self.chipButtons) [b removeFromSuperview];
+    if (!self.chipButtons) self.chipButtons = [NSMutableArray array];
+    [self.chipButtons removeAllObjects];
+
+    NSArray *cur = TSValueForKey(row);
+    NSMutableSet<NSString *> *selected = [NSMutableSet set];
+    if ([cur isKindOfClass:[NSArray class]]) {
+        for (id v in (NSArray *)cur) {
+            if ([v isKindOfClass:[NSString class]]) [selected addObject:v];
+        }
+    }
+    for (NSUInteger i = 0; i < row.options.count; i++) {
+        NSString *opt = row.options[i];
+        UIButton *chip = [UIButton buttonWithType:UIButtonTypeCustom];
+        chip.tag = (NSInteger)i;
+        chip.titleLabel.font = [UIFont systemFontOfSize:14];
+        chip.titleLabel.adjustsFontSizeToFitWidth = YES;
+        chip.titleLabel.minimumScaleFactor = 0.8;
+        chip.layer.cornerRadius = 8;
+        chip.layer.masksToBounds = YES;
+        [chip setTitle:opt forState:UIControlStateNormal];
+        [chip addTarget:self action:@selector(_onChipTap:) forControlEvents:UIControlEventTouchUpInside];
+        [self _styleChip:chip selected:[selected containsObject:opt]];
+        [self.chipContainer addSubview:chip];
+        [self.chipButtons addObject:chip];
+    }
+    [self _layoutChips];
+}
+
+/// 色块网格定位 (标题行下方, 每行 columns 个, 间距 8, 高 32)
+- (void)_layoutChips {
+    if (self.chipButtons.count == 0) return;
+    NSInteger columns = self.row.columns > 0 ? self.row.columns : 3;
+    CGFloat left = 16, right = 16, gap = 8, chipH = 32, titleBottom = 34;
+    CGFloat totalW = self.contentView.bounds.size.width;
+    if (totalW <= 0) totalW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat chipW = (totalW - left - right - (columns - 1) * gap) / (CGFloat)columns;
+    if (chipW < 44) chipW = 44;
+    for (NSUInteger i = 0; i < self.chipButtons.count; i++) {
+        NSInteger col = (NSInteger)i % columns;
+        NSInteger line = (NSInteger)i / columns;
+        self.chipButtons[i].frame = CGRectMake(left + col * (chipW + gap),
+                                               titleBottom + line * (chipH + gap),
+                                               chipW, chipH);
+    }
 }
 - (void)_ensureStepper {
     if (!self.stepperView) {
@@ -432,6 +503,12 @@ static BOOL TSValueEqual(id a, id b) {
             [self _styleCheckbox:on];
             row.currentValue = @(on);
         } break;
+        case TSSettingsRowTypeCheckGroup: {
+            self.titleLabel.text = row.label;
+            [self _rebuildChipsForRow:row];
+            id v = TSValueForKey(row);
+            row.currentValue = [v isKindOfClass:[NSArray class]] ? v : @[];
+        } break;
         case TSSettingsRowTypeStepper: {
             [self _ensureStepper];
             self.stepperView.minimumValue = row.minValue;
@@ -569,6 +646,13 @@ static BOOL TSValueEqual(id a, id b) {
         self.actionButton.frame = CGRectMake(left, 0, w - left - right, h);
         return;
     }
+    if (self.row.type == TSSettingsRowTypeCheckGroup) {
+        // 标题一行 + 下方色块网格 (网格宽度依赖实际宽度, 在这里重新定位)
+        self.titleLabel.frame = CGRectMake(left, top, w - left - right, 18);
+        self.chipContainer.frame = CGRectMake(0, 0, w, h);
+        [self _layoutChips];
+        return;
+    }
 
     // 其余: 左 titleLabel, 右控件
     CGFloat titleW = 110;
@@ -623,6 +707,31 @@ static BOOL TSValueEqual(id a, id b) {
     self.checkboxView.selected = next;
     [self _styleCheckbox:next];
     self.row.currentValue = @(next);
+    [self.vc refreshAfterValueChange];
+}
+/// 点色块 = 该项在选中集合里取反 (选中只改颜色, 不带勾选标记)
+- (void)_onChipTap:(UIButton *)sender {
+    NSInteger idx = sender.tag;
+    if (idx < 0 || idx >= (NSInteger)self.row.options.count) return;
+    NSString *opt = self.row.options[idx];
+
+    NSMutableArray<NSString *> *cur = [NSMutableArray array];
+    id v = self.row.currentValue;
+    if ([v isKindOfClass:[NSArray class]]) {
+        for (id o in (NSArray *)v) {
+            if ([o isKindOfClass:[NSString class]]) [cur addObject:o];
+        }
+    }
+    NSUInteger before = cur.count;
+    [cur removeObject:opt];
+    if (cur.count == before) [cur addObject:opt];   // 原本没有 → 加入
+
+    self.row.currentValue = [cur copy];
+    for (UIButton *chip in self.chipButtons) {
+        if (chip.tag >= 0 && chip.tag < (NSInteger)self.row.options.count) {
+            [self _styleChip:chip selected:[cur containsObject:self.row.options[chip.tag]]];
+        }
+    }
     [self.vc refreshAfterValueChange];
 }
 - (void)_onStepperChange {
@@ -1038,6 +1147,13 @@ static BOOL TSValueEqual(id a, id b) {
                                       attributes:@{NSFontAttributeName:[UIFont systemFontOfSize:13]}
                                          context:nil].size;
         return MAX(36, sz.height + 20);
+    }
+    if (r.type == TSSettingsRowTypeCheckGroup) {
+        // 标题行 34 + 每行色块 40 (高 32 + 间距 8)
+        NSInteger columns = r.columns > 0 ? r.columns : 3;
+        NSInteger lines = (NSInteger)((r.options.count + columns - 1) / columns);
+        if (lines < 1) lines = 1;
+        return 34 + lines * 40;
     }
     if (r.type == TSSettingsRowTypeTextLong) return 110;
     if (r.type == TSSettingsRowTypeDate || r.type == TSSettingsRowTypeDuration) return 56;

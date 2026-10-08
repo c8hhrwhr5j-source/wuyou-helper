@@ -2195,6 +2195,9 @@ return {
                 -- 行类型见下表
                 {type="switch",   key="autoStart",  label="自动启动",     default=true},
                 {type="checkbox", key="pickUp",     label="自动拾取",     default=true},
+                {type="checkGroup", key="dungeons", label="要刷的副本",   columns=3,
+                 options={"水陆大会","车迟斗法","通天河","乌鸡国","秘境降妖","金兜洞"},
+                 default={"水陆大会","乌鸡国"}},
                 {type="slider",   key="speed",      label="运行速度",     min=0.5, max=2.0, step=0.1, default=1.0, format="%.1fx", showValue=true},
                 {type="stepper",  key="retry",      label="失败重试",     min=0, max=10, default=3},
                 {type="segmented",key="mode",       label="模式",         options={"快速","安全","自定义"}, default="快速"},
@@ -2219,7 +2222,8 @@ return {
 | type | 必填 | 常用可选字段 | 控件 / 写入值类型 |
 |---|---|---|---|
 | `switch` | key, label | default | `UISwitch` → bool |
-| `checkbox` | key, label | default | 复选框（圆角方框打 ✓，点整行可切换）→ bool |
+| `checkbox` | key, label | default | 单行复选框（右侧色块，选中蓝，点整行切换）→ bool |
+| `checkGroup` | key, label, options | default (array), columns (默认 3) | 一行 N 个色块按钮，点名字变色 → array of string |
 | `stepper` | key, label, min, max | default, step | `UIStepper` → number |
 | `slider` | key, label, min, max | default, step, format, showValue | `UISlider` → number |
 | `segmented` | key, label, options | default | `UISegmentedControl` → string |
@@ -2234,29 +2238,56 @@ return {
 | `action` | key, label | onTap (function) | `UIButton` → 触发 Lua 函数 |
 | `info` | text | — | 纯文字, 不写 settings |
 
-#### `checkbox`（复选框）与 `switch`（开关）的区别和选型
+#### 布尔/多选控件：`switch`、`checkbox`、`checkGroup` 的区别和选型
 
-两者的值**完全相同**（都是 bool，写入 settings.json 后脚本里 `settings.xxx == true/false`），可以随时互相改，不影响已保存的配置。区别只在**外观与交互**：
+**iOS 没有原生复选框控件**（这是平台事实：UIKit 只有 `UISwitch` 和列表行的 ✓ 标记）。
+引擎的 `checkbox` / `checkGroup` 是自造的：用 `UIButton` + 圆角背景色表达选中状态，
+**不打 ✓，纯靠颜色区分**（选中＝蓝色底 + 白字，未选＝浅灰底 + 深色字）。
 
-| 维度 | `switch` | `checkbox` |
-|---|---|---|
-| 外观 | iOS 系统设置风格的绿/灰滑动开关 | 右侧 28pt 圆角方框，选中填充蓝色并打 ✓ |
-| 触控范围 | 只能拨动右侧开关本身 | 点复选框**或整行文字**都能切换 |
-| 语义建议 | "模式/状态"类：启动前检查、调试模式 | "清单勾选"类：任务开关、权限授权、批量选项 |
-| 值落盘 | 未给 default 且从未拨动时不写 key | 未给 default 时默认 false，key 一定会写入 |
+| 维度 | `switch` | `checkbox` | `checkGroup` |
+|---|---|---|---|
+| 外观 | iOS 系统设置风格的绿/灰滑动开关 | 右侧 28pt 圆角色块 | 标题下方一行 N 个色块，每个色块上写候选项文字 |
+| 值的类型 | bool | bool | **string 数组**（选中项集合） |
+| 写 settings.json | `{speedUp=true}` | `{autoRepair=true}` | `{taskSel={"师门任务","宝图任务"}}` |
+| 触控范围 | 只能拨右侧开关 | 点色块**或整行文字** | 点任意色块名字 |
+| 一行几个 | 1 个开关 | 1 个 | `columns` 控制（默认 3，可选 1~5），自动换行 |
+| 语义建议 | 单一"模式/状态"：启动前检查、调试模式 | 单个"清单勾选"项 | **一组清单勾选**（任务列表、权限清单、批量选项） |
+| 最低版本 | 所有版本 | App ≥ 1.1.0 | App ≥ 1.2.0 |
+| 未给 default 时 | 不写 key（`switch` 无值不落盘） | 默认 false，key 一定写入 | 默认空数组 |
 
 ```lua
--- 任务清单场景: 一排勾选项, 点任务名即可开关, 比一排 switch 更直观
-{type="checkbox", key="task_shimen",   label="师门任务",   default=true},
-{type="checkbox", key="task_baotu",    label="宝图任务",   default=false},
-{type="checkbox", key="task_wabao",    label="挖宝任务",   default=true},
+-- checkGroup: 一组勾选项, 一行 3 个, 点名字变蓝=开启 (任务/权限清单的首选)
+{type="checkGroup", key="taskSel",
+ label="要做的任务（点名字：蓝色＝开启，灰色＝关闭）",
+ options={"师门任务","帮派任务","捉鬼任务","宝图任务","运镖任务","三任务"},
+ columns=3,                      -- 一行几个, 默认 3
+ default={"师门任务","帮派任务"}}, -- default 必须是数组, 元素 = options 里的字符串
 
--- 状态开关场景: 仍然用 switch 更符合 iOS 习惯
-{type="switch",   key="vpnCheck",      label="启动前检查 VPN", default=false},
+-- checkbox: 单个布尔项 (色块表达, 不打勾)
+{type="checkbox", key="autoRepair", label="耐久不足自动修理", default=true},
+
+-- switch: 状态开关仍然用系统开关最符合 iOS 习惯
+{type="switch",   key="vpnCheck",   label="启动前检查 VPN", default=false},
 ```
 
-> 注意：`checkbox` 需要 App **1.1.0 及以上**版本。旧引擎不认识此类型会把整行跳过（表单里不显示），
-> 分发脚本给旧引擎用户时，建议用 `sys.version()` 探测后回退到 `switch`。
+**行高**：`checkGroup` 的行高 = `34 + 色块行数 × 40`，由引擎按 `options.count / columns`
+自动计算（无需手写），色块行数 = `ceil(options数量 / columns)`。
+
+> **版本兼容**：`checkbox` 需 App ≥ 1.1.0，`checkGroup` 需 App ≥ 1.2.0。
+> 旧引擎不认识这些类型会把**整行跳过**（表单里该行直接不显示），所以给旧版本用户分发脚本时，
+> 建议用 `sys.version()` 探测后降级 —— 引擎自带的 `ui.lua`（梦幻西游脚本）就是这么做的：
+> `≥1.2.0` 用 checkGroup，`≥1.1.0` 用一行一个 checkbox，更旧退回 switch：
+>
+> ```lua
+> local function banBenBuDiYu(da, db)
+>     local a, b = (sys.version() or ""):match("^(%d+)%.(%d+)")
+>     if not a then return false end
+>     a, b = tonumber(a), tonumber(b)
+>     return a > da or (a == da and b >= db)
+> end
+> local yongSeKuai = banBenBuDiYu(1, 2)   -- checkGroup
+> local yongFuXuan = banBenBuDiYu(1, 1)   -- checkbox
+> ```
 
 #### 高级特性
 
@@ -2358,7 +2389,7 @@ ui.openForm("myScript", {
 
 ### 14.7.7 UIKit 原生设置页：全功能完整示例
 
-下面是一个**真实可运行**的完整示例，演示 15 种行类型 + 依赖显示 + 校验 + action 回调 + 多 section + 动态默认值。把它原样写到 `/var/mobile/touch/lua/autoFarm/schema.lua`，主脚本里 `ui.open("autoFarm")` 即可弹出。
+下面是一个**真实可运行**的完整示例，演示 16 种行类型 + 依赖显示 + 校验 + action 回调 + 多 section + 动态默认值。把它原样写到 `/var/mobile/touch/lua/autoFarm/schema.lua`，主脚本里 `ui.open("autoFarm")` 即可弹出。
 
 #### 文件结构
 
@@ -2378,7 +2409,7 @@ ui.openForm("myScript", {
 -- /var/mobile/touch/lua/ui/autoFarm/schema.lua
 --
 -- UIKit 原生设置 UI 完整 schema 演示。
--- 15 种行类型全覆盖: switch/checkbox/stepper/slider/segmented/select/text/textLong/
+-- 16 种行类型全覆盖: switch/checkbox/checkGroup/stepper/slider/segmented/select/text/textLong/
 --                   number/date/duration/color/multi/action/info
 -- 高级特性: 依赖显示 (visibleWhen) / 校验 (validator) / action 回调 (onTap)
 --
@@ -2425,10 +2456,18 @@ return {
                 {type="switch",   key="autoStart",
                  label="启动后立即运行", default=true},
 
-                -- checkbox: 复选框 (值同 switch 也是 bool, 点整行可切换,
-                --             适合"任务清单/批量勾选", 需要 App >= 1.1.0)
+                -- checkbox: 单行复选框 (值同 switch 也是 bool, 点整行可切换,
+                --             色块表达选中, 无勾选标记, 需要 App >= 1.1.0)
                 {type="checkbox", key="autoRepair",
                  label="耐久不足自动修理", default=true},
+
+                -- checkGroup: 色块组 (一行 columns 个, 点名字变色=选中, 值是 string 数组,
+                --             适合"任务/副本/权限清单", 需要 App >= 1.2.0)
+                {type="checkGroup", key="enabledDungeons",
+                 label="要刷的副本（点名字：蓝色＝开启）",
+                 options={"水陆大会", "车迟斗法", "通天河", "乌鸡国", "秘境降妖", "金兜洞"},
+                 columns=3,
+                 default={"水陆大会", "乌鸡国"}},
 
                 -- stepper: 整数步进 (有 min/max/step, 默认步长 1)
                 {type="stepper",  key="retryCount",
@@ -2621,6 +2660,13 @@ logStr("[设置] 模式=" .. tostring(settings.mode)
        .. " 速度=" .. string.format("%.1fx", settings.speed or 1.0)
        .. " 目标=" .. table.concat(settings.targets or {}, ","))
 
+-- checkGroup 的值是字符串数组, 用集合查成员 (数组元素即 options 里的字符串)
+local yaoShua = {}
+for _, name in ipairs(settings.enabledDungeons or {}) do yaoShua[name] = true end
+if yaoShua["水陆大会"] then
+    logStr("[设置] 会刷水陆大会")
+end
+
 -- 各设置项使用示范
 if settings.autoStart then
     sys.toast("启动中...")
@@ -2661,10 +2707,11 @@ end
 3. **校验**：保存时遍历所有行做 `validator` 校验（`webhook` 的 `url` 类型），失败弹"参数有误"alert，不退出页面。
 4. **存储**：点"保存运行" → 引擎收集 `currentValue` → 写 `autoFarm.settings.json` → 注入 `settings` 全局表 → 启动主脚本。
 5. **默认值 vs 当前值**：`default` 是 schema 声明的初始值；首次运行 settings.json 不存在时用 `default`。之后每次弹窗都从 settings.json 读上次保存的值填进 cell。
-6. **可选行类型**：`stepper` 只能整数；`slider` 浮点；`number` 是键盘输入；`duration` 用倒计时选择器。这四种根据场景选一种。布尔值有 `switch`（状态开关）和 `checkbox`（清单打勾，App ≥ 1.1.0）两种外观，值完全等价可随时互换。
+6. **可选行类型**：`stepper` 只能整数；`slider` 浮点；`number` 是键盘输入；`duration` 用倒计时选择器。这四种根据场景选一种。布尔值有 `switch`（系统开关）和 `checkbox`（色块，App ≥ 1.1.0）两种外观，值完全等价可随时互换；一组多选清单用 `checkGroup`（色块组，App ≥ 1.2.0）。
 7. **常见坑**：
    - `options` 超过 5 项不要用 `segmented`（自动截断），改用 `select`。
-   - `multi` 的 `default` 必须是字符串数组 `{"a", "b"}`，不是逗号分隔字符串。
+   - `multi` / `checkGroup` 的 `default` 必须是字符串数组 `{"a", "b"}`，不是逗号分隔字符串。
+   - `checkbox` / `checkGroup` 需要较新版本引擎，旧引擎会把整行跳过（不报错，只是不显示），跨版本分发脚本时用 `sys.version()` 探测降级。
    - `onTap` 里不要 `mSleep` 太久，会卡住 UI 响应（脚本线程在等 `ui.open` 返回，但主线程弹 action 不会 block）。
    - `visibleWhenValue` 的比较是 `==`（number/bool/string 直比，table 不支持），复杂条件用多个 `visibleWhen` 行实现。
 

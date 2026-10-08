@@ -33,7 +33,8 @@ typedef NS_ENUM(NSInteger, TSSettingsRowType) {
     TSSettingsRowTypeMulti     = 12, // 多选列表
     TSSettingsRowTypeAction    = 13, // 动作按钮
     TSSettingsRowTypeInfo      = 14, // 静态说明文字
-    TSSettingsRowTypeCheckbox  = 15, // 复选框 (bool, UIButton 打勾样式, 点击整行可切换)
+    TSSettingsRowTypeCheckbox  = 15, // 复选框 (bool, 右侧色块, 点击整行可切换)
+    TSSettingsRowTypeCheckGroup = 16, // 复选框组 (多选, 每行 N 个色块按钮, 点击名字变色)
 };
 
 typedef NS_ENUM(NSInteger, TSSettingsDateMode) {
@@ -58,6 +59,10 @@ typedef NS_ENUM(NSInteger, TSSettingsDateMode) {
 @property (nonatomic, assign) double step;               // 0 = 不限步长
 @property (nonatomic, copy, nullable) NSString *format;  // 数字格式化串, e.g. "%.1fx"
 @property (nonatomic, assign) BOOL showValueInline;      // 滑块右侧实时显示当前值
+
+// ── checkGroup ──
+/// 每行排几个色块 (默认 3, 取值 1~5)
+@property (nonatomic, assign) NSInteger columns;
 
 // ── segmented / select / multi ──
 @property (nonatomic, copy, nullable) NSArray<NSString *> *options;
