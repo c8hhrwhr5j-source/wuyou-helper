@@ -59,6 +59,8 @@ NSNotificationName const TSLuaPauseStateChangedNotification = @"TSLuaPauseStateC
 #import "../HUD/TSHUDWindow.h"
 #import "../HUD/TSLogWindow.h"
 #import "../Views/TSScriptUIViewController.h"
+#import "../Views/TSNativeSettingsViewController.h"
+#import "../Views/TSSettingsSchema.h"
 #import "TSScriptListViewController.h"
 #import "../Core/TSToolExecutor.h"
 #import "TSScriptCipher.h"
@@ -74,6 +76,14 @@ static volatile BOOL _stopRequested = NO;
 // 暂停标志: 由音量键控制面板/主界面"暂停"按钮设置。
 // 与 _stopRequested 一样跨线程, 必须 volatile + 无锁赋值。
 static volatile BOOL _pauseRequested = NO;
+
+// 当前正在运行的 Lua 状态 (主线程读取, Lua 线程写入)。
+// 仅在脚本运行期有效 —— 脚本结束 (lua_close) 时清回 NULL。
+// TSNativeSettingsViewController 的 action 回调 (主线程调用, 此时脚本阻塞在
+// dispatch_semaphore_wait 而未运行 Lua 代码) 用此引用安全地操作 Lua 栈:
+// Lua 5.4 是 fully reentrant, 同一时刻只要单线程访问 L 即安全; 脚本线程此时
+// 阻塞在 C 层的 semaphore_wait, 没有运行 Lua 代码, 也不会做 GC 分配。
+static lua_State *_tsCurrentLuaState = NULL;
 
 @interface TSLuaBridge ()
 - (void)_execute:(NSString *)code filePath:(nullable NSString *)path;
@@ -103,6 +113,13 @@ static volatile BOOL _pauseRequested = NO;
 - (void)requestRestartFromLuaState:(lua_State *)L;
 - (void)_handlePendingRestart;
 @end
+
+// 全局桥接函数 (供 TSNativeSettingsViewController 在主线程调用)
+//   TSLuaInvokeActionWithCurrentSettings(ref, settingsDict): 从 Lua registry 取出 ref 指向的
+//   函数, 把 settingsDict 作为唯一参数推入并 pcall。出错仅 NSLog, 不抛异常到 UI。
+//   TSLuaUnrefAction(ref): 释放 Lua registry 引用 (settings 页 dealloc 时回收)。
+extern void TSLuaInvokeActionWithCurrentSettings(int ref, NSDictionary *settingsDict);
+extern void TSLuaUnrefAction(int ref);
 
 // ── 加密项目虚拟源码表: 按相对路径取数据, iOS 文件系统大小写不敏感, 先精确后忽略大小写 ──
 static NSData *ts_lookupLuaSource(NSDictionary<NSString *, NSData *> *map, NSString *rel) {
@@ -2802,90 +2819,126 @@ static BOOL TS_ScriptUIExists(NSString *name) {
     devPath = [devPath stringByAppendingPathComponent:@"index.html"];
     if ([fm fileExistsAtPath:devPath]) return YES;
     NSString *bundlePath = [[[[NSBundle mainBundle] resourcePath]
-                             stringByAppendingPathComponent:@"www"]
-                            stringByAppendingPathComponent:@"ui"];
+                            stringByAppendingPathComponent:@"www"]
+                           stringByAppendingPathComponent:@"ui"];
     bundlePath = [[bundlePath stringByAppendingPathComponent:name]
                   stringByAppendingPathComponent:@"index.html"];
     return [fm fileExistsAtPath:bundlePath];
 }
 
-// ui.open(脚本名) -> boolean
-//   检测脚本网页设置 UI (内置 www/ui/<name> 或设备 lua/ui/<name>):
+// 检测 UIKit 原生设置 UI (schema.lua) 是否存在:
+//   设备: /var/mobile/touch/lua/ui/<name>/schema.lua
+//   内置: bundle www/ui/<name>/schema.lua
+// 与 HTML 版共用 ui/<name>/ 目录, 同名脚本要么写 index.html 要么写 schema.lua, 二选一。
+// ui.open() 在 auto 模式下优先 schema.lua (后台可渲染), 缺则回退 index.html (需切前台)。
+static BOOL TS_ScriptNativeUISchemaExists(NSString *name) {
+    if (name.length == 0) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *devPath = [[[[TSPaths luaDir] stringByAppendingPathComponent:@"ui"]
+                          stringByAppendingPathComponent:name]
+                         stringByAppendingPathComponent:@"schema.lua"];
+    if ([fm fileExistsAtPath:devPath]) return YES;
+    NSString *bundlePath = [[[[[NSBundle mainBundle] resourcePath]
+                              stringByAppendingPathComponent:@"www"]
+                             stringByAppendingPathComponent:@"ui"]
+                            stringByAppendingPathComponent:name];
+    bundlePath = [bundlePath stringByAppendingPathComponent:@"schema.lua"];
+    return [fm fileExistsAtPath:bundlePath];
+}
+
+// ui.open(脚本名 [, 类型]) -> boolean
+//   ui.openForm(脚本名, schemaTable) -> boolean
+//
+//   两种 UI 并存, 由脚本显式选择:
+//     type=auto(默认) | html | native
+//     - auto:  优先 schema.lua (UIKit 原生, 后台可渲染), 缺则回退 index.html (网页)
+//     - html:  强制使用网页设置 UI (TSScriptUIViewController + WKWebView), 需切到本 App 前台
+//     - native: 强制使用 UIKit 原生设置 UI (TSNativeSettingsViewController + UITableView),
+//               需 ui/<name>/schema.lua 存在
+//   ui.openForm: 直接传入 schema table (不写文件), 永远走 UIKit 原生路径。
+//
+//   检测:
 //     - 不存在 → 直接返回 false, 不阻塞, 脚本按默认配置继续
-//     - 存在   → 全屏弹出网页设置页, 阻塞等待用户操作:
-//                 点"开始运行" → 返回 true (已注入全局 settings 表)
-//                 点"‹ 返回"   → 返回 false (按默认配置继续)
+//     - 存在   → 全屏弹设置页, 阻塞等待用户操作:
+//                 点"保存运行" → 返回 true (已注入全局 settings 表)
+//                 点"保存"或"取消" → 返回 false (按默认配置继续)
 //   阻塞期间可点主界面"停止"取消: 返回 false 并强制关闭设置页。
 //   用法: 在 main.lua 开头写死 if ui.open("main") then ... end
 //
-//   非前台场景: App 在后台 (游戏等 app 在前台) 时, iOS 会暂停 App 的渲染,
-//   即使 HUD 远程上下文托管成功, WKWebView 网页内容也无法提交 → 设置页空白。
-//   因此 ui.open 触发时若 App 不在前台, 先把本 App 切回前台恢复渲染, 等约
-//   1 秒后再显示设置页; 设置页关闭后自动切回原前台 App, 脚本流程不被中断。
-//   若 1 秒后仍未切回前台 (切前台失败), 回退到 TSHUDHost 系统级层承载。
-static int l_ui_open(lua_State *L) {
-    const char *nameC = luaL_checkstring(L, 1);
-    NSString *name = [NSString stringWithUTF8String:nameC];
-    if (name.length == 0 || !TS_ScriptUIExists(name)) {
-        lua_pushboolean(L, 0);
-        return 1;
-    }
-
+//   非前台场景 (仅 html 路径受影响, native 路径走 SBS HUD 可在任意前台 App 上直接显示):
+//     App 在后台 (游戏等 app 在前台) 时, iOS 会暂停 App 的渲染, WKWebView 网页内容
+//     无法提交到系统层 → 设置页空白。html 路径会先把本 App 切回前台恢复渲染, 等约
+//     1 秒后再显示设置页; 设置页关闭后自动切回原前台 App, 脚本流程不被中断。
+//     若 1 秒后仍未切回前台 (切前台失败), 回退到 TSHUDHost 系统级层承载。
+//     native 路径直接走 SBS HUD 承载, 不会切 app, 在游戏等前台 App 之上直接显示。
+//
+// 共享的"展示 + 阻塞等待"helper, 复用 HTML/Native 两条路径的 present/dismiss/app-switch
+// 逻辑, createVC 工厂由调用方提供, 返回 nil 表示创建失败。
+static int ts_ui_presentAndWait(lua_State *L,
+                                NSString *name,
+                                UIViewController * _Nullable (^createVC)(void)) {
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block BOOL ran = NO;
     __block BOOL finished = NO;
-    __block TSScriptUIViewController *vc = nil;
-    // 打开设置页前的前台 App (仅"强制切回本 App"路径使用):
-    // 设置页关闭后切回该 App, 保证脚本流程连续 (游戏自动化不被中断)。
+    __block UIViewController *vc = nil;
     __block NSString *prevFrontBid = nil;
 
-    // 显示设置页 (主线程)。强制切到前台后延迟调用, 确保 App 渲染已恢复。
-    void (^showScriptUI)(void) = ^{
+    void (^finishWithDidRun)(BOOL) = ^(BOOL didRun) {
+        if (!finished) {
+            ran = didRun;
+            finished = YES;
+            dispatch_semaphore_signal(sem);
+        }
+    };
+    void (^switchBackIfNeeded)(void) = ^{
+        if (prevFrontBid.length > 0) {
+            NSString *bid = prevFrontBid;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [[TSAppManager shared] openApp:bid];
+            });
+        }
+    };
+
+    // 显示设置页 (主线程)。强制切到前台后延迟调用, 确保 App 渲染已恢复 (仅 html 路径需要)。
+    void (^doShow)(void) = ^{
         BOOL appActive = ([UIApplication sharedApplication].applicationState == UIApplicationStateActive);
-        vc = [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
-        vc.onFinish = ^(BOOL didRun) {
-            if (!finished) {
-                ran = didRun;
-                finished = YES;
-                dispatch_semaphore_signal(sem);
-            }
-            // 若 ui.open 之前把本 App 强制切到前台 (原本在游戏等 app),
-            // 设置页关闭后切回原前台 App, 脚本继续在原 App 上执行。
-            if (prevFrontBid.length > 0) {
-                NSString *bid = prevFrontBid;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    [[TSAppManager shared] openApp:bid];
-                });
-            }
-        };
+        vc = createVC();
+        if (!vc) { finishWithDidRun(NO); return; }
+        // onFinish 回调: HTML/Native vc 都有这个 property, 类型相同, 直接赋值
+        if ([vc isKindOfClass:[TSScriptUIViewController class]]) {
+            ((TSScriptUIViewController *)vc).onFinish = ^(BOOL didRun) {
+                finishWithDidRun(didRun);
+                switchBackIfNeeded();
+            };
+        } else if ([vc isKindOfClass:[TSNativeSettingsViewController class]]) {
+            ((TSNativeSettingsViewController *)vc).onFinish = ^(BOOL didRun) {
+                finishWithDidRun(didRun);
+                switchBackIfNeeded();
+            };
+        }
         if (!appActive) {
-            // 延迟 1 秒后仍不在前台 (切前台失败): 回退到 TSHUDHost 系统级层
-            // 承载 (原逻辑), 挂上去能看到就看, 看不到也不阻塞脚本。
-            vc.hostedInHUD = YES;
+            // 后台/游戏在前台: HUD 承载模式 (SBS 系统级层), 原生路径不需切 app 也能显示
+            [vc setValue:@YES forKey:@"hostedInHUD"];
             BOOL shown = [[TSHUDHost shared] presentViewControllerInHUD:vc];
             if (!shown) {
-                // HUD 不可用 (SBS 未托管成功 且 app 不在前台): 挂上去也看不到,
-                // 直接结束等待, 避免 Lua 永久卡死 (脚本按默认配置继续)。
+                // HUD 不可用 (SBS 未托管成功 且 app 不在前台): 避免 Lua 永久卡死
                 vc = nil;
-                finished = YES;
-                dispatch_semaphore_signal(sem);
+                finishWithDidRun(NO);
             }
             return;
         }
-        // App 前台: 在主窗口 present (原逻辑)
-        NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+        // App 前台: 在主窗口 present
         UIWindow *keyWindow = nil;
-        for (UIWindow *w in windows) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
             if (w.isKeyWindow) { keyWindow = w; break; }
         }
-        if (!keyWindow) keyWindow = windows.firstObject;
+        if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
         UIViewController *top = keyWindow.rootViewController;
         while (top.presentedViewController) top = top.presentedViewController;
         if (!top) {
-            // 无可用窗口, 直接结束等待, 避免 Lua 永久卡死
-            finished = YES;
-            dispatch_semaphore_signal(sem);
+            vc = nil;
+            finishWithDidRun(NO);
             return;
         }
         [top presentViewController:vc animated:YES completion:nil];
@@ -2893,43 +2946,44 @@ static int l_ui_open(lua_State *L) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
-            // App 不在前台 (游戏等 app 在前台): 后台时 iOS 暂停 App 渲染,
-            // 即使 HUD 远程上下文托管成功, WKWebView 网页内容也无法提交到
-            // 系统层 → 设置页空白。先把本 App 切回前台恢复渲染, 等约 1 秒
-            // (页面加载 + 渲染稳定) 后再显示设置页。
+            // 后台先切前台, 让 WKWebView 恢复渲染 (仅 html 路径需要, native 路径无需等待)
             NSLog(@"[QQ音乐] ui.open(%@): App 不在前台, 先切回前台(1s)再显示", name);
             prevFrontBid = [[TSAppManager shared] frontBid];
             if (prevFrontBid.length == 0 ||
                 [prevFrontBid isEqualToString:[NSBundle mainBundle].bundleIdentifier] ||
                 [prevFrontBid isEqualToString:TSFrontBidSpringBoard]) {
-                prevFrontBid = nil; // 本就在本 App / 停在桌面(前台取不到), 无需切回
+                prevFrontBid = nil;
             }
             [[TSAppManager shared] openApp:[NSBundle mainBundle].bundleIdentifier];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                showScriptUI();
+                doShow();
             });
             return;
         }
-        showScriptUI();
+        doShow();
     });
 
     // Lua 线程阻塞等待: 分段等待并检查停止标志, 保证点"停止"后设置页立即关闭
     while (!finished && !_stopRequested) {
         if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) == 0) {
-            break;  // 用户点"开始运行"或"返回", 已收到信号
+            break;
         }
     }
     if (!finished && _stopRequested) {
-        // 脚本被停止: 强制关闭设置页。
-        // 若已由网页"取消"按钮触发 (TSScriptUIViewController 已自行 stop + dismiss),
-        // 不再重复 dismiss。
-        if (vc && !vc.cancelRequested) {
+        // 脚本被停止: 强制关闭设置页
+        if (vc) {
+            BOOL cancelReq = NO;
+            if ([vc isKindOfClass:[TSScriptUIViewController class]]) {
+                cancelReq = ((TSScriptUIViewController *)vc).cancelRequested;
+            } else if ([vc isKindOfClass:[TSNativeSettingsViewController class]]) {
+                cancelReq = ((TSNativeSettingsViewController *)vc).cancelRequested;
+            }
+            BOOL hosted = [[vc valueForKey:@"hostedInHUD"] boolValue];
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (vc.hostedInHUD) {
-                    // HUD 承载模式: 直接移除 view (未被 present, dismiss 无效)
+                if (hosted) {
                     [[TSHUDHost shared] dismissViewControllerFromHUD:vc];
-                } else {
+                } else if (!cancelReq) {
                     [vc dismissViewControllerAnimated:NO completion:nil];
                 }
             });
@@ -2938,14 +2992,97 @@ static int l_ui_open(lua_State *L) {
         return 1;
     }
     if (ran) {
-        // 用户点"开始运行": 网页已把配置写入 /var/mobile/touch/lua/<name>.settings.json,
-        // 注入全局 settings 表, 让脚本后续读取逻辑与主界面打开 UI 时一致。
+        // 用户点"保存运行": 设置已写入 <name>.settings.json, 注入全局 settings 表
         NSString *luaPath = [[TSPaths luaDir] stringByAppendingPathComponent:
                              [name stringByAppendingString:@".lua"]];
         [[TSLuaBridge shared] _injectSettingsTable:L scriptPath:luaPath];
     }
     lua_pushboolean(L, ran ? 1 : 0);
     return 1;
+}
+
+// ui.open(脚本名 [, type]) -> boolean
+//   type: "auto"(默认) | "html" | "native"
+static int l_ui_open(lua_State *L) {
+    const char *nameC = luaL_checkstring(L, 1);
+    if (!nameC) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    NSString *name = [NSString stringWithUTF8String:nameC];
+    if (name.length == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    const char *typeC = luaL_optstring(L, 2, "auto");
+    NSString *type = (typeC && *typeC) ? [NSString stringWithUTF8String:typeC] : @"auto";
+
+    NSString *resolved = nil;
+    if ([type isEqualToString:@"auto"]) {
+        if (TS_ScriptNativeUISchemaExists(name)) resolved = @"native";
+        else if (TS_ScriptUIExists(name)) resolved = @"html";
+    } else if ([type isEqualToString:@"native"]) {
+        if (TS_ScriptNativeUISchemaExists(name)) resolved = @"native";
+    } else if ([type isEqualToString:@"html"]) {
+        if (TS_ScriptUIExists(name)) resolved = @"html";
+    } else {
+        return luaL_error(L, "ui.open: 未知类型 '%s' (auto/html/native)", typeC);
+    }
+
+    if (!resolved) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    if ([resolved isEqualToString:@"native"]) {
+        NSError *err = nil;
+        TSSettingsSchema *schema = [TSSettingsSchema loadSchemaForScriptName:name luaState:L error:&err];
+        if (!schema) {
+            NSLog(@"[ui.open] 加载 schema 失败: %@", err.localizedDescription);
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+        return ts_ui_presentAndWait(L, name, ^{
+            return [[TSNativeSettingsViewController alloc] initWithSchema:schema];
+        });
+    }
+    // html
+    return ts_ui_presentAndWait(L, name, ^{
+        return [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
+    });
+}
+
+// ui.openForm(脚本名, schemaTable) -> boolean
+//   永远走 UIKit 原生设置 UI, schemaTable 是 Lua 表, 直接在内存构建 (不写文件)。
+//   schema 结构: {title=?, sections={{title, footer, rows={{type, key, label, ...}, ...}}, ...}}
+//   返回值同 ui.open (true=已运行, false=取消/失败)。
+static int l_ui_openForm(lua_State *L) {
+    const char *nameC = luaL_checkstring(L, 1);
+    if (!nameC) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    NSString *name = [NSString stringWithUTF8String:nameC];
+    if (name.length == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    if (!lua_istable(L, 2)) {
+        return luaL_error(L, "ui.openForm: 第二个参数必须是 schema table");
+    }
+    NSError *err = nil;
+    TSSettingsSchema *schema = [TSSettingsSchema schemaFromLuaState:L
+                                                       topTableIndex:2
+                                                          scriptName:name
+                                                               error:&err];
+    if (!schema) {
+        NSLog(@"[ui.openForm] schema 解析失败: %@", err.localizedDescription);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    return ts_ui_presentAndWait(L, name, ^{
+        return [[TSNativeSettingsViewController alloc] initWithSchema:schema];
+    });
 }
 
 #pragma mark - 浮动日志窗口 (logWindow)
@@ -3332,9 +3469,10 @@ static void lua_register_all(lua_State *L) {
     luaL_newlib(L, keyLib);
     lua_setglobal(L, "key");
 
-    // ── ui 模块 (脚本网页设置 UI) ──
+    // ── ui 模块 (脚本设置 UI: HTML 网页 + UIKit 原生 共存, 由脚本选择) ──
     static const luaL_Reg uiLib[] = {
-        {"open",   l_ui_open},
+        {"open",    l_ui_open},       // 自动检测或显式指定 html/native
+        {"openForm",l_ui_openForm},   // 动态 schema, 永远走 UIKit 原生路径
         {NULL, NULL}
     };
     luaL_newlib(L, uiLib);
@@ -3781,6 +3919,8 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 //   1) 网页设置 UI 约定: /var/mobile/touch/lua/<脚本名>.settings.json
 //      (内置脚本运行时路径在 bundle 内, 必须按脚本名去设备目录找)
 //   2) 脚本旁侧文件: <脚本路径>.settings.json
+//   3) UIKit 原生设置 UI 共用同一文件 (TSNativeSettingsViewController 写、这里读),
+//      路径查找逻辑相同
 - (void)_injectSettingsTable:(lua_State *)L scriptPath:(NSString *)path {
     NSString *settingsPath = nil;
     if (path.length) {
@@ -3861,6 +4001,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         self.isRunning = NO;
         return;
     }
+    _tsCurrentLuaState = L;   // 暴露给主线程的 TSNativeSettingsViewController action 回调
     luaL_openlibs(L);
     lua_register_all(L);
 
@@ -3882,6 +4023,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         size_t errLen = 0;
         const char *errMsg = lua_tolstring(L, -1, &errLen);
         lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %@", luaToNSString(errMsg, errLen)]);
+        _tsCurrentLuaState = NULL;   // 关闭前清引用, 防止 TSNativeSettingsViewController 访问已关闭的 L
         lua_close(L);
         self.runningPath = nil;
         self.isRunning = NO;
@@ -3904,6 +4046,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         }
         lua_pop(L, 1);
     }
+    _tsCurrentLuaState = NULL;   // 关闭前清引用, 防止 TSNativeSettingsViewController 访问已关闭的 L
     lua_close(L);
 
     // 兜底：无论脚本如何结束(正常/停止/报错)，都释放所有残留触摸
@@ -3962,6 +4105,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         self.isRunning = NO;
         return;
     }
+    _tsCurrentLuaState = L;   // 暴露给主线程的 TSNativeSettingsViewController action 回调
     luaL_openlibs(L);
     lua_register_all(L);
 
@@ -4012,6 +4156,7 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
         size_t errLen = 0;
         const char *errMsg = lua_tolstring(L, -1, &errLen);
         lua_log([NSString stringWithFormat:@"[Lua] 语法错误: %@", luaToNSString(errMsg, errLen)]);
+        _tsCurrentLuaState = NULL;   // 关闭前清引用, 防止 TSNativeSettingsViewController 访问已关闭的 L
         lua_close(L);
         self.runningPath = nil;
         self.isRunning = NO;
@@ -4371,3 +4516,77 @@ static const NSTimeInterval g_volumeKeyDebounce = 0.8;
 }
 
 @end
+
+#pragma mark - UIKit 原生设置 UI 桥接 (供 TSNativeSettingsViewController 调用)
+
+// NSDictionary -> Lua table (推入栈顶)
+static void ts_pushNSDictionaryToLua(lua_State *L, NSDictionary *dict) {
+    lua_newtable(L);
+    if (!dict) return;
+    for (NSString *k in dict) {
+        if (![k isKindOfClass:[NSString class]]) continue;
+        id v = dict[k];
+        lua_pushstring(L, k.UTF8String);
+        if ([v isKindOfClass:[NSNumber class]]) {
+            // 区分 bool 和 number: NSNumber @YES/@NO 是 CFBooleanRef 桥接的
+            CFNumberType t = CFNumberGetType((__bridge CFNumberRef)v);
+            if (t == kCFNumberSInt8Type && strcmp([(NSNumber *)v objCType], @encode(BOOL)) == 0) {
+                lua_pushboolean(L, [v boolValue]);
+            } else {
+                lua_pushnumber(L, [(NSNumber *)v doubleValue]);
+            }
+        } else if ([v isKindOfClass:[NSString class]]) {
+            lua_pushstring(L, [(NSString *)v UTF8String]);
+        } else if ([v isKindOfClass:[NSArray class]]) {
+            NSArray *arr = v;
+            lua_createtable(L, (int)arr.count, 0);
+            [arr enumerateObjectsUsingBlock:^(id item, NSUInteger i, BOOL *stop) {
+                if ([item isKindOfClass:[NSString class]]) {
+                    lua_pushstring(L, [(NSString *)item UTF8String]);
+                } else if ([item isKindOfClass:[NSNumber class]]) {
+                    lua_pushnumber(L, [(NSNumber *)item doubleValue]);
+                } else {
+                    lua_pushnil(L);
+                }
+                lua_rawseti(L, -2, (int)(i + 1));
+            }];
+        } else {
+            lua_pushnil(L);
+        }
+        lua_settable(L, -3);
+    }
+}
+
+// 从 Lua registry 取出 ref 指向的函数, 推入 settingsDict 作为唯一参数, pcall 调用。
+// 出错仅 NSLog, 不抛异常到 UI 线程。
+// 线程假设: 由主线程调用, 此时脚本线程阻塞在 dispatch_semaphore_wait (未运行 Lua 代码),
+//           Lua 5.4 fully reentrant, 单线程访问 L 安全。
+void TSLuaInvokeActionWithCurrentSettings(int ref, NSDictionary *settingsDict) {
+    if (ref == LUA_NOREF) return;
+    lua_State *L = _tsCurrentLuaState;
+    if (!L) {
+        NSLog(@"[NativeSettings action] 无可用的 Lua 状态 (脚本未运行或已结束)");
+        return;
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+    if (!lua_isfunction(L, -1)) {
+        NSLog(@"[NativeSettings action] registry ref %d 不是函数", ref);
+        lua_pop(L, 1);
+        return;
+    }
+    ts_pushNSDictionaryToLua(L, settingsDict);
+    int err = lua_pcall(L, 1, 0, 0);
+    if (err != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        NSLog(@"[NativeSettings action] Lua 错误: %s", msg ? msg : "(null)");
+        lua_pop(L, 1);
+    }
+}
+
+// 释放 registry 引用 (settings 页 dealloc 时调用, 防止 Lua 函数对象驻留 registry)
+void TSLuaUnrefAction(int ref) {
+    if (ref == LUA_NOREF) return;
+    lua_State *L = _tsCurrentLuaState;
+    if (!L) return;  // 脚本已结束, registry 已被 lua_close 清空
+    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+}

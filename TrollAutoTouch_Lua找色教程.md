@@ -22,6 +22,9 @@ TrollAutoTouch 内置 **Lua 5.4** 解释器，支持运行 `.lua` 脚本实现�
 - [12. 字符串与 JSON](#12-字符串与-json)
 - [13. 剪贴板与按键](#13-剪贴板与按键)
 - [14. 网页设置 UI (ui.open)](#14-网页设置-ui-uiopen)
+  - 14.5 [浮动日志窗口 (logWindow)](#145-浮动日志窗口-logwindow)
+  - 14.6 [重启脚本 (restartScript)](#146-重启脚本-restartscript)
+  - 14.7 [脚本设置 UI 完整指南（HTML + UIKit 原生 共存）](#147-脚本设置-ui-完整指南html-网页--uikit-原生-共存)
 - [15. 全局变量与运行环境](#15-全局变量与运行环境)
 - [16. 完整示例](#16-完整示例)
 - [17. 全局函数速查表](#17-全局函数速查表)
@@ -2019,6 +2022,313 @@ restartScript()   -- 脚本将会重新启动, 后面的代码将不会执行
   - 与"停止"一样会补发未抬起的触摸、清理日志窗口，不会留"幽灵手指"；
   - 用户按音量键/悬浮球"停止"优先于重启请求（先停就不再重启）；
   - 脚本一进循环就立刻 `restartScript()` 会造成无限重启，请自行避免。
+
+---
+
+## 14.7 脚本设置 UI 完整指南（HTML 网页 + UIKit 原生 共存）
+
+TrollAutoTouch 提供**两套**并存的设置 UI，**脚本作者可显式选择**用哪一套。两套 UI 共用**同一份** settings.json（`/var/mobile/touch/lua/<脚本名>.settings.json`）和**同一个**全局 `settings` 表，行为完全一致。
+
+### 14.7.1 两套 UI 对比
+
+| 维度 | HTML 网页 UI（`index.html`） | UIKit 原生 UI（`schema.lua`） |
+|---|---|---|
+| 文件路径 | `/var/mobile/touch/lua/ui/<name>/index.html` | `/var/mobile/touch/lua/ui/<name>/schema.lua` |
+| 渲染方式 | `WKWebView` + `http://127.0.0.1` 内嵌 HTTP 服务 | `UITableView` + 各 UIKit 控件（UISwitch / UISlider / UIDatePicker / UIColorWell …） |
+| **后台渲染** | ❌ App 在后台时 WKWebView 内容无法提交到系统层 → 设置页空白 | ✅ 纯 UIKit 视图，可在游戏等任意前台 App 之上**直接显示**，无需切回本 App |
+| 布局自由度 | 完全自由（HTML/CSS/JS） | 受限（受 UIKit 控件形状约束），但风格统一、Apple HIG |
+| 上手成本 | 写 HTML/JS | 写一个 Lua 表声明 |
+| 扩展能力 | 强（canvas/视频/任意 JS） | 中（受 iOS 控件库限制） |
+| 数据保存 | 网页 `ts.save(obj)` 写 settings.json | 自动收集 `currentValue` 写 settings.json |
+| 适用场景 | 需要自定义图表/视频/复杂排版 | 普通设置项（开关/数值/选择/颜色/时间） |
+| 选择建议 | 复杂 UI、富媒体 | 简单设置、需要在游戏运行时弹出 |
+
+### 14.7.2 入口 API
+
+```lua
+-- 自动检测（推荐，0 改动）：优先 schema.lua，缺则回退 index.html
+local ran = ui.open("myScript")
+if ran then
+    -- 用户点了"开始运行"，settings 表已注入，可读 settings.xxx
+end
+
+-- 显式指定
+ui.open("myScript", "html")     -- 强制使用 HTML
+ui.open("myScript", "native")   -- 强制使用 UIKit 原生
+ui.open("myScript", "auto")     -- 自动检测（默认行为）
+
+-- 动态 schema（不写文件，直接传 Lua 表）
+ui.openForm("myScript", {
+    title = "我的脚本设置",
+    sections = {
+        {title = "基础", rows = {
+            {type="switch", key="autoStart", label="自动启动", default=true},
+            {type="slider",  key="speed",     label="速度", min=0.5, max=2.0, step=0.1, default=1.0, format="%.1fx"},
+        }},
+    },
+})
+```
+
+返回值同 `ui.open`：true = 用户点了"保存运行"，已注入 settings；false = 取消/失败。
+
+### 14.7.3 HTML 网页设置 UI 完整使用方法
+
+#### 初始化
+
+把 `index.html` 放到 `ui/<脚本名>/` 目录（脚本名就是 `ui.open` 的第一个参数去掉 `.lua` 扩展名）。引擎通过内嵌 HTTP 服务（`http://127.0.0.1:<port>/ui/<脚本名>/index.html`）加载它。
+
+```
+/var/mobile/touch/lua/
+├── myScript.lua
+├── myScript.settings.json   ← 自动维护, 不要手改
+└── ui/
+    └── myScript/
+        ├── index.html       ← 网页设置 UI
+        ├── style.css
+        └── app.js
+```
+
+#### 网页端 JavaScript 桥
+
+| API | 调用方式 | 说明 |
+|---|---|---|
+| `ts.save(obj)` | `ts.save({key1: value1, key2: value2})` | 保存配置到 settings.json，触发关闭并启动脚本 |
+| `ts.cancel()` | `ts.cancel()` | 取消配置，关闭设置页，不启动脚本 |
+| `ts.get(key)` | `ts.get("keyName")` | 读当前已保存的值（页面加载时建议用） |
+| `fetch('/api/ui/settings/<脚本名>')` | GET | 读整个配置表（JSON） |
+| `fetch('/api/ui/settings/<脚本名>', {method:'PUT', body: JSON.stringify(obj)})` | PUT | 写整个配置表 |
+
+#### 完整 HTML 示例
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的脚本设置</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f5f5f7; }
+        .field { background: white; padding: 14px; margin-bottom: 8px; border-radius: 10px; }
+        .field label { display: block; font-size: 14px; color: #333; margin-bottom: 6px; }
+        .field input, .field select { width: 100%; padding: 8px; font-size: 15px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        .buttons { display: flex; gap: 12px; margin-top: 24px; }
+        .btn { flex: 1; padding: 14px; font-size: 16px; border: none; border-radius: 10px; }
+        .btn-primary { background: #007aff; color: white; }
+        .btn-secondary { background: #e5e5ea; color: #333; }
+    </style>
+</head>
+<body>
+    <h2>我的脚本设置</h2>
+    <div class="field">
+        <label>账号</label>
+        <input type="text" id="username" placeholder="请输入账号">
+    </div>
+    <div class="field">
+        <label>密码</label>
+        <input type="password" id="password">
+    </div>
+    <div class="field">
+        <label>模式</label>
+        <select id="mode">
+            <option value="fast">快速</option>
+            <option value="safe">安全</option>
+        </select>
+    </div>
+    <div class="field">
+        <label>启用自动战斗</label>
+        <input type="checkbox" id="autoBattle">
+    </div>
+    <div class="buttons">
+        <button class="btn btn-secondary" onclick="onCancel()">取消</button>
+        <button class="btn btn-secondary" onclick="onSave()">保存</button>
+        <button class="btn btn-primary" onclick="onSaveAndRun()">保存并运行</button>
+    </div>
+    <script>
+        // 页面加载时填充已保存的值
+        fetch('/api/ui/settings/myScript').then(r => r.json()).then(s => {
+            if (s.username) document.getElementById('username').value = s.username;
+            if (s.password) document.getElementById('password').value = s.password;
+            if (s.mode) document.getElementById('mode').value = s.mode;
+            if (s.autoBattle) document.getElementById('autoBattle').checked = true;
+        });
+
+        function getConfig() {
+            return {
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value,
+                mode: document.getElementById('mode').value,
+                autoBattle: document.getElementById('autoBattle').checked,
+            };
+        }
+        function onSave()        { ts.save(getConfig()); }
+        function onSaveAndRun()  { ts.save(getConfig()); }
+        function onCancel()      { ts.cancel(); }
+    </script>
+</body>
+</html>
+```
+
+#### 常见注意事项
+
+1. **保存的设置是字典**：写 `ts.save({a=1, b="x"})` 后，脚本里 `settings.a == 1`，`settings.b == "x"`。所有键会被序列化为 JSON。
+2. **TSAPI 接口走 HTTP**：网页与原生通过 `http://127.0.0.1:<port>/api/ui/...` 通信，App 已在 Info.plist 配置 `NSAllowsLocalNetworking=true` 允许本地网络请求。
+3. **后台弹出行为**：当 App 在后台（游戏在前台）时，调用 `ui.open` 会先把 TrollAutoTouch 切回前台（1 秒）让 WKWebView 恢复渲染，关闭后自动切回游戏。若切前台失败（极少见），回退到 SBS 系统级层承载（可能空白）。
+4. **取消 vs 保存**：点网页底部"取消"→ `ts.cancel()` → 引擎收到通知后调用 `[[TSLuaBridge shared] stop]` 停止当前脚本、关闭设置页。点"保存"或"保存并运行"→ `ts.save()` → 写 settings.json、关闭设置页、是否启动脚本由 `ui.open` 的返回值决定。
+5. **停止快捷键**：用户随时可以按音量键 / 悬浮球"停止"按钮强制中断设置页（与 HTML 路径同样支持），脚本会收到 `false` 返回值并按默认配置继续。
+
+### 14.7.4 UIKit 原生设置 UI 完整使用方法
+
+#### 初始化（文件方式）
+
+把 `schema.lua` 放到 `ui/<脚本名>/` 目录，返回一个 Lua 表描述表单结构：
+
+```lua
+-- /var/mobile/touch/lua/ui/myScript/schema.lua
+return {
+    title = "我的脚本设置",   -- 可选, 默认用脚本名
+    sections = {
+        {
+            title = "基础",
+            footer = "通用设置, 修改后点保存",
+            rows = {
+                -- 行类型见下表
+                {type="switch",   key="autoStart",  label="自动启动",     default=true},
+                {type="slider",   key="speed",      label="运行速度",     min=0.5, max=2.0, step=0.1, default=1.0, format="%.1fx", showValue=true},
+                {type="stepper",  key="retry",      label="失败重试",     min=0, max=10, default=3},
+                {type="segmented",key="mode",       label="模式",         options={"快速","安全","自定义"}, default="快速"},
+                {type="select",   key="role",       label="角色",         options={"战士","法师","道士"}, default="战士"},
+                {type="text",     key="webhook",    label="通知地址",     placeholder="https://...", keyboard="url"},
+                {type="textLong", key="notes",      label="备注",         default=""},
+                {type="number",   key="coordX",     label="X 坐标",       min=0, max=4096, default=0, step=1},
+                {type="date",     key="scheduleAt", label="定时启动",     mode="datetime"},
+                {type="duration", key="cooldown",   label="冷却时间",     min=60, max=3600, default=300, unit="秒"},
+                {type="color",    key="targetColor",label="目标颜色",     default="#FF0000"},
+                {type="multi",    key="targets",    label="目标列表",     options={"史莱姆","哥布林","狼"}, default={"史莱姆"}},
+                {type="action",   key="testColor",  label="测试找色",     onTap=function(s) logStr("测试结果: "..tostring(s.speed)) end},
+                {type="info",     text="提示: 启动后可在悬浮球暂停/恢复"},
+            },
+        },
+    },
+}
+```
+
+#### 行类型 (type) 完整列表
+
+| type | 必填 | 常用可选字段 | 控件 / 写入值类型 |
+|---|---|---|---|
+| `switch` | key, label | default | `UISwitch` → bool |
+| `stepper` | key, label, min, max | default, step | `UIStepper` → number |
+| `slider` | key, label, min, max | default, step, format, showValue | `UISlider` → number |
+| `segmented` | key, label, options | default | `UISegmentedControl` → string |
+| `select` | key, label, options | default | 点击进入子表 → string |
+| `text` | key, label | default, placeholder, keyboard | `UITextField` → string |
+| `textLong` | key, label | default, placeholder | `UITextView` → string |
+| `number` | key, label, min, max | default, step, keyboard | `UITextField`+数字键盘 → number |
+| `date` | key, label | default (Unix秒), mode (`date`/`time`/`datetime`) | `UIDatePicker` → number(秒) |
+| `duration` | key, label | default (秒), min, max, unit | `UIDatePicker.countDownTimer` → number(秒) |
+| `color` | key, label | default (#RRGGBB) | `UIColorWell` (iOS 14+) → string |
+| `multi` | key, label, options | default (array) | 点击进入子表 → array of string |
+| `action` | key, label | onTap (function) | `UIButton` → 触发 Lua 函数 |
+| `info` | text | — | 纯文字, 不写 settings |
+
+#### 高级特性
+
+**依赖显示**：`visibleWhen` + `visibleWhenValue`，控制某行是否显示：
+
+```lua
+{
+    type="text", key="customUrl", label="自定义 URL",
+    visibleWhen="mode", visibleWhenValue="自定义",
+}
+```
+
+`mode` 行的值为 `"自定义"` 时才显示本行。
+
+**校验**：`validator` 字段（`url`/`email`/`number`/`decimal`），保存时校验失败弹"参数有误"提示：
+
+```lua
+{type="text", key="webhook", label="Webhook", validator="url", validatorMessage="URL 必须以 http/https 开头"}
+```
+
+**Action 回调**：用户点按钮时，引擎把当前所有 row 的 `currentValue` 打包为字典作为唯一参数传给 onTap 函数：
+
+```lua
+onTap = function(settings)
+    -- settings = {autoStart=true, speed=1.2, ...}
+    -- 这里可以即时运行测试/校验/通知, 不影响 settings.json
+    sys.toast("当前速度: " .. settings.speed)
+end
+```
+
+#### 初始化（动态方式）
+
+不想写文件，主脚本里直接用 `ui.openForm`：
+
+```lua
+local schema = {
+    title = "动态设置",
+    sections = {{
+        rows = {
+            {type="switch", key="debugMode", label="调试模式", default=false},
+            {type="slider",  key="speed",     label="速度", min=0.1, max=3.0, default=1.0},
+        }
+    }},
+}
+local ran = ui.openForm("myScript", schema)
+if ran then
+    logStr("用户保存了: 速度=" .. settings.speed)
+end
+```
+
+#### 常见注意事项
+
+1. **存储格式与 HTML 版完全相同**：`{key=value, ...}` 写到 `<name>.settings.json`，脚本读 `settings.xxx` 全局表，零额外适配。
+2. **后台弹出行为**：当 App 在后台（游戏在前台）时，UIKit 原生 UI **直接**走 SBS 系统级层承载，无需切回本 App、不打断游戏，**这正是 UIKit 路径的最大优势**。
+3. **键盘交互**：iOS 15+ 上 SBS 托管窗口弹键盘基本可用，但偶发不回滚。设置项建议用 segmented / stepper / slider / switch 减少键盘依赖。
+4. **依赖显示会触发 reload**：某行值变化导致其他行显隐切换时，表格会 reload，UI 会闪一下 —— 不影响功能，只影响观感。
+5. **保存即可运行**：UIKit 原生 UI 的"保存并运行"按钮与 HTML 版的 `ts.save()` 行为完全一致：写 settings.json + 关闭 + 启动脚本 + 注入 `settings` 全局表。
+6. **可与 HTML 互迁移**：同一脚本可以同时存在 `index.html` 和 `schema.lua`，注释掉一个即切换；引擎按"auto"模式优先 `schema.lua`。
+
+### 14.7.5 完整调用示例
+
+```lua
+-- /var/mobile/touch/lua/myScript.lua (主脚本)
+local ran = ui.open("myScript")   -- auto: 优先 schema.lua, 缺则 index.html
+if ran then
+    logStr("[设置] autoStart=" .. tostring(settings.autoStart))
+    logStr("[设置] speed=" .. tostring(settings.speed))
+else
+    logStr("[设置] 取消或 UI 不存在, 使用默认值")
+end
+
+-- 强制 HTML
+ui.open("myScript", "html")
+
+-- 强制 UIKit 原生
+ui.open("myScript", "native")
+
+-- 动态 schema
+ui.openForm("myScript", {
+    sections = {{
+        rows = {
+            {type="switch", key="flag", label="开关", default=true},
+        }
+    }},
+})
+```
+
+### 14.7.6 选型建议
+
+| 场景 | 推荐 |
+|---|---|
+| 简单设置（开关/数值/选择） | UIKit 原生（`schema.lua`） |
+| 需要在游戏运行时弹出 | UIKit 原生（不切 app） |
+| 自定义布局、图表、动画 | HTML（`index.html`） |
+| 多媒体预览、视频 | HTML |
+| 一组相关脚本共用同一设置页 | HTML（共享 `ui/<name>/index.html`） |
+| 完全不想写 HTML | UIKit 原生（schema 表声明） |
+| 已有 HTML 不想改 | HTML（原样保留） |
 
 ---
 
