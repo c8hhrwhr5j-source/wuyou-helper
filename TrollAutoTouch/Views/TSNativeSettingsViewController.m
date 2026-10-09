@@ -106,6 +106,16 @@ static BOOL TSValueEqual(id a, id b) {
 
 #pragma mark - 单选/多选子页面
 
+/// 深度遍历找当前第一响应者 (输入框获得焦点时的 UITextField/UITextView)
+static UIView *TSFindFirstResponder(UIView *v) {
+    if ([v isFirstResponder]) return v;
+    for (UIView *sub in v.subviews) {
+        UIView *r = TSFindFirstResponder(sub);
+        if (r) return r;
+    }
+    return nil;
+}
+
 /// 单选列表 (从 options 里选一项, 写入 row.currentValue = 选中字符串)
 @interface TSSelectListVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, weak) TSSettingsRow *row;
@@ -916,6 +926,8 @@ static BOOL TSValueEqual(id a, id b) {
 @property (nonatomic, strong, nullable) NSTimer *autoCloseTimer;
 @property (nonatomic, strong, nullable) UILabel *autoCloseLabel;   // 倒计时文字 "N 秒后自动保存并运行..."
 @property (nonatomic, assign) NSInteger autoCloseRemaining;       // 当前剩余秒数
+/// 键盘当前占用的底部 inset (>0 = 键盘弹出中), 退出时据此还原
+@property (nonatomic, assign) CGFloat keyboardInset;
 @end
 
 @implementation TSNativeSettingsViewController {
@@ -967,6 +979,13 @@ static BOOL TSValueEqual(id a, id b) {
     [self.tableView registerClass:[TSSettingsCell class] forCellReuseIdentifier:@"cell"];
     [self.view addSubview:self.tableView];
 
+    // 键盘避让: 自建 tableView 不会自动避让, 弹出时抬高 contentInset.bottom
+    // 并把焦点输入框滚到键盘上方 (WillChangeFrame 同时覆盖弹出/收起/切换输入法/旋转)
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_keyboardWillChangeFrame:)
+                                                 name:UIKeyboardWillChangeFrameNotification
+                                               object:nil];
+
     self.footerBar = [self _buildFooterBar];
     [self.view addSubview:self.footerBar];
 
@@ -987,6 +1006,67 @@ static BOOL TSValueEqual(id a, id b) {
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [self _invalidateAutoCloseTimer];
+}
+
+#pragma mark - 键盘避让
+
+- (void)_keyboardWillChangeFrame:(NSNotification *)n {
+    UIWindow *win = self.view.window;
+    if (!win) return;
+    CGRect endWin = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    // 通知里的 frame 是 window 坐标; HUD 承载时本 VC 的 view 可能被缩放/旋转,
+    // 必须转到自身坐标再算遮挡, 才能适配不同屏幕与承载方式
+    CGRect endInView = [self.view convertRect:endWin fromView:win];
+    CGFloat viewBottom = CGRectGetMaxY(self.view.bounds);
+
+    // 收起判定: 键盘顶边已在自身可视区外 (高度≈屏高的隐藏 frame / 浮动键盘拖走)
+    BOOL hidden = (CGRectGetMinY(endInView) >= viewBottom - 1);
+    CGFloat overlap = 0;
+    if (!hidden) {
+        overlap = viewBottom - CGRectGetMinY(endInView);
+        if (overlap < 0) overlap = 0;
+    }
+
+    // 还原"无键盘时"的基准 inset, 再叠加本次键盘高度 (连续变化如输入法候选条只差一次高度)
+    UIEdgeInsets base = self.tableView.contentInset;
+    base.bottom -= self.keyboardInset;
+    CGFloat newBottom = base.bottom + overlap;
+
+    UIView *fr = TSFindFirstResponder(self.view);   // 焦点输入框 (含 textLong 的多行框)
+
+    NSTimeInterval dur = [n.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    UIViewAnimationCurve curve = [n.userInfo[UIKeyboardAnimationCurveUserInfoKey] integerValue];
+    UIViewAnimationOptions opts = (UIViewAnimationOptions)((NSUInteger)curve << 16)
+        | UIViewAnimationOptionBeginFromCurrentState;
+
+    void (^apply)(void) = ^{
+        self.keyboardInset = overlap;
+        UIEdgeInsets ins = base;
+        ins.bottom = newBottom;
+        self.tableView.contentInset = ins;
+        self.tableView.scrollIndicatorInsets = ins;
+
+        if (!fr || overlap <= 0) return;
+        // 把焦点输入框滚进"键盘上方的可视区": 可视高 = 表高 - 键盘 inset
+        CGFloat visibleH = self.tableView.bounds.size.height - newBottom;
+        CGRect r = [fr convertRect:CGRectInset(fr.bounds, -4, -8) toView:self.tableView];
+        CGFloat over = CGRectGetMaxY(r) - (self.tableView.contentOffset.y + visibleH);
+        if (over <= 0) return;                     // 未被遮挡, 只抬 inset 即可
+        CGFloat target = self.tableView.contentOffset.y + over;
+        CGFloat maxOff = self.tableView.contentSize.height
+            - self.tableView.bounds.size.height + newBottom;
+        if (maxOff < 0) maxOff = 0;
+        CGFloat minOff = 0;
+        if (@available(iOS 11.0, *)) minOff = -self.tableView.adjustedContentInset.top;
+        if (target < minOff) target = minOff;
+        if (target > maxOff) target = maxOff;
+        [self.tableView setContentOffset:CGPointMake(0, target) animated:NO];
+    };
+    if (dur > 0.01) {
+        [UIView animateWithDuration:dur delay:0 options:opts animations:apply completion:nil];
+    } else {
+        apply();
+    }
 }
 
 - (void)_layoutSubviews {
