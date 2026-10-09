@@ -2342,7 +2342,15 @@ static int l_screen_visionOcr(lua_State *L) {
 #pragma mark - JSON
 
 /// 把 Lua 值转为 NSObject (nil→NSNull, table→NSArray/NSDictionary)
-static id luaToNSObject(lua_State *L, int idx) {
+/// depth: 递归深度上限保护 (循环引用 / 超深嵌套)
+static id luaToNSObject(lua_State *L, int idx, int depth) {
+    if (depth > 64) return [NSNull null];
+    // ⚠️ 必须先转绝对索引: 本函数内部会往栈上压值 (lua_pushnil / lua_rawgeti),
+    //    相对索引(如递归调用时传的 -1)在压栈之后会指向别的对象。而 lua_next 对
+    //    非 table 值不做校验 (release 版 api_check 是空操作), 会拿 TValue 里的
+    //    垃圾指针当 Table* 解引用 → luaH_next 段错误 (SIGSEGV)。
+    //    实测: json.encode({a={1,2}}) → l_json_encode → luaH_next 闪退。
+    idx = lua_absindex(L, idx);
     switch (lua_type(L, idx)) {
         case LUA_TNIL: return [NSNull null];
         case LUA_TBOOLEAN: return @(lua_toboolean(L, idx));
@@ -2357,7 +2365,14 @@ static id luaToNSObject(lua_State *L, int idx) {
             BOOL isArray = YES;
             lua_pushnil(L);
             while (lua_next(L, idx) != 0) {
-                if (lua_type(L, -2) != LUA_TNUMBER) { isArray = NO; lua_pop(L, 1); break; }
+                // stack: ..., key, value
+                if (lua_type(L, -2) != LUA_TNUMBER) {
+                    isArray = NO;
+                    // key 和 value 一起弹掉: 只弹 value 会把 key 残留在栈上,
+                    // 污染外层 lua_next 的迭代键, 也必须保证本函数进出栈平衡
+                    lua_pop(L, 2);
+                    break;
+                }
                 lua_pop(L, 1);
             }
             if (isArray) {
@@ -2367,7 +2382,7 @@ static id luaToNSObject(lua_State *L, int idx) {
                 NSMutableArray *arr = [NSMutableArray array];
                 for (lua_Integer i = 1; i <= n; i++) {
                     lua_rawgeti(L, idx, (lua_Integer)i);
-                    id v = luaToNSObject(L, -1);
+                    id v = luaToNSObject(L, -1, depth + 1);
                     lua_pop(L, 1);
                     [arr addObject:v ?: [NSNull null]];
                 }
@@ -2377,7 +2392,7 @@ static id luaToNSObject(lua_State *L, int idx) {
                 lua_pushnil(L);
                 while (lua_next(L, idx) != 0) {
                     const char *key = lua_tostring(L, -2);
-                    id v = luaToNSObject(L, -1);
+                    id v = luaToNSObject(L, -1, depth + 1);
                     if (key) dict[@(key)] = v ?: [NSNull null];
                     lua_pop(L, 1);
                 }
@@ -2390,7 +2405,7 @@ static id luaToNSObject(lua_State *L, int idx) {
 
 static int l_json_encode(lua_State *L) {
     if (lua_gettop(L) < 1) { lua_pushstring(L, "null"); return 1; }
-    id obj = luaToNSObject(L, 1);
+    id obj = luaToNSObject(L, 1, 0);
     NSError *err = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:obj ?: [NSNull null]
                                                   options:0 error:&err];

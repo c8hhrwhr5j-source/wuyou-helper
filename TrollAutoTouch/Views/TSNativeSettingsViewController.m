@@ -1055,6 +1055,9 @@ static BOOL TSValueEqual(id a, id b) {
     NSDictionary *dict = [obj isKindOfClass:[NSDictionary class]] ? obj : nil;
     for (TSSettingsSection *s in self.schema.sections) {
         for (TSSettingsRow *r in s.rows) {
+            // info/action 行没有 key (解析时只读 text/label), dict[nil] 会抛
+            // NSInvalidArgumentException → SIGABRT, 必须跳过
+            if (r.key.length == 0) continue;
             id saved = dict[r.key];
             if (saved) {
                 r.currentValue = saved;
