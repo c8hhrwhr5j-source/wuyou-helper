@@ -655,7 +655,21 @@ static BOOL TSValueEqual(id a, id b) {
     }
 
     // 其余: 左 titleLabel, 右控件
-    CGFloat titleW = 110;
+    // 标题区宽度按右侧控件实际占用自适应:
+    //   switch (51pt) / checkbox (28pt) 这类右侧小控件, 标题区可占满 (避免长中文 label 截断)
+    //   segmented / text / select 等右侧大控件, 标题区保持 110pt 防挤压
+    CGFloat titleW;
+    switch (self.row.type) {
+        case TSSettingsRowTypeSwitch:
+            titleW = w - left - right - 51 - 8;   // 留 51+8 给 switch + 间距
+            break;
+        case TSSettingsRowTypeCheckbox:
+            titleW = w - left - right - 28 - 8;
+            break;
+        default:
+            titleW = 110;
+            break;
+    }
     self.titleLabel.frame = CGRectMake(left, (h - 20) / 2, titleW, 20);
     CGFloat ctrlX = left + titleW;
     CGFloat ctrlW = w - ctrlX - right;
