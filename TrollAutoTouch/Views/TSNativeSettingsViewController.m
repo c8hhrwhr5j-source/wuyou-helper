@@ -1251,6 +1251,34 @@ static BOOL TSValueEqual(id a, id b) {
     return nil;
 }
 
+/// 分组标题/脚注的 {key} 占位符 → 对应行当前值, 让文案跟随表单取值实时变化
+/// ("角色专属 ({role})" → "角色专属 (道士)")。reloadData 时每次都会重新取值。
+- (NSString *)_resolvedText:(NSString *)text {
+    if (text.length == 0 || [text rangeOfString:@"{"].location == NSNotFound) return text;
+    NSMutableString *s = [text mutableCopy];
+    for (TSSettingsSection *sec in self.schema.sections) {
+        for (TSSettingsRow *r in sec.rows) {
+            if (r.key.length == 0) continue;
+            NSString *ph = [NSString stringWithFormat:@"{%@}", r.key];
+            if ([s rangeOfString:ph].location == NSNotFound) continue;
+            id v = r.currentValue ?: r.defaultValue;
+            NSString *vs;
+            if ([v isKindOfClass:[NSArray class]]) {
+                vs = [(NSArray *)v componentsJoinedByString:@"、"];
+            } else if (v) {
+                vs = [NSString stringWithFormat:@"%@", v];
+            } else {
+                vs = @"";
+            }
+            [s replaceOccurrencesOfString:ph
+                               withString:vs
+                                  options:0
+                                    range:NSMakeRange(0, s.length)];
+        }
+    }
+    return s;
+}
+
 /// 行值改变后调用: 重算依赖, 重新加载表
 - (void)refreshAfterValueChange {
     BOOL before = NO, after = NO;
@@ -1361,10 +1389,10 @@ static BOOL TSValueEqual(id a, id b) {
     return n;
 }
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    return self.schema.sections[section].title;
+    return [self _resolvedText:self.schema.sections[section].title];
 }
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
-    return self.schema.sections[section].footer;
+    return [self _resolvedText:self.schema.sections[section].footer];
 }
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
     TSSettingsRow *r = [self _rowAtIndexPath:ip];
