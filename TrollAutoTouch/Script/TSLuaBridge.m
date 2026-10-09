@@ -4045,6 +4045,74 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
     lua_setglobal(L, "settings");
 }
 
+// ═══════════ 引擎内置 Lua 库 + 声明式 UI 框架 (tsui.lua) ═══════════
+// 目标: 脚本「只写一个声明式 build 函数」—— 表单生命周期/默认值推断/持久化/回调分发/
+//       按键分派全部下沉到引擎侧的 tsui.lua, 脚本不再需要 readSettings / mergeDefaults
+//       / writeSettings / onTap 等样板代码。
+// 加载顺序: 设备 /var/mobile/touch/lua/tsui.lua 优先(用户自行更新, 无需重新打包),
+//          其次 App 内置 <bundle>/lua/tsui.lua (build-ipa.sh 会把整个 Resources/lua
+//          拷到 TrollAutoTouch.app/lua)。
+// 同时把这两个目录并入 package.path, 让 require() 能命中引擎自带库(此前单脚本模式
+// 完全没有 package.path 注入, 只有项目模式加了项目目录)。
+// 找不到 tsui.lua 时静默返回: 缺库只会退化为无声明式框架, 不影响老脚本运行。
+- (void)_installScriptLibs:(lua_State *)L {
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    NSString *devDir = [TSPaths luaDir];
+    if (devDir.length) [dirs addObject:devDir];
+    NSString *bundleDir = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"lua"];
+    if (bundleDir.length) [dirs addObject:bundleDir];
+
+    // ── 1) package.path: 设备脚本目录 + 内置 lua 目录, 原 path 保留在末尾兜底 ──
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *d in dirs) {
+        [parts addObject:[d stringByAppendingPathComponent:@"?.lua"]];
+        [parts addObject:[d stringByAppendingPathComponent:@"?/init.lua"]];
+    }
+    lua_getglobal(L, "package");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "path");
+        if (lua_isstring(L, -1)) {
+            const char *oldPath = lua_tostring(L, -1);
+            if (oldPath) {
+                NSString *op = [NSString stringWithUTF8String:oldPath];
+                if (op.length) [parts addObject:op];
+            }
+        }
+        lua_pop(L, 1);
+        lua_pushstring(L, [[parts componentsJoinedByString:@";"] UTF8String]);
+        lua_setfield(L, -2, "path");
+    }
+    lua_pop(L, 1);
+
+    // ── 2) 预加载声明式 UI 框架 (把 ui.form / ui.run / ui.get ... 挂到已有全局 ui 表) ──
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *src = nil;
+    for (NSString *d in dirs) {
+        NSString *p = [d stringByAppendingPathComponent:@"tsui.lua"];
+        if ([fm fileExistsAtPath:p]) { src = p; break; }
+    }
+    if (!src) {
+        lua_log(@"[UI] 未找到 tsui.lua, 跳过声明式 UI 框架加载");
+        return;
+    }
+    NSData *data = [NSData dataWithContentsOfFile:src];
+    if (data.length == 0) return;
+
+    if (luaL_loadbuffer(L, data.bytes, data.length, "@tsui.lua") != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        lua_log([NSString stringWithFormat:@"[UI] tsui.lua 语法错误: %s", err ? err : "unknown"]);
+        lua_pop(L, 1);
+        return;
+    }
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        lua_log([NSString stringWithFormat:@"[UI] tsui.lua 执行失败: %s", err ? err : "unknown"]);
+        lua_pop(L, 1);
+        return;
+    }
+    lua_log([NSString stringWithFormat:@"[UI] 声明式 UI 框架已加载: %@", src]);
+}
+
 - (void)_execute:(NSString *)code filePath:(NSString *)path {
     _stopRequested = NO;
     _pauseRequested = NO;
@@ -4105,6 +4173,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 
     // 脚本网页设置 UI: 注入全局 settings 表 (用户经网页配置, 存于 <脚本>.settings.json)
     [self _injectSettingsTable:L scriptPath:path];
+
+    // 引擎自带 Lua 库 + 声明式 UI 框架 (package.path 注入 + tsui.lua 预加载)
+    [self _installScriptLibs:L];
 
     // 注意: 长度必须用 UTF-8 字节数(strlen)，不能用 code.length(NSString 字符数)。
     // 否则含中文的脚本会被截断, 报 ")` expected near <eof>" 之类的假语法错误。
@@ -4235,6 +4306,9 @@ static void lua_pushJSONObject(lua_State *L, id obj) {
 
     // 设置 settings (项目级)
     [self _injectSettingsTable:L scriptPath:projectDir];
+
+    // 引擎自带 Lua 库 + 声明式 UI 框架 (包内 .tas 亦可用: 框架随引擎走, 不依赖包内容)
+    [self _installScriptLibs:L];
 
     // 整包加密项目(.tas): 安装内存虚拟文件系统 —— 入口代码已在内存,
     // require/loadfile/dofile 读取项目内 .lua 时优先从内存源码表加载, 磁盘无明文
