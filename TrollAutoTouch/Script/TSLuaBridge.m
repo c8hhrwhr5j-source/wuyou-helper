@@ -3327,6 +3327,17 @@ static int l_restartScript(lua_State *L) {
     return 0;   // 不会到达(luaL_error 不返回), 仅消除编译告警
 }
 
+/// script.stop() / lua_exit() —— 停止当前脚本 (对齐触摸精灵 lua_exit 语义:
+/// 调用后后面的代码不再执行)。与音量键停止同机制: 请求停止(补发触摸/清重启
+/// 请求) + 抛错经 lua_pcall longjmp 立即退出。老脚本迁移用 (compat 垫片)。
+static int l_script_stop(lua_State *L) {
+    @autoreleasepool {
+        [[TSLuaBridge shared] stop];
+    }
+    luaL_error(L, "脚本已停止 (script.stop)");
+    return 0;   // 不会到达
+}
+
 #pragma mark - 注册
 
 static void lua_register_all(lua_State *L) {
@@ -3364,6 +3375,7 @@ static void lua_register_all(lua_State *L) {
         {"touchWatch",         l_touch_watch},
         {"findText",    l_screen_findText},
         {"restartScript", l_restartScript},
+        {"lua_exit",    l_script_stop},
         {NULL, NULL}
     };
     luaL_setfuncs(L, globals, 0);
@@ -3487,6 +3499,7 @@ static void lua_register_all(lua_State *L) {
     static const luaL_Reg scriptLib[] = {
         {"isPaused",  l_script_isPaused},
         {"isRunning", l_script_isRunning},
+        {"stop",      l_script_stop},
         {NULL, NULL}
     };
     luaL_newlib(L, scriptLib);
