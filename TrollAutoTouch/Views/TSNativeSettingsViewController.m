@@ -1075,6 +1075,14 @@ static BOOL TSValueEqual(id a, id b) {
 #pragma mark - 子页面 (select / multi / color)
 
 - (void)openSubListForRow:(TSSettingsRow *)row {
+    // HUD 承载模式下 view 挂在 SBS 远程上下文, 没有 navigationController 也无法 present
+    // (iOS 会打 "view is not in the window hierarchy" 警告并丢掉) → 降级 NSLog
+    // 切到 TrollAutoTouch 前台后这些子页/取色器才能正常用
+    if (self.hostedInHUD) {
+        NSLog(@"[TSNativeSettingsVC] HUD 模式: 子页/取色器需在前台使用 (行类型=%ld, label=%@)",
+              (long)row.type, row.label ?: @"<无标题>");
+        return;
+    }
     if (row.type == TSSettingsRowTypeSelect) {
         TSSelectListVC *vc = [[TSSelectListVC alloc] init];
         vc.row = row;
@@ -1197,11 +1205,18 @@ static BOOL TSValueEqual(id a, id b) {
 - (void)_onSaveTapped {
     NSString *err = nil;
     if (![self _validateWithErrorMessage:&err]) {
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"参数有误"
-                                                                   message:err
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:a animated:YES completion:nil];
+        if (self.hostedInHUD) {
+            // HUD 承载: view 挂在 SBS 远程上下文, 无父 VC, presentViewController 无法工作
+            // (iOS 会打 "Attempt to present X on Y whose view is not in the window hierarchy" 警告并丢掉)
+            // 降级为 NSLog: 用户看不到但能定位; 真要弹窗需切到 TrollAutoTouch 前台
+            NSLog(@"[TSNativeSettingsVC] HUD 模式: 校验失败 %@", err);
+        } else {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"参数有误"
+                                                                       message:err
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        }
         return;
     }
     [self _saveSettingsToJSON];
@@ -1210,11 +1225,16 @@ static BOOL TSValueEqual(id a, id b) {
 - (void)_onRunTapped {
     NSString *err = nil;
     if (![self _validateWithErrorMessage:&err]) {
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"参数有误"
-                                                                   message:err
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:a animated:YES completion:nil];
+        if (self.hostedInHUD) {
+            // 同 _onSaveTapped: HUD 模式下无父 VC, 校验失败只能 NSLog
+            NSLog(@"[TSNativeSettingsVC] HUD 模式: 校验失败 %@", err);
+        } else {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"参数有误"
+                                                                       message:err
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        }
         return;
     }
     [self _saveSettingsToJSON];

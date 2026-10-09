@@ -2874,8 +2874,14 @@ static BOOL TS_ScriptNativeUISchemaExists(NSString *name) {
 //
 // 共享的"展示 + 阻塞等待"helper, 复用 HTML/Native 两条路径的 present/dismiss/app-switch
 // 逻辑, createVC 工厂由调用方提供, 返回 nil 表示创建失败。
+// hudOnly=YES: 不切到 TrollAutoTouch 前台, 直接进 doShow; app 不在前台时会落到
+//              HUD 承载分支 (SBS 系统级层, 表单浮在游戏等前台 App 之上),
+//              适用于 UIKit 原生设置 (native), 在游戏/任何前台 App 之上直接弹出。
+// hudOnly=NO:  旧行为: app 不在前台时强制把 TrollAutoTouch 切到前台 1s 后再 present,
+//              仅 html 路径需要 (WKWebView 需在前台才能渲染)。
 static int ts_ui_presentAndWait(lua_State *L,
                                 NSString *name,
+                                BOOL hudOnly,
                                 UIViewController * _Nullable (^createVC)(void)) {
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block BOOL ran = NO;
@@ -2945,6 +2951,12 @@ static int ts_ui_presentAndWait(lua_State *L,
     };
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        // native 路径: 不切前台, 让 doShow 直接落到 HUD 承载分支
+        if (hudOnly) {
+            NSLog(@"[QQ音乐] ui.open(%@): HUD 模式显示 (不切前台)", name);
+            doShow();
+            return;
+        }
         if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
             // 后台先切前台, 让 WKWebView 恢复渲染 (仅 html 路径需要, native 路径无需等待)
             NSLog(@"[QQ音乐] ui.open(%@): App 不在前台, 先切回前台(1s)再显示", name);
@@ -3042,12 +3054,12 @@ static int l_ui_open(lua_State *L) {
             lua_pushboolean(L, 0);
             return 1;
         }
-        return ts_ui_presentAndWait(L, name, ^{
+        return ts_ui_presentAndWait(L, name, YES /*hudOnly*/, ^{
             return [[TSNativeSettingsViewController alloc] initWithSchema:schema];
         });
     }
     // html
-    return ts_ui_presentAndWait(L, name, ^{
+    return ts_ui_presentAndWait(L, name, NO /*hudOnly*/, ^{
         return [[TSScriptUIViewController alloc] initWithScriptName:name title:name];
     });
 }
@@ -3080,7 +3092,7 @@ static int l_ui_openForm(lua_State *L) {
         lua_pushboolean(L, 0);
         return 1;
     }
-    return ts_ui_presentAndWait(L, name, ^{
+    return ts_ui_presentAndWait(L, name, YES /*hudOnly*/, ^{
         return [[TSNativeSettingsViewController alloc] initWithSchema:schema];
     });
 }

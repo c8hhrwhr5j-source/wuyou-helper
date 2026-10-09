@@ -2173,7 +2173,9 @@ ui.openForm("myScript", {
 
 1. **保存的设置是字典**：写 `ts.save({a=1, b="x"})` 后，脚本里 `settings.a == 1`，`settings.b == "x"`。所有键会被序列化为 JSON。
 2. **TSAPI 接口走 HTTP**：网页与原生通过 `http://127.0.0.1:<port>/api/ui/...` 通信，App 已在 Info.plist 配置 `NSAllowsLocalNetworking=true` 允许本地网络请求。
-3. **后台弹出行为**：当 App 在后台（游戏在前台）时，调用 `ui.open` 会先把 TrollAutoTouch 切回前台（1 秒）让 WKWebView 恢复渲染，关闭后自动切回游戏。若切前台失败（极少见），回退到 SBS 系统级层承载（可能空白）。
+3. **后台弹出行为**：当 App 在后台（游戏在前台）时，弹窗策略按路径不同：
+   - `ui.open(name, "html")` 或 auto 解析到 html：先把 TrollAutoTouch 切回前台（1 秒）让 WKWebView 恢复渲染，关闭后自动切回游戏
+   - `ui.open(name, "native")` / `ui.openForm(name, schema)`：**直接走 SBS 系统级层承载**（HUD 模式），不切到 TrollAutoTouch 前台，不打断游戏。HUD 承载失败（SBS 未托管）才回退到切前台
 4. **取消 vs 保存**：点网页底部"取消"→ `ts.cancel()` → 引擎收到通知后调用 `[[TSLuaBridge shared] stop]` 停止当前脚本、关闭设置页。点"保存"或"保存并运行"→ `ts.save()` → 写 settings.json、关闭设置页、是否启动脚本由 `ui.open` 的返回值决定。
 5. **停止快捷键**：用户随时可以按音量键 / 悬浮球"停止"按钮强制中断设置页（与 HTML 路径同样支持），脚本会收到 `false` 返回值并按默认配置继续。
 
@@ -2342,6 +2344,7 @@ end
 
 1. **存储格式与 HTML 版完全相同**：`{key=value, ...}` 写到 `<name>.settings.json`，脚本读 `settings.xxx` 全局表，零额外适配。
 2. **后台弹出行为**：当 App 在后台（游戏在前台）时，UIKit 原生 UI **直接**走 SBS 系统级层承载，无需切回本 App、不打断游戏，**这正是 UIKit 路径的最大优势**。
+   **HUD 承载局限**：`select` / `multi` 子页（点行进子列表选）、`color` 取色器、校验失败弹窗在 HUD 模式下无法 present（view 挂在 SBS 远程上下文，没有 nav controller 也没有 window hierarchy），会被降级为 NSLog。脚本若主要使用这些类型，请引导用户先切到 TrollAutoTouch 前台再弹设置；只用 `switch / checkbox / checkGroup / segmented / stepper / slider / text / number / date / duration / action / info` 不受影响（梦幻西游脚本的任务区就属于这种情况）。
 3. **键盘交互**：iOS 15+ 上 SBS 托管窗口弹键盘基本可用，但偶发不回滚。设置项建议用 segmented / stepper / slider / switch 减少键盘依赖。
 4. **依赖显示会触发 reload**：某行值变化导致其他行显隐切换时，表格会 reload，UI 会闪一下 —— 不影响功能，只影响观感。
 5. **保存即可运行**：UIKit 原生 UI 的"保存并运行"按钮与 HTML 版的 `ts.save()` 行为完全一致：写 settings.json + 关闭 + 启动脚本 + 注入 `settings` 全局表。
