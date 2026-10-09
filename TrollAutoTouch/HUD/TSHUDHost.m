@@ -1029,6 +1029,12 @@ static void TSHUDFlushCATransaction(void) {
             // formOrient == 0 (Auto): 不干预
         }
         [vc endAppearanceTransition];
+        // 设置页含 UITextField / UIMenu 下拉, 只有当其所在窗口是 keyWindow 时
+        // 键盘才能唤起、菜单才能弹出。start 时曾把 key 交还主窗口 (见 start 注释),
+        // 这里在全屏内容挂载期间把 key 拿回来, 卸载时再交还 (见 _detachVCFromHUD)。
+        if (_window && !_window.isKeyWindow) {
+            [_window makeKeyWindow];
+        }
         // 后台时 CA 提交会被节流/跳过, 显式 flush 确保网页设置页立即同步到远程上下文。
         TSHUDFlushCATransaction();
         HUDLog(@"presentViewControllerInHUD attached: %@", NSStringFromClass([vc class]));
@@ -1044,10 +1050,17 @@ static void TSHUDFlushCATransaction(void) {
     @try {
         if (vc.view.superview == nil) return; // 未挂载: 未 bump, 无需 drop
         [vc beginAppearanceTransition:NO animated:NO];
+        // 先收起键盘 (若 textField 还是 firstResponder) 再摘视图
+        [vc.view endEditing:YES];
         [vc.view removeFromSuperview];
         [vc endAppearanceTransition];
         // 活跃内容清空 → 注销系统级托管 + 隐藏窗口, 解除全屏触摸吞没
         [self _dropActiveContent];
+        // 把 key 交还主窗口 (挂载时曾拿走, 见 _attachVCToHUD 注释)
+        UIWindow *mainW = [self _foregroundWindow];
+        if (mainW && mainW != _window) {
+            [mainW makeKeyWindow];
+        }
         // 后台时 CA 提交会被节流/跳过, 显式 flush 确保移除立即同步。
         TSHUDFlushCATransaction();
     } @catch (NSException *e) {

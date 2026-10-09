@@ -605,9 +605,11 @@ static UIView *TSFindFirstResponder(UIView *v) {
             NSString *cur = [v isKindOfClass:[NSString class]] ? v : nil;
             [self.disclosureButton setTitle:[NSString stringWithFormat:@"%@ ▾", cur ?: @"未选择"]
                                   forState:UIControlStateNormal];
-            BOOL hud = [self.vc isKindOfClass:[TSNativeSettingsViewController class]]
-                && ((TSNativeSettingsViewController *)self.vc).hostedInHUD;
-            if (@available(iOS 14.0, *) && !hud && row.options.count > 0) {
+            // HUD 承载模式也挂 UIMenu: 二级列表在 HUD 下无法 present
+            // (openSubListForRow 对 hostedInHUD 直接 return), 此前 HUD 里
+            // select 点击完全无反应。UIMenu 是按钮锚定的弹出菜单, 挂在
+            // HUD 窗口的 windowScene 上即可弹出, 不需要 present 导航栈。
+            if (@available(iOS 14.0, *) && row.options.count > 0) {
                 // 原生下拉菜单 (iOS 14+): 点行内按钮就地展开选项, 不再跳二级列表。
                 // 注: ObjC 里 UIAction 只有 actionWithHandler: / actionWithTitle:
                 // image:identifier:handler: 两个类方法, 带 state/attributes 的全参
@@ -630,7 +632,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
                 self.disclosureButton.showsMenuAsPrimaryAction = YES;
                 self.disclosureButton.menu = [UIMenu menuWithTitle:@"" children:actions];
             } else {
-                // HUD 承载 / 老系统 / 无选项: 保留二级列表 (_onDisclosureTap → openSubListForRow)
+                // 老系统 / 无选项: 保留二级列表 (_onDisclosureTap → openSubListForRow)
                 self.disclosureButton.showsMenuAsPrimaryAction = NO;
                 self.disclosureButton.menu = nil;
             }
@@ -756,7 +758,8 @@ static UIView *TSFindFirstResponder(UIView *v) {
     // 其余: 左 titleLabel, 右控件
     // 标题区宽度按右侧控件实际占用自适应:
     //   switch (51pt) / checkbox (28pt) 这类右侧小控件, 标题区可占满 (避免长中文 label 截断)
-    //   segmented / text / select 等右侧大控件, 标题区保持 110pt 防挤压
+    //   segmented / text / select 等右侧大控件, 标题区保持 150pt
+    //   (中文 label 如 "【主程序】　运行方式" 约 10 字 × 15pt, 110pt 会截断)
     CGFloat titleW;
     switch (self.row.type) {
         case TSSettingsRowTypeSwitch:
@@ -766,7 +769,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
             titleW = w - left - right - 28 - 8;
             break;
         default:
-            titleW = 110;
+            titleW = 150;
             break;
     }
     self.titleLabel.frame = CGRectMake(left, (h - 20) / 2, titleW, 20);
