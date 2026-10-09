@@ -287,6 +287,10 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
         lua_getfield(L, idx, "visibleWhenValue");
         if (!lua_isnil(L, -1)) {
             row.visibleWhenValue = tsSchema_getLuaValue(L, lua_gettop(L));
+        } else {
+            // 缺省 = @YES: "开关控制显隐"可以只写 visibleWhen = "开关key" 不写值。
+            // (此前 nil 会让 TSValueEqual(depVal, nil) 恒为 NO → 行被永久隐藏)
+            row.visibleWhenValue = @YES;
         }
         lua_pop(L, 1);
     }
