@@ -430,16 +430,32 @@ static TSSettingsSection *_Nullable tsSchema_parseSection(lua_State *L, int idx,
     if (s.title.length == 0) s.title = name;
 
     NSMutableArray<TSSettingsSection *> *sections = [NSMutableArray array];
-    // 两种 schema 形态:
+    // 三种 schema 形态:
     //   A) {sections = {{title, rows={...}}, ...}}  —— 显式分组
     //   B) {{title, rows={...}}, ...}  直接是 sections 数组
+    //   C) {rows = {...}}              根自己就是一个分组 (单分组最简写法; 此前不认,
+    //      落到 B 路径后 rawlen=0 → 表单整页空白, 只剩底部按钮)
     lua_getfield(L, idx, "sections");
     int tableIdx;
     if (lua_istable(L, -1)) {
         tableIdx = (int)lua_gettop(L);
     } else {
         lua_pop(L, 1);
-        tableIdx = idx;  // 直接是数组
+        lua_getfield(L, idx, "rows");
+        if (lua_istable(L, -1) && lua_rawlen(L, idx) == 0) {
+            // C: 根表直接当 section 解析 (title/footer/rows 字段齐备)
+            lua_pop(L, 1);
+            NSError *secErr = nil;
+            TSSettingsSection *sec = tsSchema_parseSection(L, idx, &secErr);
+            if (sec) [sections addObject:sec];
+            else if (secErr) {
+                NSLog(@"[SettingsSchema] 单分组解析失败: %@", secErr.localizedDescription);
+            }
+            s.sections = sections;
+            return s;
+        }
+        lua_pop(L, 1);
+        tableIdx = idx;  // B) 直接是数组
     }
 
     int n = (int)lua_rawlen(L, tableIdx);

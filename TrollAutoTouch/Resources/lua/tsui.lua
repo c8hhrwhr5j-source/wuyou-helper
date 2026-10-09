@@ -211,6 +211,27 @@ local function eachRow(schema, fn)
 end
 
 -- 下沉点①: 自动补 default、自动接管 action 行的 onTap
+-- 显式 default 的形态归一 (写在 row 里的 default 允许更顺手的写法):
+--   segmented/select: 数字 n → options[n]        (default = 2 → 第 2 个选项)
+--   checkGroup/multi: {true,false,...} 布尔数组   → 勾中的选项名数组 (按位置对应)
+local function normalizeDefault(row)
+    local d = row.default
+    if d == nil then return end
+    local t = row.type
+    if (t == "segmented" or t == "select") and type(d) == "number" then
+        local o = row.options
+        if type(o) == "table" then row.default = o[math.floor(d)] end
+    elseif (t == "checkGroup" or t == "multi") and type(d) == "table" and type(d[1]) == "boolean" then
+        local o, sel = row.options, {}
+        if type(o) == "table" then
+            for i, on in ipairs(d) do
+                if on and o[i] ~= nil then sel[#sel + 1] = o[i] end
+            end
+        end
+        row.default = sel
+    end
+end
+
 local function prepareSchema(schema)
     eachRow(schema, function(row)
         local t = row.type
@@ -235,6 +256,13 @@ local function prepareSchema(schema)
                 end
             end
             return
+        end
+
+        normalizeDefault(row)
+        -- 显式 default 同步进值表 (未保存过时), ui.get / 落盘都能看到;
+        -- settings.json 已有值则 S.values[k] 非 nil, 保存值优先, 不会被默认值覆盖
+        if row.default ~= nil and S.values[k] == nil then
+            S.values[k] = row.default
         end
 
         if row.default == nil then
