@@ -39,9 +39,23 @@ extern void TSLuaUnrefAction(int ref);
 // view controller 的 class extension (解耦)
 @protocol TSNativeSettingsCellDelegate <NSObject>
 - (void)refreshAfterValueChange;
+/// 子页 (select/multi) 选值回来或下拉菜单选中后整表刷新显示
+- (void)reloadForm;
 - (void)openSubListForRow:(TSSettingsRow *)row;
 - (void)invokeActionForRow:(TSSettingsRow *)row;
 @end
+
+/// 关闭子页: push 进来的 (导航栈 >1 层) 用 pop; 被 present 的导航根控制器
+/// 无法 pop (曾因此"选完不关闭") → dismiss 整个导航
+static void TSCloseSubPage(UIViewController *vc) {
+    UINavigationController *nav = vc.navigationController;
+    if (!nav) return;
+    if (nav.viewControllers.count > 1) {
+        [nav popViewControllerAnimated:YES];
+    } else {
+        [nav dismissViewControllerAnimated:YES completion:nil];
+    }
+}
 
 #pragma mark - 辅助
 
@@ -109,6 +123,14 @@ static BOOL TSValueEqual(id a, id b) {
     self.tableView.dataSource = self;
     self.tableView.delegate = self;
     [self.view addSubview:self.tableView];
+    // present 包裹模式下没有系统返回按钮 → 提供取消入口 (不写值直接关)
+    self.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                                                      target:self
+                                                      action:@selector(_onCancel)];
+}
+- (void)_onCancel {
+    TSCloseSubPage(self);
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     return self.row.options.count;
@@ -127,7 +149,8 @@ static BOOL TSValueEqual(id a, id b) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     self.row.currentValue = self.row.options[ip.row];
     [self.parent refreshAfterValueChange];
-    [self.navigationController popViewControllerAnimated:YES];
+    [self.parent reloadForm];
+    TSCloseSubPage(self);
 }
 @end
 
@@ -150,11 +173,15 @@ static BOOL TSValueEqual(id a, id b) {
     self.tableView.delegate = self;
     [self.view addSubview:self.tableView];
 
-    // 完成按钮
+    // 完成按钮 + 取消按钮 (present 包裹模式下没有系统返回)
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                       target:self
                                                       action:@selector(_onDone)];
+    self.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                                                      target:self
+                                                      action:@selector(_onCancel)];
 
     id cur = TSValueForKey(self.row);
     self.selected = [NSMutableSet set];
@@ -187,10 +214,15 @@ static BOOL TSValueEqual(id a, id b) {
     }
     [tv reloadRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationNone];
 }
+- (void)_onCancel {
+    // 不写值直接关闭
+    TSCloseSubPage(self);
+}
 - (void)_onDone {
     self.row.currentValue = [self.selected allObjects];
     [self.parent refreshAfterValueChange];
-    [self.navigationController popViewControllerAnimated:YES];
+    [self.parent reloadForm];
+    TSCloseSubPage(self);
 }
 @end
 
@@ -566,24 +598,23 @@ static BOOL TSValueEqual(id a, id b) {
             BOOL hud = [self.vc isKindOfClass:[TSNativeSettingsViewController class]]
                 && ((TSNativeSettingsViewController *)self.vc).hostedInHUD;
             if (@available(iOS 14.0, *) && !hud && row.options.count > 0) {
-                // 原生下拉菜单 (iOS 14+): 点行内按钮就地展开选项, 不再跳二级列表
+                // 原生下拉菜单 (iOS 14+): 点行内按钮就地展开选项, 不再跳二级列表。
+                // 注: ObjC 里 UIAction 只有 actionWithHandler: / actionWithTitle:
+                // image:identifier:handler: 两个类方法, 带 state/attributes 的全参
+                // 构造是 Swift 专属 (曾报 "no known class method") → 无法显示 ✓,
+                // 当前值由按钮文字本身表达
                 NSMutableArray<UIAction *> *actions = [NSMutableArray array];
                 __weak typeof(self) weakSelf = self;
                 for (NSString *opt in row.options) {
-                    UIMenuElementState st = [opt isEqualToString:cur] ? UIMenuElementStateOn : UIMenuElementStateOff;
                     [actions addObject:[UIAction actionWithTitle:opt
                                                             image:nil
                                                        identifier:nil
-                                              discoverabilityTitle:nil
-                                                       attributes:0
-                                                            state:st
                                                          handler:^(UIAction *a) {
                         __strong typeof(weakSelf) self = weakSelf;
                         if (!self) return;
                         self.row.currentValue = a.title;
-                        [self.disclosureButton setTitle:[NSString stringWithFormat:@"%@ ▾", a.title]
-                                              forState:UIControlStateNormal];
                         [self.vc refreshAfterValueChange];
+                        [self.vc reloadForm];
                     }]];
                 }
                 self.disclosureButton.showsMenuAsPrimaryAction = YES;
@@ -1243,6 +1274,12 @@ static BOOL TSValueEqual(id a, id b) {
     }
 }
 
+/// 子页 (select/multi) 选值回来或下拉菜单选中后刷新整表显示。
+/// (不能并进 refreshAfterValueChange: 滑块拖动会连续调它, 每帧 reloadData 会打断手势)
+- (void)reloadForm {
+    [self.tableView reloadData];
+}
+
 #pragma mark - 子页面 (select / multi / color)
 
 - (void)openSubListForRow:(TSSettingsRow *)row {
@@ -1377,6 +1414,10 @@ static BOOL TSValueEqual(id a, id b) {
         if ([cell isKindOfClass:[TSSettingsCell class]]) {
             [cell _onCheckboxToggle];
         }
+    } else if (r.type == TSSettingsRowTypeMulti || r.type == TSSettingsRowTypeColor) {
+        // 整行可点: multi 弹多选子页; color 色块只是 UIView 没有自己的手势,
+        // 点击路由到取色器 (此前点色块毫无反应就是这个原因)
+        [self openSubListForRow:r];
     }
 }
 
