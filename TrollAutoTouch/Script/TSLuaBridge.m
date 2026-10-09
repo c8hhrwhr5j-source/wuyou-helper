@@ -3034,6 +3034,7 @@ static int l_ui_open(lua_State *L) {
 
     // opts (可选第三参, 仅 native 路径生效)
     TSNativeFormOrientation formOrient = TSNativeFormOrientationAuto;
+    NSTimeInterval autoCloseAfter = 0;
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "orientation");
         if (lua_isstring(L, -1)) {
@@ -3042,6 +3043,12 @@ static int l_ui_open(lua_State *L) {
             else if (strcmp(o, "landscape") == 0) formOrient = TSNativeFormOrientationLandscape;
             else if (strcmp(o, "auto") == 0) formOrient = TSNativeFormOrientationAuto;
             else NSLog(@"[ui.open] 未知的 orientation='%s' (应为 auto/portrait/landscape)", o);
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "autoCloseAfter");
+        if (lua_isnumber(L, -1)) {
+            autoCloseAfter = (NSTimeInterval)lua_tonumber(L, -1);
+            if (autoCloseAfter < 0) autoCloseAfter = 0;
         }
         lua_pop(L, 1);
     }
@@ -3075,6 +3082,7 @@ static int l_ui_open(lua_State *L) {
             TSNativeSettingsViewController *vc =
                 [[TSNativeSettingsViewController alloc] initWithSchema:schema];
             vc.formOrientation = formOrient;
+            vc.autoCloseAfter = autoCloseAfter;
             return vc;
         });
     }
@@ -3091,6 +3099,9 @@ static int l_ui_open(lua_State *L) {
 //     orientation: "auto" (默认, 跟随前台 app/脚本坐标系) | "portrait" (强制竖屏)
 //                 | "landscape" (强制横屏)。仅 HUD 承载模式生效, 前台 present
 //                 模式下被忽略 (跟随 TrollAutoTouch app 方向)。
+//     autoCloseAfter: 数字 (秒), > 0 时表单加载后启动倒计时, 归零自动"保存并运行"。
+//                     用户点取消立即停止脚本 (不发信号给上层 Lua 任何回调)。
+//                     默认 0 = 不自动关闭, 用户必须手动点按钮。
 //   返回值同 ui.open (true=已运行, false=取消/失败)。
 static int l_ui_openForm(lua_State *L) {
     const char *nameC = luaL_checkstring(L, 1);
@@ -3106,8 +3117,9 @@ static int l_ui_openForm(lua_State *L) {
     if (!lua_istable(L, 2)) {
         return luaL_error(L, "ui.openForm: 第二个参数必须是 schema table");
     }
-    // opts (可选第三参): 解析 orientation
+    // opts (可选第三参): 解析 orientation + autoCloseAfter
     TSNativeFormOrientation formOrient = TSNativeFormOrientationAuto;
+    NSTimeInterval autoCloseAfter = 0;
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "orientation");
         if (lua_isstring(L, -1)) {
@@ -3121,6 +3133,12 @@ static int l_ui_openForm(lua_State *L) {
             } else {
                 NSLog(@"[ui.openForm] 未知的 orientation='%s' (应为 auto/portrait/landscape), 使用默认 auto", o);
             }
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "autoCloseAfter");
+        if (lua_isnumber(L, -1)) {
+            autoCloseAfter = (NSTimeInterval)lua_tonumber(L, -1);
+            if (autoCloseAfter < 0) autoCloseAfter = 0;
         }
         lua_pop(L, 1);
     }
@@ -3138,6 +3156,7 @@ static int l_ui_openForm(lua_State *L) {
         TSNativeSettingsViewController *vc =
             [[TSNativeSettingsViewController alloc] initWithSchema:schema];
         vc.formOrientation = formOrient;
+        vc.autoCloseAfter = autoCloseAfter;
         return vc;
     });
 }

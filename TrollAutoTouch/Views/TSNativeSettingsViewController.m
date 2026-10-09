@@ -823,6 +823,10 @@ static BOOL TSValueEqual(id a, id b) {
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UIView *footerBar;
 @property (nonatomic, weak) TSSettingsRow *colorPickerRow;   // 当前色板操作的 row
+// 自动关闭倒计时 (autoCloseAfter > 0 时启用): 每秒 tick 减 1, 归零自动 _onRunTapped
+@property (nonatomic, strong, nullable) NSTimer *autoCloseTimer;
+@property (nonatomic, strong, nullable) UILabel *autoCloseLabel;   // 倒计时文字 "N 秒后自动保存并运行..."
+@property (nonatomic, assign) NSInteger autoCloseRemaining;       // 当前剩余秒数
 @end
 
 @implementation TSNativeSettingsViewController {
@@ -884,8 +888,21 @@ static BOOL TSValueEqual(id a, id b) {
     [self.tableView reloadData];
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // 启动自动关闭倒计时 (autoCloseAfter > 0 才启用)
+    [self _startAutoCloseTimerIfNeeded];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self _invalidateAutoCloseTimer];
+}
+
 - (void)_layoutSubviews {
-    CGFloat footerH = 56;
+    // footer 高度自适应: 无倒计时 56pt, 有倒计时 84pt (按钮 40pt + 标签 24pt + 上下边距 20pt)
+    BOOL hasCountdown = (self.autoCloseAfter > 0);
+    CGFloat footerH = hasCountdown ? 84 : 56;
     CGRect b = self.view.bounds;
     self.footerBar.frame = CGRectMake(0, b.size.height - footerH, b.size.width, footerH);
     self.tableView.frame = CGRectMake(0, 0, b.size.width, b.size.height - footerH);
@@ -911,37 +928,78 @@ static BOOL TSValueEqual(id a, id b) {
         [sep.heightAnchor constraintEqualToConstant:0.5],
     ]];
 
+    // 取消按钮: 红色背景, 白字, 整行宽的一半
     UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-    [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    cancel.titleLabel.font = [UIFont systemFontOfSize:15];
+    [self _styleColoredButton:cancel title:@"取消"
+                        bgColor:[UIColor systemRedColor]
+                    titleWeight:UIFontWeightSemibold];
     [cancel addTarget:self action:@selector(_onCancelTapped) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:cancel];
 
-    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
-    [save setTitle:@"保存" forState:UIControlStateNormal];
-    save.titleLabel.font = [UIFont systemFontOfSize:15];
-    [save addTarget:self action:@selector(_onSaveTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:save];
-
+    // 运行按钮: 蓝色背景, 白字, 整行宽的一半 (与取消等宽, 视觉上"主操作")
     UIButton *run = [UIButton buttonWithType:UIButtonTypeSystem];
-    [run setTitle:@"保存并运行" forState:UIControlStateNormal];
-    run.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    [run setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    [self _styleColoredButton:run title:@"运行"
+                      bgColor:[UIColor systemBlueColor]
+                   titleWeight:UIFontWeightSemibold];
     [run addTarget:self action:@selector(_onRunTapped) forControlEvents:UIControlEventTouchUpInside];
     [bar addSubview:run];
 
     cancel.translatesAutoresizingMaskIntoConstraints = NO;
-    save.translatesAutoresizingMaskIntoConstraints = NO;
     run.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // 倒计时标签 (autoCloseAfter > 0 时才创建)
+    if (self.autoCloseAfter > 0) {
+        UILabel *lbl = [[UILabel alloc] init];
+        lbl.font = [UIFont systemFontOfSize:12];
+        lbl.textColor = [UIColor secondaryLabelColor];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.numberOfLines = 1;
+        lbl.translatesAutoresizingMaskIntoConstraints = NO;
+        [bar addSubview:lbl];
+        self.autoCloseLabel = lbl;
+    }
+
+    CGFloat side = 14;   // 左右边距
+    CGFloat gap = 10;    // 按钮间距
+    CGFloat btnH = 40;   // 按钮高度
+    CGFloat topY = 12;   // 按钮顶部 y (有倒计时再留出标签位置)
+
     [NSLayoutConstraint activateConstraints:@[
-        [cancel.leftAnchor constraintEqualToAnchor:bar.leftAnchor constant:16],
-        [cancel.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
-        [run.rightAnchor constraintEqualToAnchor:bar.rightAnchor constant:-16],
-        [run.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
-        [save.rightAnchor constraintEqualToAnchor:run.leftAnchor constant:-24],
-        [save.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        // 取消按钮: 左侧, 等宽于运行按钮
+        [cancel.leftAnchor constraintEqualToAnchor:bar.leftAnchor constant:side],
+        [cancel.topAnchor constraintEqualToAnchor:bar.topAnchor constant:topY],
+        [cancel.heightAnchor constraintEqualToConstant:btnH],
+        [cancel.widthAnchor constraintEqualToAnchor:run.widthAnchor],
+        // 运行按钮: 右侧
+        [run.rightAnchor constraintEqualToAnchor:bar.rightAnchor constant:-side],
+        [run.topAnchor constraintEqualToAnchor:bar.topAnchor constant:topY],
+        [run.heightAnchor constraintEqualToConstant:btnH],
+        [run.leftAnchor constraintEqualToAnchor:cancel.rightAnchor constant:gap],
     ]];
+
+    if (self.autoCloseLabel) {
+        [NSLayoutConstraint activateConstraints:@[
+            [self.autoCloseLabel.leftAnchor constraintEqualToAnchor:bar.leftAnchor constant:side],
+            [self.autoCloseLabel.rightAnchor constraintEqualToAnchor:bar.rightAnchor constant:-side],
+            [self.autoCloseLabel.topAnchor constraintEqualToAnchor:cancel.bottomAnchor constant:6],
+        ]];
+    }
     return bar;
+}
+
+// 把按钮染成"色块按钮"风格: 圆角矩形 + 底色 + 白字 + semibold
+// (UIButtonTypeSystem 默认是纯文字, 不带背景, 需用 UIButtonTypeCustom 才能画底色;
+//  这里仍用 System 类型, 直接 setBackgroundColor + cornerRadius 也能实现同样效果)
+- (void)_styleColoredButton:(UIButton *)btn
+                      title:(NSString *)title
+                    bgColor:(UIColor *)bgColor
+                 titleWeight:(UIFontWeight)weight {
+    [btn setTitle:title forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:weight];
+    btn.backgroundColor = bgColor;
+    btn.layer.cornerRadius = 10;
+    btn.layer.masksToBounds = YES;
 }
 
 #pragma mark - 数据读写
@@ -1214,15 +1272,18 @@ static BOOL TSValueEqual(id a, id b) {
 - (void)_onCancelTapped {
     if (_cancelRequested) return;
     _cancelRequested = YES;
+    // 取消: 真正停止脚本 (设 _stopRequested, 下一次 Lua C 调用会抛"脚本已被停止")
+    // 不写 settings.json (用户明确表达"什么都不做"), 关闭表单后 onFinish(didRun=NO) 返回 Lua
+    [self _invalidateAutoCloseTimer];
+    [[TSLuaBridge shared] stop];
     [self _dismissAndFinish:NO];
 }
 - (void)_onSaveTapped {
+    // 注: 当前 UI 底部已改为 2 按钮 (取消/运行), 不再展示"保存"按钮; 此方法保留以备
+    // 未来扩展 (如长按运行按钮弹菜单) 或被外部代码调用。HUD 模式校验弹窗降级见下。
     NSString *err = nil;
     if (![self _validateWithErrorMessage:&err]) {
         if (self.hostedInHUD) {
-            // HUD 承载: view 挂在 SBS 远程上下文, 无父 VC, presentViewController 无法工作
-            // (iOS 会打 "Attempt to present X on Y whose view is not in the window hierarchy" 警告并丢掉)
-            // 降级为 NSLog: 用户看不到但能定位; 真要弹窗需切到 TrollAutoTouch 前台
             NSLog(@"[TSNativeSettingsVC] HUD 模式: 校验失败 %@", err);
         } else {
             UIAlertController *a = [UIAlertController alertControllerWithTitle:@"参数有误"
@@ -1251,8 +1312,53 @@ static BOOL TSValueEqual(id a, id b) {
         }
         return;
     }
+    [self _invalidateAutoCloseTimer];
     [self _saveSettingsToJSON];
     [self _dismissAndFinish:YES];
+}
+
+#pragma mark - 自动关闭倒计时
+
+- (void)_startAutoCloseTimerIfNeeded {
+    if (self.autoCloseAfter <= 0) return;
+    self.autoCloseRemaining = (NSInteger)ceil(self.autoCloseAfter);
+    [self _updateAutoCloseLabel];
+    // 主线程 timer, 1 秒 tick 一次, 不阻塞主线程
+    self.autoCloseTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                            target:self
+                                                          selector:@selector(_onAutoCloseTick:)
+                                                          userInfo:nil
+                                                           repeats:YES];
+    // 加到 common modes 防止 tableView 滑动时 timer 卡住
+    [[NSRunLoop mainRunLoop] addTimer:self.autoCloseTimer forMode:NSRunLoopCommonModes];
+    NSLog(@"[TSNativeSettingsVC] 自动关闭倒计时: %ld 秒", (long)self.autoCloseRemaining);
+}
+
+- (void)_invalidateAutoCloseTimer {
+    [self.autoCloseTimer invalidate];
+    self.autoCloseTimer = nil;
+}
+
+- (void)_onAutoCloseTick:(NSTimer *)t {
+    self.autoCloseRemaining -= 1;
+    if (self.autoCloseRemaining > 0) {
+        [self _updateAutoCloseLabel];
+        return;
+    }
+    // 倒计时归零: 模拟用户点"运行" (保存 + 启动脚本)
+    [self _invalidateAutoCloseTimer];
+    NSLog(@"[TSNativeSettingsVC] 自动关闭倒计时归零, 自动触发运行");
+    if (self.autoCloseLabel) {
+        self.autoCloseLabel.text = @"自动运行中...";
+    }
+    [self _onRunTapped];
+}
+
+- (void)_updateAutoCloseLabel {
+    if (!self.autoCloseLabel) return;
+    self.autoCloseLabel.text = [NSString stringWithFormat:
+        @"%ld 秒后自动保存并运行 (点取消停止脚本)",
+        (long)self.autoCloseRemaining];
 }
 
 - (void)_dismissAndFinish:(BOOL)didRun {

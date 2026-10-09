@@ -59,6 +59,13 @@ typedef NS_ENUM(NSInteger, TSNativeFormOrientation) {
 /// 不影响 HUD 内容层的旋转 (那是 screen.init 控制的)。
 @property (nonatomic, assign) TSNativeFormOrientation formOrientation;
 
+/// 自动关闭时间 (秒)。默认 0 = 不自动关闭。
+/// > 0 时表单加载后启动倒计时, 归零自动触发 "运行" 流程 (保存设置 + 启动脚本)。
+/// 倒计时期间用户可随时点 "取消" (停止脚本 + 关闭表单) 或 "运行" (立即结束倒计时)。
+/// 0 时不显示倒计时标签, 行为与历史一致 (用户必须手动点按钮)。
+/// 典型用法: 30 (梦幻西游脚本兜底配置时弹表单, 30s 未操作按当前设置继续)。
+@property (nonatomic, assign) NSTimeInterval autoCloseAfter;
+
 @end
 
 NS_ASSUME_NONNULL_END

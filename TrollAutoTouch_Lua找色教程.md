@@ -2360,6 +2360,32 @@ ui.open("myScript", "native", { orientation = "portrait" })
 
 仅 HUD 承载模式生效；TrollAutoTouch 在前台时（极少见，通常是脚本自己切的）此参数被忽略，跟随 app 方向。
 
+#### 底部按钮 + 自动关闭（opts.autoCloseAfter）
+
+底部**只有两个按钮**：
+
+| 按钮 | 背景 | 行为 |
+|---|---|---|
+| `取消` | 红色（systemRed） | 调 `[[TSLuaBridge shared] stop]` 真正停止脚本，**不写** settings.json，关闭表单返回 false |
+| `运行` | 蓝色（systemBlue） | 保存 settings.json + 关闭表单 + 引擎注入 settings 表 + 启动脚本（与历史"保存并运行"完全一致） |
+
+`opts.autoCloseAfter`（数字，秒）开启后表单加载时启动倒计时：
+
+- 倒计时期间底部显示 `N 秒后自动保存并运行 (点取消停止脚本)`
+- **归零自动触发"运行"流程**（与点运行按钮完全等价：保存 + 启动）
+- 倒计时期间用户可随时点取消（立即停止脚本）或点运行（提前结束倒计时）
+- 默认 0 = 不自动关闭，行为与历史一致
+
+```lua
+-- 30 秒未操作按当前显示设置自动运行 (梦幻西游脚本兜底配置场景)
+ui.openForm("myScript", schema, { autoCloseAfter = 30 })
+
+-- 组合: 强制竖屏 + 30s 自动关闭
+ui.openForm("myScript", schema, { orientation = "portrait", autoCloseAfter = 30 })
+```
+
+**注意**：`取消` 真的会让 `[[TSLuaBridge shared] stop]` 触发 `_stopRequested=YES`，后续任何 Lua C 调用会抛"脚本已被停止"并立即中断当前脚本。如果你只是想关闭表单而继续用旧配置运行，请改用其他方式（如 sys.alert 二次确认）。
+
 #### 常见注意事项
 
 1. **存储格式与 HTML 版完全相同**：`{key=value, ...}` 写到 `<name>.settings.json`，脚本读 `settings.xxx` 全局表，零额外适配。
