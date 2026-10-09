@@ -17,6 +17,11 @@
 //
 
 #import "TSNativeSettingsViewController.h"
+// 本文件大量使用 UIKit 控件 (UITableView/UIDatePicker/UIAction/UIMenu...),
+// 而自带头 TSNativeSettingsViewController.h 只 import Foundation, 间接头文件
+// 链路里 UIAction 只有前向声明 (类型可用但找不到类方法, 曾报
+// "no known class method for selector 'actionWithTitle:...'") → 显式引入伞头
+#import <UIKit/UIKit.h>
 #import "TSPaths.h"
 #import "TSHUDHost.h"
 #import "TSLuaBridge.h"
