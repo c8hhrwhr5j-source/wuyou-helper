@@ -20,20 +20,17 @@
 
   最小用法
   --------
-    ui.form{
-        title    = "师门任务",
-        defaults = { role = "战士", speed = 1.0 },
-        build    = function(v)
+    ui.run{                       -- 一步到位 (传表 = 自动注册再显示; 等价 ui.form{...}:run())
+        defaults = { role = "战士", speed = 1.0 },   -- 可省: 框架按行类型自动推断默认值
+        build    = function(v)                        -- 唯一必须的字段
             if role == "战士" then                      -- 裸变量直取（也可写 v.role）
                 return { rows = { {type="number", key="rage", label="怒气阈值"} } }
             end
             return { rows = { {type="switch", key="fast", label="极速模式"} } }
         end,
-        actions  = { actSave = function(v) ui.save() end },
     }
-    if ui.run() then
-        -- 用户点了『运行』，ui.get("role") / ui.values() 即最新配置
-    end
+    -- ui.run 返回后（true=点了『运行』）, ui.get("role") / ui.values() 即最新配置
+    -- 也支持传统两步: ui.form{...}; if ui.run() then ... end
 =============================================================================]]
 
 local M = {}
@@ -369,7 +366,10 @@ M.define = M.form
 --- 显示表单并等待操作（阻塞）
 ---   返回 true : 用户点『运行』（值已写盘, ui.get/ui.values() 可用）
 ---   返回 false: 用户点『取消』(引擎会停止脚本) / 引擎不支持 / build 出错
-function M.run()
+--- 重载: ui.run{ ... } 传表 = 先注册再显示（等于 ui.form{...}:run() 的糖衣），
+---        注册字段全部可省（build 除外）: name/title/defaults/on/actions/onRun
+function M.run(arg)
+    if type(arg) == "table" then M.form(arg) end
     local spec = S.spec
     if type(spec) ~= "table" then
         logf("[ui] ui.run(): 请先调用 ui.form{...}")
