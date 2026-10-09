@@ -566,7 +566,13 @@ static BOOL TSValueEqual(id a, id b) {
                 __weak typeof(self) weakSelf = self;
                 for (NSString *opt in row.options) {
                     UIMenuElementState st = [opt isEqualToString:cur] ? UIMenuElementStateOn : UIMenuElementStateOff;
-                    [actions addObject:[UIAction actionWithTitle:opt image:nil state:st handler:^(UIAction *a) {
+                    [actions addObject:[UIAction actionWithTitle:opt
+                                                            image:nil
+                                                       identifier:nil
+                                              discoverabilityTitle:nil
+                                                       attributes:0
+                                                            state:st
+                                                         handler:^(UIAction *a) {
                         __strong typeof(weakSelf) self = weakSelf;
                         if (!self) return;
                         self.row.currentValue = a.title;
