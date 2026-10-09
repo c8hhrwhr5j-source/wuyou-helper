@@ -274,6 +274,8 @@ static UIView *TSFindFirstResponder(UIView *v) {
         _titleLabel = [[UILabel alloc] init];
         _titleLabel.font = [UIFont systemFontOfSize:15];
         _titleLabel.textColor = [UIColor labelColor];
+        _titleLabel.adjustsFontSizeToFitWidth = YES;   // 超长 label (HUD 窄屏) 自动缩小
+        _titleLabel.minimumScaleFactor = 0.75;
         [self.contentView addSubview:_titleLabel];
 
         _hintLabel = [[UILabel alloc] init];
@@ -390,7 +392,8 @@ static UIView *TSFindFirstResponder(UIView *v) {
 - (void)_layoutChips {
     if (self.chipButtons.count == 0) return;
     NSInteger columns = self.row.columns > 0 ? self.row.columns : 3;
-    CGFloat left = 16, right = 16, gap = 8, chipH = 32, titleBottom = 34;
+    CGFloat left = 16, right = 16, gap = 8, chipH = 32;
+    CGFloat titleBottom = (self.row.label.length > 0) ? 34 : 8;  // 空 label: 色块直接顶到行首
     CGFloat totalW = self.contentView.bounds.size.width;
     if (totalW <= 0) totalW = [UIScreen mainScreen].bounds.size.width;
     CGFloat chipW = (totalW - left - right - (columns - 1) * gap) / (CGFloat)columns;
@@ -540,6 +543,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
     self.row = row;
     self.vc = vc;
     self.titleLabel.text = row.label;
+    self.titleLabel.hidden = NO;   // 复用恢复: checkGroup 空 label 行会隐藏, 其他行必须重置
 
     switch (row.type) {
         case TSSettingsRowTypeSwitch: {
@@ -749,6 +753,8 @@ static UIView *TSFindFirstResponder(UIView *v) {
     }
     if (self.row.type == TSSettingsRowTypeCheckGroup) {
         // 标题一行 + 下方色块网格 (网格宽度依赖实际宽度, 在这里重新定位)
+        BOOL hasLabel = (self.row.label.length > 0);
+        self.titleLabel.hidden = !hasLabel;
         self.titleLabel.frame = CGRectMake(left, top, w - left - right, 18);
         self.chipContainer.frame = CGRectMake(0, 0, w, h);
         [self _layoutChips];
@@ -768,9 +774,13 @@ static UIView *TSFindFirstResponder(UIView *v) {
         case TSSettingsRowTypeCheckbox:
             titleW = w - left - right - 28 - 8;
             break;
-        default:
-            titleW = 150;
+        default: {
+            // text/number/select 等右侧控件实际只需 ~160pt, 标题占剩余宽度,
+            // 避免长中文 label (如"【活动日历】滑动速度"≈160pt) 被截断;
+            // MAX 保底防 HUD 超窄屏把控件挤没
+            titleW = MAX(120, w - left - right - 160);
             break;
+        }
     }
     self.titleLabel.frame = CGRectMake(left, (h - 20) / 2, titleW, 20);
     CGFloat ctrlX = left + titleW;
@@ -1489,11 +1499,11 @@ static UIView *TSFindFirstResponder(UIView *v) {
         return MAX(36, sz.height + 20);
     }
     if (r.type == TSSettingsRowTypeCheckGroup) {
-        // 标题行 34 + 每行色块 40 (高 32 + 间距 8)
+        // 标题行 34 + 每行色块 40 (高 32 + 间距 8); 空 label 不留标题行
         NSInteger columns = r.columns > 0 ? r.columns : 3;
         NSInteger lines = (NSInteger)((r.options.count + columns - 1) / columns);
         if (lines < 1) lines = 1;
-        return 34 + lines * 40;
+        return (r.label.length > 0 ? 34 : 8) + lines * 40;
     }
     if (r.type == TSSettingsRowTypeTextLong) return 110;
     if (r.type == TSSettingsRowTypeDate) return 56;

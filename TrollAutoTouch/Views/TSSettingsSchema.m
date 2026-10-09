@@ -189,7 +189,9 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
 
     row.key   = tsSchema_getStringField(L, idx, "key");
     row.label = tsSchema_getStringField(L, idx, "label");
-    if (row.key.length == 0 || row.label.length == 0) {
+    // checkGroup 允许空 label (纯色块行, 无标题); 其它行 label 必填
+    BOOL allowEmptyLabel = (type == TSSettingsRowTypeCheckGroup);
+    if (row.key.length == 0 || (!allowEmptyLabel && row.label.length == 0)) {
         if (error) *error = [NSError errorWithDomain:TSSettingsSchemaErrorDomain
                                                   code:3
                                               userInfo:@{NSLocalizedDescriptionKey:
