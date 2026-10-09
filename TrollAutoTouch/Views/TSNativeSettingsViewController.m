@@ -450,6 +450,10 @@ static BOOL TSValueEqual(id a, id b) {
         self.disclosureButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
         [self.contentView addSubview:self.disclosureButton];
     }
+    // select 行的 UIMenu 在 applyWithRow 里按需重挂; 复用到 multi 等其它行时必须清掉,
+    // 否则残留的 showsMenuAsPrimaryAction 会让点击仍弹下拉而不是走 _onDisclosureTap
+    self.disclosureButton.showsMenuAsPrimaryAction = NO;
+    self.disclosureButton.menu = nil;
     self.disclosureButton.hidden = NO;
 }
 - (void)_ensureColorSwatch {
@@ -551,7 +555,33 @@ static BOOL TSValueEqual(id a, id b) {
         case TSSettingsRowTypeSelect: {
             [self _ensureDisclosure];
             id v = TSValueForKey(row);
-            [self.disclosureButton setTitle:[v description] ?: @"未选择" forState:UIControlStateNormal];
+            NSString *cur = [v isKindOfClass:[NSString class]] ? v : nil;
+            [self.disclosureButton setTitle:[NSString stringWithFormat:@"%@ ▾", cur ?: @"未选择"]
+                                  forState:UIControlStateNormal];
+            BOOL hud = [self.vc isKindOfClass:[TSNativeSettingsViewController class]]
+                && ((TSNativeSettingsViewController *)self.vc).hostedInHUD;
+            if (@available(iOS 14.0, *) && !hud && row.options.count > 0) {
+                // 原生下拉菜单 (iOS 14+): 点行内按钮就地展开选项, 不再跳二级列表
+                NSMutableArray<UIAction *> *actions = [NSMutableArray array];
+                __weak typeof(self) weakSelf = self;
+                for (NSString *opt in row.options) {
+                    UIMenuElementState st = [opt isEqualToString:cur] ? UIMenuElementStateOn : UIMenuElementStateOff;
+                    [actions addObject:[UIAction actionWithTitle:opt image:nil state:st handler:^(UIAction *a) {
+                        __strong typeof(weakSelf) self = weakSelf;
+                        if (!self) return;
+                        self.row.currentValue = a.title;
+                        [self.disclosureButton setTitle:[NSString stringWithFormat:@"%@ ▾", a.title]
+                                              forState:UIControlStateNormal];
+                        [self.vc refreshAfterValueChange];
+                    }]];
+                }
+                self.disclosureButton.showsMenuAsPrimaryAction = YES;
+                self.disclosureButton.menu = [UIMenu menuWithTitle:@"" children:actions];
+            } else {
+                // HUD 承载 / 老系统 / 无选项: 保留二级列表 (_onDisclosureTap → openSubListForRow)
+                self.disclosureButton.showsMenuAsPrimaryAction = NO;
+                self.disclosureButton.menu = nil;
+            }
         } break;
         case TSSettingsRowTypeText:
         case TSSettingsRowTypeNumber: {

@@ -23,7 +23,7 @@ typedef NS_ENUM(NSInteger, TSSettingsRowType) {
     TSSettingsRowTypeStepper   = 2,  // 整数步进
     TSSettingsRowTypeSlider    = 3,  // 连续滑块
     TSSettingsRowTypeSegmented = 4,  // 分段选择 (2~5 项)
-    TSSettingsRowTypeSelect    = 5,  // 单选列表 (点击进子表)
+    TSSettingsRowTypeSelect    = 5,  // 单选 (下拉菜单, iOS14+; HUD 承载时回退二级列表)
     TSSettingsRowTypeText      = 6,  // 单行文本
     TSSettingsRowTypeTextLong  = 7,  // 多行文本
     TSSettingsRowTypeNumber    = 8,  // 数字输入
