@@ -537,6 +537,12 @@ static BOOL TSValueEqual(id a, id b) {
         case TSSettingsRowTypeSegmented: {
             [self _ensureSegmented];
             id v = TSValueForKey(row);
+            if (row.options.count == 0) {
+                // 没有候选项: 不能取 options[0] (空数组越界会抛 NSRangeException)
+                self.segmentedView.selectedSegmentIndex = UISegmentedControlNoSegment;
+                self.row.currentValue = nil;
+                break;
+            }
             NSInteger idx = [row.options indexOfObject:v];
             if (idx == NSNotFound) idx = 0;
             self.segmentedView.selectedSegmentIndex = idx;
@@ -570,19 +576,24 @@ static BOOL TSValueEqual(id a, id b) {
             NSDate *d = [TSValueForKey(row) isKindOfClass:[NSNumber class]]
                 ? [NSDate dateWithTimeIntervalSince1970:[(NSNumber *)TSValueForKey(row) doubleValue]]
                 : [NSDate date];
-            self.datePicker.date = d;
+            // 顺序很重要: 必须先设 mode 再设 style。单元格复用时若残留
+            // countDownTimer, 直接设 compact 会抛
+            // "UIDatePickerMode .countDownTimer is unsupported when using style .compact"
             self.datePicker.datePickerMode = (row.dateMode == TSSettingsDateModeDate) ? UIDatePickerModeDate
                 : (row.dateMode == TSSettingsDateModeTime) ? UIDatePickerModeTime
                 : UIDatePickerModeDateAndTime;
+            self.datePicker.preferredDatePickerStyle = UIDatePickerStyleCompact;
+            self.datePicker.date = d;
         } break;
         case TSSettingsRowTypeDuration: {
             [self _ensureDatePicker];
-            NSDate *ref = [NSDate date];
             id v = TSValueForKey(row);
             double secs = [v doubleValue];
+            // countDownTimer 与 compact 不兼容 (iOS 直接抛 NSInternalInconsistency-
+            // Exception 崩掉), 只能用滚轮样式; 同样先 style 后 mode
+            self.datePicker.preferredDatePickerStyle = UIDatePickerStyleWheels;
             self.datePicker.datePickerMode = UIDatePickerModeCountDownTimer;
-            self.datePicker.countDownDuration = secs;
-            (void)ref;
+            self.datePicker.countDownDuration = secs > 0 ? secs : 0;
         } break;
         case TSSettingsRowTypeColor: {
             [self _ensureColorSwatch];
@@ -627,9 +638,15 @@ static BOOL TSValueEqual(id a, id b) {
         self.textView.frame = CGRectMake(left, tvTop, w - left - right, tvH);
         return;
     }
-    if (self.row.type == TSSettingsRowTypeDate || self.row.type == TSSettingsRowTypeDuration) {
+    if (self.row.type == TSSettingsRowTypeDate) {
         self.titleLabel.frame = CGRectMake(left, (h - 20) / 2, w - 140, 20);
         self.datePicker.frame = CGRectMake(w - 160, (h - 36) / 2, 150, 36);
+        return;
+    }
+    if (self.row.type == TSSettingsRowTypeDuration) {
+        // 滚轮倒计时选择器 (compact 样式不支持 countDownTimer): 标题一行 + 下方滚轮
+        self.titleLabel.frame = CGRectMake(left, 8, w - left - right, 18);
+        self.datePicker.frame = CGRectMake(left, 26, w - left - right, h - 26 - 8);
         return;
     }
     if (self.row.type == TSSettingsRowTypeSlider) {
@@ -1277,7 +1294,8 @@ static BOOL TSValueEqual(id a, id b) {
         return 34 + lines * 40;
     }
     if (r.type == TSSettingsRowTypeTextLong) return 110;
-    if (r.type == TSSettingsRowTypeDate || r.type == TSSettingsRowTypeDuration) return 56;
+    if (r.type == TSSettingsRowTypeDate) return 56;
+    if (r.type == TSSettingsRowTypeDuration) return 240;   // 滚轮倒计时选择器需要整行高度
     return 50;
 }
 - (TSSettingsRow *)_rowAtIndexPath:(NSIndexPath *)ip {
