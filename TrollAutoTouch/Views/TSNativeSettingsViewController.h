@@ -21,6 +21,22 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// HUD 承载模式下表单的方向偏好 (前台 present 模式不生效, 跟随 app 方向)。
+/// 设置 formOrientation 后, TSHUDHost 在 _attachVCToHUD 阶段会对表单 view
+/// 应用反旋转 (inverse transform), 让表单视觉上呈现指定方向而不被 HUD 内容层
+/// 旋转带偏。
+typedef NS_ENUM(NSInteger, TSNativeFormOrientation) {
+    /// 默认: 跟随脚本坐标系 (screen.init 设的方向) / 跟随前台 app。
+    /// HUD 承载下表单继承内容层的旋转 (横屏游戏中横屏显示)。
+    TSNativeFormOrientationAuto = 0,
+    /// 强制竖屏。HUD 内容层在横屏时, 表单 view 应用 -host.transform,
+    /// 视觉上始终竖屏呈现 (适合: 横屏游戏中希望用竖屏表单看完整列表)。
+    TSNativeFormOrientationPortrait = 1,
+    /// 强制横屏。HUD 内容层在竖屏时, 表单 view 旋转 +90°,
+    /// 视觉上始终横屏呈现 (适合: 竖屏游戏中希望宽表单填屏)。
+    TSNativeFormOrientationLandscape = 2,
+};
+
 @interface TSNativeSettingsViewController : UIViewController
 
 - (instancetype)initWithSchema:(TSSettingsSchema *)schema;
@@ -35,6 +51,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// HUD 承载模式: YES 表示该页面由 TSHUDHost 系统级层承载 (App 在后台、
 /// 游戏等 app 在前台时 ui.open 弹出), 关闭时从 HUD 层移除 view。
 @property (nonatomic, assign) BOOL hostedInHUD;
+
+/// 表单方向偏好 (HUD 承载模式生效)。默认 TSNativeFormOrientationAuto。
+/// 仅在 HUD 承载下由 TSHUDHost 读取并应用反旋转;
+/// 前台 present 时此属性被忽略 (跟随 TrollAutoTouch app 方向)。
+/// 设为 TSNativeFormOrientationPortrait / Landscape 后, 关闭表单时此属性
+/// 不影响 HUD 内容层的旋转 (那是 screen.init 控制的)。
+@property (nonatomic, assign) TSNativeFormOrientation formOrientation;
 
 @end
 

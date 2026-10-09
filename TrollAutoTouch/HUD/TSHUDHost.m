@@ -996,6 +996,38 @@ static void TSHUDFlushCATransaction(void) {
         vc.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [vc beginAppearanceTransition:YES animated:NO];
         [host addSubview:vc.view];
+        // 表单方向偏好 (VC 选填): HUD 内容层被脚本方向旋转后, 视觉上不一定符合
+        // 用户期望 (例如横屏游戏中点开设置, 默认表单也跟着横屏但用户想看竖屏)。
+        // 若 VC 实现了 formOrientation 属性 (TSNativeSettingsViewController 等),
+        // 在此应用反旋转, 让表单以指定方向呈现。Auto 时不干预 (与历史行为一致)。
+        id orientObj = nil;
+        @try { orientObj = [vc valueForKey:@"formOrientation"]; } @catch (__unused id e) {}
+        if ([orientObj isKindOfClass:[NSNumber class]]) {
+            NSInteger formOrient = [orientObj integerValue];
+            CGAffineTransform hostT = host.transform;
+            BOOL hostIsLandscape = (hostT.b != 0.0f || hostT.c != 0.0f);  // b/c 非 0 即被旋转 ±90°
+            BOOL wantPortrait = (formOrient == 1);   // TSNativeFormOrientationPortrait
+            BOOL wantLandscape = (formOrient == 2);  // TSNativeFormOrientationLandscape
+            CGRect screenBounds = [UIScreen mainScreen].bounds;
+            CGFloat sw = CGRectGetWidth(screenBounds);
+            CGFloat sh = CGRectGetHeight(screenBounds);
+            if (wantPortrait && hostIsLandscape) {
+                // host 旋转 ±90°, 表单要竖屏: 应用 host 旋转的逆, bounds 用竖屏尺寸
+                vc.view.transform = CGAffineTransformInvert(hostT);
+                vc.view.bounds = CGRectMake(0, 0, sw, sh);
+                vc.view.center = CGPointMake(CGRectGetMidX(host.bounds), CGRectGetMidY(host.bounds));
+                vc.view.autoresizingMask = 0;  // 固定 transform 后让 autoresizing 失效, 避免旋转
+            } else if (wantLandscape && !hostIsLandscape) {
+                // host 竖屏, 表单要横屏: 旋转表单 +90° (home 在右方向), bounds 用横屏尺寸
+                vc.view.transform = CGAffineTransformMakeRotation((CGFloat)M_PI_2);
+                vc.view.bounds = CGRectMake(0, 0, sh, sw);
+                vc.view.center = CGPointMake(CGRectGetMidX(host.bounds), CGRectGetMidY(host.bounds));
+                vc.view.autoresizingMask = 0;
+            }
+            // wantPortrait && !hostIsLandscape: 默认即可, 无需干预
+            // wantLandscape && hostIsLandscape: 默认即可, 无需干预
+            // formOrient == 0 (Auto): 不干预
+        }
         [vc endAppearanceTransition];
         // 后台时 CA 提交会被节流/跳过, 显式 flush 确保网页设置页立即同步到远程上下文。
         TSHUDFlushCATransaction();

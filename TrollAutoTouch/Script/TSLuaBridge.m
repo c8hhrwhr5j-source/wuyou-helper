@@ -3013,8 +3013,11 @@ static int ts_ui_presentAndWait(lua_State *L,
     return 1;
 }
 
-// ui.open(脚本名 [, type]) -> boolean
+// ui.open(脚本名 [, type [, opts]]) -> boolean
 //   type: "auto"(默认) | "html" | "native"
+//   opts (可选, 仅 type=native 时生效):
+//     orientation: "auto" (默认) | "portrait" | "landscape"
+//   返回值同 ui.openForm (true=已运行, false=取消/失败)。
 static int l_ui_open(lua_State *L) {
     const char *nameC = luaL_checkstring(L, 1);
     if (!nameC) {
@@ -3028,6 +3031,20 @@ static int l_ui_open(lua_State *L) {
     }
     const char *typeC = luaL_optstring(L, 2, "auto");
     NSString *type = (typeC && *typeC) ? [NSString stringWithUTF8String:typeC] : @"auto";
+
+    // opts (可选第三参, 仅 native 路径生效)
+    TSNativeFormOrientation formOrient = TSNativeFormOrientationAuto;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "orientation");
+        if (lua_isstring(L, -1)) {
+            const char *o = lua_tostring(L, -1);
+            if (strcmp(o, "portrait") == 0) formOrient = TSNativeFormOrientationPortrait;
+            else if (strcmp(o, "landscape") == 0) formOrient = TSNativeFormOrientationLandscape;
+            else if (strcmp(o, "auto") == 0) formOrient = TSNativeFormOrientationAuto;
+            else NSLog(@"[ui.open] 未知的 orientation='%s' (应为 auto/portrait/landscape)", o);
+        }
+        lua_pop(L, 1);
+    }
 
     NSString *resolved = nil;
     if ([type isEqualToString:@"auto"]) {
@@ -3055,7 +3072,10 @@ static int l_ui_open(lua_State *L) {
             return 1;
         }
         return ts_ui_presentAndWait(L, name, YES /*hudOnly*/, ^{
-            return [[TSNativeSettingsViewController alloc] initWithSchema:schema];
+            TSNativeSettingsViewController *vc =
+                [[TSNativeSettingsViewController alloc] initWithSchema:schema];
+            vc.formOrientation = formOrient;
+            return vc;
         });
     }
     // html
@@ -3064,9 +3084,13 @@ static int l_ui_open(lua_State *L) {
     });
 }
 
-// ui.openForm(脚本名, schemaTable) -> boolean
+// ui.openForm(脚本名, schemaTable [, opts]) -> boolean
 //   永远走 UIKit 原生设置 UI, schemaTable 是 Lua 表, 直接在内存构建 (不写文件)。
 //   schema 结构: {title=?, sections={{title, footer, rows={{type, key, label, ...}, ...}}, ...}}
+//   opts (可选 table):
+//     orientation: "auto" (默认, 跟随前台 app/脚本坐标系) | "portrait" (强制竖屏)
+//                 | "landscape" (强制横屏)。仅 HUD 承载模式生效, 前台 present
+//                 模式下被忽略 (跟随 TrollAutoTouch app 方向)。
 //   返回值同 ui.open (true=已运行, false=取消/失败)。
 static int l_ui_openForm(lua_State *L) {
     const char *nameC = luaL_checkstring(L, 1);
@@ -3082,6 +3106,24 @@ static int l_ui_openForm(lua_State *L) {
     if (!lua_istable(L, 2)) {
         return luaL_error(L, "ui.openForm: 第二个参数必须是 schema table");
     }
+    // opts (可选第三参): 解析 orientation
+    TSNativeFormOrientation formOrient = TSNativeFormOrientationAuto;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "orientation");
+        if (lua_isstring(L, -1)) {
+            const char *o = lua_tostring(L, -1);
+            if (strcmp(o, "portrait") == 0) {
+                formOrient = TSNativeFormOrientationPortrait;
+            } else if (strcmp(o, "landscape") == 0) {
+                formOrient = TSNativeFormOrientationLandscape;
+            } else if (strcmp(o, "auto") == 0) {
+                formOrient = TSNativeFormOrientationAuto;
+            } else {
+                NSLog(@"[ui.openForm] 未知的 orientation='%s' (应为 auto/portrait/landscape), 使用默认 auto", o);
+            }
+        }
+        lua_pop(L, 1);
+    }
     NSError *err = nil;
     TSSettingsSchema *schema = [TSSettingsSchema schemaFromLuaState:L
                                                        topTableIndex:2
@@ -3093,7 +3135,10 @@ static int l_ui_openForm(lua_State *L) {
         return 1;
     }
     return ts_ui_presentAndWait(L, name, YES /*hudOnly*/, ^{
-        return [[TSNativeSettingsViewController alloc] initWithSchema:schema];
+        TSNativeSettingsViewController *vc =
+            [[TSNativeSettingsViewController alloc] initWithSchema:schema];
+        vc.formOrientation = formOrient;
+        return vc;
     });
 }
 

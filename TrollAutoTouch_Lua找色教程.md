@@ -2340,6 +2340,26 @@ if ran then
 end
 ```
 
+#### 强制表单方向（opts.orientation）
+
+`ui.openForm(name, schema, opts)` 和 `ui.open(name, "native", opts)` 的第三参 `opts` 支持 `orientation` 字段，控制 HUD 承载时表单的视觉方向：
+
+| 值 | 效果 | 适用场景 |
+|---|---|---|
+| `"auto"`（默认） | 跟随脚本坐标系 / 跟随前台 app | 横屏游戏里希望表单也跟着横屏 |
+| `"portrait"` | 强制竖屏（即使游戏是横屏也竖屏呈现） | 横屏游戏里点开设置希望看到完整列表 |
+| `"landscape"` | 强制横屏（即使游戏是竖屏也横屏呈现） | 竖屏游戏里希望宽表单填屏 |
+
+```lua
+-- 横屏游戏中强制竖屏显示表单
+local ran = ui.openForm("myScript", schema, { orientation = "portrait" })
+
+-- 或用 ui.open 配合
+ui.open("myScript", "native", { orientation = "portrait" })
+```
+
+仅 HUD 承载模式生效；TrollAutoTouch 在前台时（极少见，通常是脚本自己切的）此参数被忽略，跟随 app 方向。
+
 #### 常见注意事项
 
 1. **存储格式与 HTML 版完全相同**：`{key=value, ...}` 写到 `<name>.settings.json`，脚本读 `settings.xxx` 全局表，零额外适配。
