@@ -1,1 +1,0 @@
-return require "log.writer.stdout"

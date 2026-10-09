@@ -52,3 +52,13 @@ ci_log.txt
 ipa_contents.txt
 research/
 *.tipa
+
+# 本地工具与逆向产物（已从仓库清理）
+_tools/
+_ci_*.json
+_uitest/
+_cier.json
+_app_release_extract/
+_tas236_extract/
+TrollAutoScript2.3.6.zip
+TrollAutoTouch_icon.png
