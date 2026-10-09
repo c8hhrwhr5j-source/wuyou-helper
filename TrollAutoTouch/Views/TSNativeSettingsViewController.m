@@ -1213,16 +1213,29 @@ static BOOL TSValueEqual(id a, id b) {
               (long)row.type, row.label ?: @"<无标题>");
         return;
     }
-    if (row.type == TSSettingsRowTypeSelect) {
-        TSSelectListVC *vc = [[TSSelectListVC alloc] init];
-        vc.row = row;
-        vc.parent = self;
-        [self.navigationController pushViewController:vc animated:YES];
-    } else if (row.type == TSSettingsRowTypeMulti) {
-        TSMultiListVC *vc = [[TSMultiListVC alloc] init];
-        vc.row = row;
-        vc.parent = self;
-        [self.navigationController pushViewController:vc animated:YES];
+    if (row.type == TSSettingsRowTypeSelect || row.type == TSSettingsRowTypeMulti) {
+        UIViewController *sub = nil;
+        if (row.type == TSSettingsRowTypeSelect) {
+            TSSelectListVC *vc = [[TSSelectListVC alloc] init];
+            vc.row = row;
+            vc.parent = self;
+            sub = vc;
+        } else {
+            TSMultiListVC *vc = [[TSMultiListVC alloc] init];
+            vc.row = row;
+            vc.parent = self;
+            sub = vc;
+        }
+        if (self.navigationController) {
+            [self.navigationController pushViewController:sub animated:YES];
+        } else {
+            // 前台路径的表单是裸 present 的 (没包 UINavigationController),
+            // navigationController 为 nil 时 push 是静默空操作 —— 用户看起来就是
+            // "点了没反应"。这里包一层导航再 present, 子页的 pop/back 按钮照常可用
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:sub];
+            nav.modalPresentationStyle = UIModalPresentationFullScreen;
+            [self presentViewController:nav animated:YES completion:nil];
+        }
     } else if (row.type == TSSettingsRowTypeColor) {
         // iOS 14+: 系统取色器
         if (@available(iOS 14.0, *)) {
