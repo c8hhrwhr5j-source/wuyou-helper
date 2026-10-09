@@ -59,6 +59,12 @@ typedef NS_ENUM(NSInteger, TSNativeFormOrientation) {
 /// 不影响 HUD 内容层的旋转 (那是 screen.init 控制的)。
 @property (nonatomic, assign) TSNativeFormOrientation formOrientation;
 
+/// 表单顶部大标题 (HUD 承载和前台 present 都生效)。默认 nil = 不显示。
+/// 设置后会在导航栏下方、第一个 section 上方渲染一个 24pt bold 居中文字 banner
+/// (tableHeaderView), 跟随 table view 滚动; HUD 旋转后会自适应新宽度。
+/// 典型用法: 脚本名/功能名, 让用户一眼看出"这是哪个脚本的设置"。
+@property (nonatomic, copy, nullable) NSString *headerTitle;
+
 /// 自动关闭时间 (秒)。默认 0 = 不自动关闭。
 /// > 0 时表单加载后启动倒计时, 归零自动触发 "运行" 流程 (保存设置 + 启动脚本)。
 /// 倒计时期间用户可随时点 "取消" (停止脚本 + 关闭表单) 或 "运行" (立即结束倒计时)。

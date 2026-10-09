@@ -882,6 +882,7 @@ static BOOL TSValueEqual(id a, id b) {
     [self.view addSubview:self.footerBar];
 
     [self _layoutSubviews];
+    [self _layoutTableHeaderIfNeeded];
 
     [self _loadInitialValuesFromJSON];
     [self _evaluateDependencyVisibility];
@@ -911,6 +912,43 @@ static BOOL TSValueEqual(id a, id b) {
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self _layoutSubviews];
+    [self _layoutTableHeaderIfNeeded];
+}
+
+#pragma mark - 顶部大标题 (tableHeaderView)
+
+- (void)_layoutTableHeaderIfNeeded {
+    if (self.headerTitle.length == 0) return;
+    CGFloat w = self.tableView.bounds.size.width;
+    if (w <= 0) return;  // view 还没布局好, 下次 viewDidLayoutSubviews 再来
+
+    UIView *wrap = self.tableView.tableHeaderView;
+    UILabel *lbl = nil;
+    if (![wrap isKindOfClass:[UIView class]] || wrap.tag != 8001) {
+        // 首次创建: 包裹 UIView + 居中 UILabel, 背景透明让 table 风格延续
+        wrap = [[UIView alloc] init];
+        wrap.tag = 8001;   // 标记, 避免和未来其他 header 冲突
+        wrap.backgroundColor = [UIColor clearColor];
+        lbl = [[UILabel alloc] init];
+        lbl.tag = 8002;
+        lbl.text = self.headerTitle;
+        lbl.font = [UIFont systemFontOfSize:24 weight:UIFontWeightBold];
+        lbl.textColor = [UIColor labelColor];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.numberOfLines = 1;
+        lbl.backgroundColor = [UIColor clearColor];
+        lbl.adjustsFontSizeToFitWidth = YES;   // 极窄屏 (HUD 横屏) 自动缩小, 避免截断
+        lbl.minimumScaleFactor = 0.6;
+        [wrap addSubview:lbl];
+    } else {
+        lbl = (UILabel *)[wrap viewWithTag:8002];
+    }
+    // 24pt 字体 + 上下 16pt 留白 = 56pt 总高 (banner 不会太夸张, 也不会太局促)
+    CGFloat h = 56;
+    wrap.frame = CGRectMake(0, 0, w, h);
+    lbl.frame = CGRectMake(16, 16, w - 32, 24);
+    // 必须重新赋值让 UITableView 知道 header 高度变了
+    self.tableView.tableHeaderView = wrap;
 }
 
 - (UIView *)_buildFooterBar {

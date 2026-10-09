@@ -2384,6 +2384,29 @@ ui.openForm("myScript", schema, { autoCloseAfter = 30 })
 ui.openForm("myScript", schema, { orientation = "portrait", autoCloseAfter = 30 })
 ```
 
+#### 顶部大标题（opts.headerTitle）
+
+`ui.openForm` / `ui.open` 第三参 `opts.headerTitle` 是个字符串，传入后会在导航栏下方、第一个 section 上方渲染一个 banner label：
+
+- 24pt bold 居中（系统 `UIFontWeightBold`）
+- 自动 `adjustsFontSizeToFitWidth`，极窄屏（HUD 横屏）会缩到 60% 避免截断
+- 背景透明，跟随 table view 滚动
+- HUD 旋转时会自适应新宽度
+
+```lua
+-- 梦幻西游脚本示例
+ui.openForm("myScript", schema, {
+    headerTitle = "梦幻西游脚本设置",
+})
+
+-- 与其他选项组合
+ui.openForm("myScript", schema, {
+    headerTitle = "梦幻西游脚本设置",
+    orientation = "portrait",
+    autoCloseAfter = 30,
+})
+```
+
 **注意**：`取消` 真的会让 `[[TSLuaBridge shared] stop]` 触发 `_stopRequested=YES`，后续任何 Lua C 调用会抛"脚本已被停止"并立即中断当前脚本。如果你只是想关闭表单而继续用旧配置运行，请改用其他方式（如 sys.alert 二次确认）。
 
 #### 常见注意事项

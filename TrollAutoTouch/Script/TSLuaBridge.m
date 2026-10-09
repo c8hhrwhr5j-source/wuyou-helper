@@ -3035,6 +3035,7 @@ static int l_ui_open(lua_State *L) {
     // opts (可选第三参, 仅 native 路径生效)
     TSNativeFormOrientation formOrient = TSNativeFormOrientationAuto;
     NSTimeInterval autoCloseAfter = 0;
+    NSString *headerTitle = nil;
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "orientation");
         if (lua_isstring(L, -1)) {
@@ -3049,6 +3050,12 @@ static int l_ui_open(lua_State *L) {
         if (lua_isnumber(L, -1)) {
             autoCloseAfter = (NSTimeInterval)lua_tonumber(L, -1);
             if (autoCloseAfter < 0) autoCloseAfter = 0;
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "headerTitle");
+        if (lua_isstring(L, -1)) {
+            const char *h = lua_tostring(L, -1);
+            if (h && *h) headerTitle = [NSString stringWithUTF8String:h];
         }
         lua_pop(L, 1);
     }
@@ -3083,6 +3090,7 @@ static int l_ui_open(lua_State *L) {
                 [[TSNativeSettingsViewController alloc] initWithSchema:schema];
             vc.formOrientation = formOrient;
             vc.autoCloseAfter = autoCloseAfter;
+            vc.headerTitle = headerTitle;
             return vc;
         });
     }
@@ -3117,9 +3125,10 @@ static int l_ui_openForm(lua_State *L) {
     if (!lua_istable(L, 2)) {
         return luaL_error(L, "ui.openForm: 第二个参数必须是 schema table");
     }
-    // opts (可选第三参): 解析 orientation + autoCloseAfter
+    // opts (可选第三参): 解析 orientation + autoCloseAfter + headerTitle
     TSNativeFormOrientation formOrient = TSNativeFormOrientationAuto;
     NSTimeInterval autoCloseAfter = 0;
+    NSString *headerTitle = nil;
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "orientation");
         if (lua_isstring(L, -1)) {
@@ -3141,6 +3150,12 @@ static int l_ui_openForm(lua_State *L) {
             if (autoCloseAfter < 0) autoCloseAfter = 0;
         }
         lua_pop(L, 1);
+        lua_getfield(L, 3, "headerTitle");
+        if (lua_isstring(L, -1)) {
+            const char *h = lua_tostring(L, -1);
+            if (h && *h) headerTitle = [NSString stringWithUTF8String:h];
+        }
+        lua_pop(L, 1);
     }
     NSError *err = nil;
     TSSettingsSchema *schema = [TSSettingsSchema schemaFromLuaState:L
@@ -3157,6 +3172,7 @@ static int l_ui_openForm(lua_State *L) {
             [[TSNativeSettingsViewController alloc] initWithSchema:schema];
         vc.formOrientation = formOrient;
         vc.autoCloseAfter = autoCloseAfter;
+        vc.headerTitle = headerTitle;
         return vc;
     });
 }
