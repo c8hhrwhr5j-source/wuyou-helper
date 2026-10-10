@@ -1525,6 +1525,10 @@ static UIView *TSFindFirstResponder(UIView *v) {
     }
     UILabel *titleLabel = [hv.contentView viewWithTag:kTitleTag];
     UILabel *chev = [hv.contentView viewWithTag:kChevronTag];
+    // 关键: iOS 15+ 在 dequeue UITableViewHeaderFooterView 时, 会把 titleForHeaderInSection
+    // 的标题自动应用为 defaultContentConfiguration 渲染一层系统文字,
+    // 与下方自定义 titleLabel 叠加形成"重影" → 每次复用都清空系统默认内容
+    hv.contentConfiguration = nil;
     titleLabel.text = titleText;
 
     // 清理旧 tap (dequeue 出的 view 上一轮可能 attach 过)
@@ -1536,20 +1540,21 @@ static UIView *TSFindFirstResponder(UIView *v) {
     if (s.collapsible) {
         chev.text = s.collapsedByUser ? @"▸" : @"▾";
         chev.hidden = NO;
-        hv.tag = 1000 + section;                          // tag 编码 section 索引, 回调里解码
+        // tag 编码 section 索引到 contentView (tap 手势加在 contentView 上,
+        // 回调里 g.view 即 contentView; 之前误设在 hv.tag 导致解码成 -1000 点击永远无效)
+        hv.contentView.tag = 1000 + section;
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
                                                                               action:@selector(_onSectionHeaderTap:)];
         [hv.contentView addGestureRecognizer:tap];
     } else {
         chev.hidden = YES;
-        hv.tag = 0;
+        hv.contentView.tag = 0;
     }
     return hv;
 }
 
 - (void)_onSectionHeaderTap:(UITapGestureRecognizer *)g {
-    UIView *hv = g.view;
-    NSInteger section = hv.tag - 1000;
+    NSInteger section = g.view.tag - 1000;
     if (section < 0 || section >= (NSInteger)self.schema.sections.count) return;
     TSSettingsSection *s = self.schema.sections[section];
     if (!s.collapsible) return;
