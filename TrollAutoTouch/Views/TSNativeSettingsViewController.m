@@ -1507,11 +1507,10 @@ static UIView *TSFindFirstResponder(UIView *v) {
         titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
         [hv.contentView addSubview:titleLabel];
 
-        UILabel *chev = [UILabel new];
+        UIImageView *chev = [UIImageView new];
         chev.tag = kChevronTag;
-        chev.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-        chev.textColor = [UIColor secondaryLabelColor];
-        chev.textAlignment = NSTextAlignmentRight;
+        chev.contentMode = UIViewContentModeScaleAspectFit;
+        chev.tintColor = [UIColor systemBlueColor];
         chev.translatesAutoresizingMaskIntoConstraints = NO;
         [hv.contentView addSubview:chev];
 
@@ -1521,6 +1520,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
             [chev.trailingAnchor constraintEqualToAnchor:hv.contentView.layoutMarginsGuide.trailingAnchor],
             [chev.centerYAnchor constraintEqualToAnchor:hv.contentView.centerYAnchor],
             [chev.widthAnchor constraintEqualToConstant:18],
+            [chev.heightAnchor constraintEqualToConstant:18],
         ]];
     }
     UILabel *titleLabel = [hv.contentView viewWithTag:kTitleTag];
@@ -1538,7 +1538,13 @@ static UIView *TSFindFirstResponder(UIView *v) {
         }
     }
     if (s.collapsible) {
-        chev.text = s.collapsedByUser ? @"▸" : @"▾";
+        // 蓝色加粗 SF Symbol 箭头 (比原 ▸/▾ 文字字符醒目, 明确提示可点击)
+        UIImageSymbolConfiguration *cfg =
+            [UIImageSymbolConfiguration configurationWithPointSize:13
+                                                            weight:UIImageSymbolWeightBold];
+        NSString *sym = s.collapsedByUser ? @"chevron.right" : @"chevron.down";
+        chev.image = [[UIImage systemImageNamed:sym] imageByApplyingSymbolConfiguration:cfg];
+        chev.tintColor = [UIColor systemBlueColor];
         chev.hidden = NO;
         // tag 编码 section 索引到 contentView (tap 手势加在 contentView 上,
         // 回调里 g.view 即 contentView; 之前误设在 hv.tag 导致解码成 -1000 点击永远无效)
@@ -1563,9 +1569,10 @@ static UIView *TSFindFirstResponder(UIView *v) {
                   withRowAnimation:UITableViewRowAnimationAutomatic];
 }
 
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    return [self _resolvedText:self.schema.sections[section].title];
-}
+// titleForHeaderInSection 已删除: iOS 15+ 会把它作为 defaultContentConfiguration
+// 注入 dequeue 的 headerFooterView (且在 willDisplay 阶段重新应用, dequeue 后清空无效),
+// 与自定义 header 的 titleLabel 叠加造成"重影"。
+// viewForHeaderInSection 已覆盖所有 section, 系统标题注入无存在必要。
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
     return [self _resolvedText:self.schema.sections[section].footer];
 }
