@@ -439,13 +439,25 @@ static UIView *TSFindFirstResponder(UIView *v) {
     if (self.row.showValueInline) self.sliderValueLabel.hidden = NO;
 }
 - (void)_ensureSegmented {
-    if (!self.segmentedView) {
-        self.segmentedView = [[UISegmentedControl alloc] initWithItems:self.row.options ?: @[]];
-        [self.segmentedView addTarget:self action:@selector(_onSegmentedChange) forControlEvents:UIControlEventValueChanged];
-        [self.contentView addSubview:self.segmentedView];
-    } else if (self.segmentedView.numberOfSegments != self.row.options.count) {
-        // options 变化, 重建
-        [self.segmentedView removeFromSuperview];
+    // cell 复用时 self.row 可能已换成另一个 segmented 行: 段数相同但文字不同也必须重建,
+    // 否则控件残留上一个 segmented 行的选项标题(如 UIQQWX 的 QQ/微信 残留到 GRYHXS 的 否/是 行)。
+    BOOL needsRebuild = !self.segmentedView;
+    if (!needsRebuild) {
+        if (self.segmentedView.numberOfSegments != self.row.options.count) {
+            needsRebuild = YES;
+        } else {
+            for (NSUInteger i = 0; i < self.row.options.count; i++) {
+                NSString *want = [self.row.options[i] description];
+                NSString *have = [self.segmentedView titleForSegmentAtIndex:i] ?: @"";
+                if (want == nil || ![want isEqualToString:have]) {
+                    needsRebuild = YES;
+                    break;
+                }
+            }
+        }
+    }
+    if (needsRebuild) {
+        [self.segmentedView removeFromSuperview];   // segmentedView 为 nil 时是 no-op
         self.segmentedView = [[UISegmentedControl alloc] initWithItems:self.row.options ?: @[]];
         [self.segmentedView addTarget:self action:@selector(_onSegmentedChange) forControlEvents:UIControlEventValueChanged];
         [self.contentView addSubview:self.segmentedView];
@@ -929,11 +941,18 @@ static UIView *TSFindFirstResponder(UIView *v) {
 
 @interface TSNativeSettingsViewController () <UITableViewDataSource, UITableViewDelegate,
                                                 UIColorPickerViewControllerDelegate,
-                                                TSNativeSettingsCellDelegate>
+                                                TSNativeSettingsCellDelegate,
+                                                UISearchBarDelegate>
 
 @property (nonatomic, strong) TSSettingsSchema *schema;
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UIView *footerBar;
+
+// 顶部搜索 (方案A: 固定搜索栏): 关键词 + 过滤结果缓存。
+// 数据源统一经 _displaySections 取值, 无关键词时即原始 schema.sections。
+@property (nonatomic, strong) UISearchBar *searchBar;
+@property (nonatomic, copy, nullable) NSString *searchKeyword;                        // 空/nil = 不过滤
+@property (nonatomic, strong, nullable) NSArray<TSSettingsSection *> *filteredSections; // 惰性缓存
 @property (nonatomic, weak) TSSettingsRow *colorPickerRow;   // 当前色板操作的 row
 // 自动关闭倒计时 (autoCloseAfter > 0 时启用): 每秒 tick 减 1, 归零自动 _onRunTapped
 @property (nonatomic, strong, nullable) NSTimer *autoCloseTimer;
@@ -982,6 +1001,21 @@ static UIView *TSFindFirstResponder(UIView *v) {
     if (@available(iOS 11.0, *)) {
         self.navigationController.navigationBar.prefersLargeTitles = NO;
     }
+
+    // 顶部搜索栏 (方案A): 固定钉在 safeArea 顶部, tableView 顶部由 _layoutSubviews 下移到其下方
+    self.searchBar = [[UISearchBar alloc] init];
+    self.searchBar.delegate = self;
+    self.searchBar.placeholder = @"搜索设置";
+    self.searchBar.backgroundImage = [UIImage new];   // 去掉搜索栏系统外框, 与分组背景融合
+    self.searchBar.barTintColor = [UIColor systemGroupedBackgroundColor];
+    self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.searchBar];
+    UILayoutGuide *safeAreaGuide = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.searchBar.leadingAnchor constraintEqualToAnchor:safeAreaGuide.leadingAnchor],
+        [self.searchBar.trailingAnchor constraintEqualToAnchor:safeAreaGuide.trailingAnchor],
+        [self.searchBar.topAnchor constraintEqualToAnchor:safeAreaGuide.topAnchor],
+    ]];
 
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.tableView.dataSource = self;
@@ -1088,7 +1122,17 @@ static UIView *TSFindFirstResponder(UIView *v) {
     CGFloat footerH = hasCountdown ? 84 : 56;
     CGRect b = self.view.bounds;
     self.footerBar.frame = CGRectMake(0, b.size.height - footerH, b.size.width, footerH);
-    self.tableView.frame = CGRectMake(0, 0, b.size.width, b.size.height - footerH);
+
+    // 搜索栏固定在 safeArea 顶部 (约束布局), tableView 紧贴其下避免被遮挡。
+    // 搜索栏仍在 safeArea 内, 因此 tableView 自动 contentInset 不会重复下移。
+    CGFloat top = 0;
+    if (self.searchBar) {
+        CGFloat sy = CGRectGetMaxY(self.searchBar.frame);
+        if (sy > 0 && sy < b.size.height) top = sy;
+    }
+    CGFloat tableH = b.size.height - footerH - top;
+    if (tableH < 0) tableH = 0;
+    self.tableView.frame = CGRectMake(0, top, b.size.width, tableH);
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1391,6 +1435,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
         }
     }
     if (before || after) {
+        self.filteredSections = nil;   // 依赖显隐变化 → 搜索过滤结果需重建
         [self.tableView reloadData];
     }
 }
@@ -1470,13 +1515,96 @@ static UIView *TSFindFirstResponder(UIView *v) {
     TSLuaInvokeActionWithCurrentSettings(row.luaCallbackRef, [self _collectValues]);
 }
 
+#pragma mark - 搜索过滤 (顶部固定搜索栏)
+
+/// 数据源统一入口: 无关键词返回原始 schema.sections; 有关键词返回过滤副本 (惰性构建 + 缓存)。
+/// 注意: 过滤只作用于"显示", 值读取/写盘/校验仍走完整 schema, 因此不会丢字段。
+- (NSArray<TSSettingsSection *> *)_displaySections {
+    if (self.searchKeyword.length == 0) return self.schema.sections;
+    if (!self.filteredSections) {
+        self.filteredSections = [self _buildFilteredSections:self.searchKeyword];
+    }
+    return self.filteredSections;
+}
+
+/// 过滤规则: 命中分组标题 → 整组保留; 否则只保留 label/候选项文字命中的行。
+/// 过滤结果是"副本 section" (rows 共享原 row 对象, currentValue 一致), 并强制展开, 避免搜到却看不见。
+- (NSArray<TSSettingsSection *> *)_buildFilteredSections:(NSString *)keyword {
+    NSMutableArray<TSSettingsSection *> *out = [NSMutableArray array];
+    for (TSSettingsSection *s in self.schema.sections) {
+        NSString *title = [self _resolvedText:s.title] ?: @"";
+        BOOL titleHit = [self _text:title contains:keyword];
+
+        NSMutableArray<TSSettingsRow *> *hitRows = [NSMutableArray array];
+        for (TSSettingsRow *r in s.rows) {
+            if (r.hiddenByDependency) continue;             // 依赖隐藏的行不参与搜索
+            if (titleHit || [self _row:r matches:keyword]) [hitRows addObject:r];
+        }
+        if (!titleHit && hitRows.count == 0) continue;
+
+        TSSettingsSection *copy = [[TSSettingsSection alloc] init];
+        copy.title = s.title;
+        copy.footer = titleHit ? s.footer : nil;            // 仅整组命中才带脚注, 单行命中时不喧宾夺主
+        copy.rows = hitRows;
+        copy.collapsible = NO;                              // 搜索时强制展开 (也规避 header tap 的 section 索引错位)
+        copy.collapsedByUser = NO;
+        [out addObject:copy];
+    }
+    return out;
+}
+
+/// 行是否命中: label 或候选项文字 (select/segmented 的 options, multi 的 multiOptions)
+- (BOOL)_row:(TSSettingsRow *)r matches:(NSString *)keyword {
+    if ([self _text:r.label contains:keyword]) return YES;
+    for (NSString *opt in r.options) if ([self _text:opt contains:keyword]) return YES;
+    for (NSString *opt in r.multiOptions) if ([self _text:opt contains:keyword]) return YES;
+    return NO;
+}
+
+- (BOOL)_text:(NSString *)text contains:(NSString *)keyword {
+    if (text.length == 0) return NO;
+    return [text rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+/// 关键词变化 → 失效缓存并重建刷新
+- (void)_applySearchKeyword:(NSString *)keyword {
+    NSString *trimmed = [(keyword ?: @"") stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    self.searchKeyword = trimmed.length ? trimmed : nil;
+    self.filteredSections = nil;
+    [self.tableView reloadData];
+}
+
+#pragma mark - UISearchBarDelegate
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    BOOL shouldShow = (searchText.length > 0);
+    if (searchBar.showsCancelButton != shouldShow) {
+        [searchBar setShowsCancelButton:shouldShow animated:YES];
+    }
+    [self _applySearchKeyword:searchText];
+}
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+    [searchBar resignFirstResponder];
+}
+
+- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
+    searchBar.text = @"";
+    [searchBar setShowsCancelButton:NO animated:YES];
+    [searchBar resignFirstResponder];
+    [self _applySearchKeyword:nil];
+}
+
 #pragma mark - UITableView
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return self.schema.sections.count;
+    return [self _displaySections].count;
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    TSSettingsSection *s = self.schema.sections[section];
+    NSArray<TSSettingsSection *> *secs = [self _displaySections];
+    if (section < 0 || section >= (NSInteger)secs.count) return 0;
+    TSSettingsSection *s = secs[section];
     if (s.collapsible && s.collapsedByUser) return 0;     // 折叠时整组收起, 但 r.currentValue 仍由 _loadInitialValuesFromJSON 持有, 不影响写盘
     NSInteger n = 0;
     for (TSSettingsRow *r in s.rows) if (!r.hiddenByDependency) n++;
@@ -1490,7 +1618,9 @@ static UIView *TSFindFirstResponder(UIView *v) {
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
-    TSSettingsSection *s = self.schema.sections[section];
+    NSArray<TSSettingsSection *> *secs = [self _displaySections];
+    if (section < 0 || section >= (NSInteger)secs.count) return nil;
+    TSSettingsSection *s = secs[section];
     NSString *titleText = [self _resolvedText:s.title] ?: @"";
 
     static const NSInteger kTitleTag = 11;
@@ -1561,8 +1691,9 @@ static UIView *TSFindFirstResponder(UIView *v) {
 
 - (void)_onSectionHeaderTap:(UITapGestureRecognizer *)g {
     NSInteger section = g.view.tag - 1000;
-    if (section < 0 || section >= (NSInteger)self.schema.sections.count) return;
-    TSSettingsSection *s = self.schema.sections[section];
+    NSArray<TSSettingsSection *> *secs = [self _displaySections];
+    if (section < 0 || section >= (NSInteger)secs.count) return;
+    TSSettingsSection *s = secs[section];
     if (!s.collapsible) return;
     s.collapsedByUser = !s.collapsedByUser;
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:section]
@@ -1574,7 +1705,9 @@ static UIView *TSFindFirstResponder(UIView *v) {
 // 与自定义 header 的 titleLabel 叠加造成"重影"。
 // viewForHeaderInSection 已覆盖所有 section, 系统标题注入无存在必要。
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
-    return [self _resolvedText:self.schema.sections[section].footer];
+    NSArray<TSSettingsSection *> *secs = [self _displaySections];
+    if (section < 0 || section >= (NSInteger)secs.count) return nil;
+    return [self _resolvedText:secs[section].footer];
 }
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
     TSSettingsRow *r = [self _rowAtIndexPath:ip];
@@ -1600,7 +1733,9 @@ static UIView *TSFindFirstResponder(UIView *v) {
     return 50;
 }
 - (TSSettingsRow *)_rowAtIndexPath:(NSIndexPath *)ip {
-    TSSettingsSection *s = self.schema.sections[ip.section];
+    NSArray<TSSettingsSection *> *secs = [self _displaySections];
+    if (ip.section < 0 || ip.section >= (NSInteger)secs.count) return nil;
+    TSSettingsSection *s = secs[ip.section];
     NSInteger n = 0;
     for (TSSettingsRow *r in s.rows) {
         if (r.hiddenByDependency) continue;

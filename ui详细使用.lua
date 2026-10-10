@@ -1,4 +1,4 @@
---[==[ ui详细使用.lua —— 分组版
+--[==[ UIKit 原生设置 UI详细使用.lua —— 分组版
   每类控件一个 section; 分组用自带 title (系统灰色小节头), 不需要 info 行。
   行内 default 控制首次打开的默认值 (settings.json 保存过的值优先):
     switch → true/false    segmented/select → 数字索引 1/2/3 (或选项字符串)
