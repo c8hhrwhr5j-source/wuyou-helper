@@ -322,6 +322,8 @@ static TSSettingsSection *_Nullable tsSchema_parseSection(lua_State *L, int idx,
     TSSettingsSection *s = [[TSSettingsSection alloc] init];
     s.title = tsSchema_getStringField(L, idx, "title");
     s.footer = tsSchema_getStringField(L, idx, "footer");
+    s.collapsible     = tsSchema_getBoolField(L, idx, "collapsible", NO);
+    s.collapsedByUser = tsSchema_getBoolField(L, idx, "defaultCollapsed", NO);
 
     NSMutableArray<TSSettingsRow *> *rows = [NSMutableArray array];
     lua_getfield(L, idx, "rows");

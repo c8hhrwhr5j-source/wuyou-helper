@@ -1477,10 +1477,87 @@ static UIView *TSFindFirstResponder(UIView *v) {
 }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     TSSettingsSection *s = self.schema.sections[section];
+    if (s.collapsible && s.collapsedByUser) return 0;     // 折叠时整组收起, 但 r.currentValue 仍由 _loadInitialValuesFromJSON 持有, 不影响写盘
     NSInteger n = 0;
     for (TSSettingsRow *r in s.rows) if (!r.hiddenByDependency) n++;
     return n;
 }
+
+#pragma mark - 卡片折叠: section header 可点击收起/展开 (collapsible = YES 时启用)
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
+    return 40;                                            // 折叠/不折叠统一高度
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
+    TSSettingsSection *s = self.schema.sections[section];
+    NSString *titleText = [self _resolvedText:s.title] ?: @"";
+
+    static const NSInteger kTitleTag = 11;
+    static const NSInteger kChevronTag = 22;
+    UITableViewHeaderFooterView *hv = [tv dequeueReusableHeaderFooterViewWithIdentifier:@"collapsibleHeader"];
+    if (!hv) {
+        hv = [[UITableViewHeaderFooterView alloc] initWithReuseIdentifier:@"collapsibleHeader"];
+        hv.contentView.userInteractionEnabled = YES;
+
+        UILabel *titleLabel = [UILabel new];
+        titleLabel.tag = kTitleTag;
+        titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        titleLabel.textColor = [UIColor secondaryLabelColor];
+        titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        [hv.contentView addSubview:titleLabel];
+
+        UILabel *chev = [UILabel new];
+        chev.tag = kChevronTag;
+        chev.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+        chev.textColor = [UIColor secondaryLabelColor];
+        chev.textAlignment = NSTextAlignmentRight;
+        chev.translatesAutoresizingMaskIntoConstraints = NO;
+        [hv.contentView addSubview:chev];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [titleLabel.leadingAnchor constraintEqualToAnchor:hv.contentView.layoutMarginsGuide.leadingAnchor],
+            [titleLabel.centerYAnchor constraintEqualToAnchor:hv.contentView.centerYAnchor],
+            [chev.trailingAnchor constraintEqualToAnchor:hv.contentView.layoutMarginsGuide.trailingAnchor],
+            [chev.centerYAnchor constraintEqualToAnchor:hv.contentView.centerYAnchor],
+            [chev.widthAnchor constraintEqualToConstant:18],
+        ]];
+    }
+    UILabel *titleLabel = [hv.contentView viewWithTag:kTitleTag];
+    UILabel *chev = [hv.contentView viewWithTag:kChevronTag];
+    titleLabel.text = titleText;
+
+    // 清理旧 tap (dequeue 出的 view 上一轮可能 attach 过)
+    for (UIGestureRecognizer *g in [hv.contentView.gestureRecognizers copy]) {
+        if ([g isKindOfClass:[UITapGestureRecognizer class]]) {
+            [hv.contentView removeGestureRecognizer:g];
+        }
+    }
+    if (s.collapsible) {
+        chev.text = s.collapsedByUser ? @"▸" : @"▾";
+        chev.hidden = NO;
+        hv.tag = 1000 + section;                          // tag 编码 section 索引, 回调里解码
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                              action:@selector(_onSectionHeaderTap:)];
+        [hv.contentView addGestureRecognizer:tap];
+    } else {
+        chev.hidden = YES;
+        hv.tag = 0;
+    }
+    return hv;
+}
+
+- (void)_onSectionHeaderTap:(UITapGestureRecognizer *)g {
+    UIView *hv = g.view;
+    NSInteger section = hv.tag - 1000;
+    if (section < 0 || section >= (NSInteger)self.schema.sections.count) return;
+    TSSettingsSection *s = self.schema.sections[section];
+    if (!s.collapsible) return;
+    s.collapsedByUser = !s.collapsedByUser;
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:section]
+                  withRowAnimation:UITableViewRowAnimationAutomatic];
+}
+
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     return [self _resolvedText:self.schema.sections[section].title];
 }

@@ -104,6 +104,10 @@ typedef NS_ENUM(NSInteger, TSSettingsDateMode) {
 @property (nonatomic, copy, nullable) NSString *title;
 @property (nonatomic, copy, nullable) NSString *footer;
 @property (nonatomic, copy) NSArray<TSSettingsRow *> *rows;
+/// 卡片可折叠: collapsible = YES 时, 标题可点击展开/收起
+@property (nonatomic, assign) BOOL collapsible;
+/// 当前是否处于折叠状态 (运行时, 用户点击切换)
+@property (nonatomic, assign) BOOL collapsedByUser;
 @end
 
 /// 整个 schema
