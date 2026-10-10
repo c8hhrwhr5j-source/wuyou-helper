@@ -165,6 +165,7 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
     else if ([typeStr isEqualToString:@"info"])     type = TSSettingsRowTypeInfo;
     else if ([typeStr isEqualToString:@"checkbox"])  type = TSSettingsRowTypeCheckbox;
     else if ([typeStr isEqualToString:@"checkGroup"]) type = TSSettingsRowTypeCheckGroup;
+    else if ([typeStr isEqualToString:@"wheel"])      type = TSSettingsRowTypeWheel;
     else {
         if (error) *error = [NSError errorWithDomain:TSSettingsSchemaErrorDomain
                                                   code:2
@@ -302,7 +303,7 @@ static TSSettingsRow *_Nullable tsSchema_parseRow(lua_State *L, int idx, NSError
     row.validatorMessage = tsSchema_getStringField(L, idx, "validatorMessage");
 
     // segmented/select 默认值
-    if ((type == TSSettingsRowTypeSegmented || type == TSSettingsRowTypeSelect)
+    if ((type == TSSettingsRowTypeSegmented || type == TSSettingsRowTypeSelect || type == TSSettingsRowTypeWheel)
         && !row.defaultValue && row.options.count > 0) {
         row.defaultValue = row.options.firstObject;
     }

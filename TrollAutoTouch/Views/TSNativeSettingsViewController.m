@@ -238,7 +238,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
 
 #pragma mark - Cell
 
-@interface TSSettingsCell : UITableViewCell <UITextFieldDelegate>
+@interface TSSettingsCell : UITableViewCell <UITextFieldDelegate, UIPickerViewDataSource, UIPickerViewDelegate>
 
 // 左侧标题
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -255,6 +255,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
 @property (nonatomic, strong) UITextField *textField;
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) UIDatePicker *datePicker;
+@property (nonatomic, strong) UIPickerView *wheelView;   // 单列滚轮 (wheel 行)
 @property (nonatomic, strong) UIButton *disclosureButton;
 @property (nonatomic, strong) UIView *colorSwatch;
 @property (nonatomic, strong) UIButton *actionButton;
@@ -301,7 +302,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
     UIView *lazyViews[] = {
         self.switchView, self.checkboxView, self.stepperView, self.stepperValueLabel,
         self.sliderView, self.sliderValueLabel, self.segmentedView,
-        self.textField, self.textView, self.datePicker,
+        self.textField, self.textView, self.datePicker, self.wheelView,
         self.disclosureButton, self.colorSwatch, self.actionButton,
         self.infoLabel, self.chipContainer, nil,
     };
@@ -505,6 +506,15 @@ static UIView *TSFindFirstResponder(UIView *v) {
     }
     self.datePicker.hidden = NO;
 }
+- (void)_ensureWheelPicker {
+    if (!self.wheelView) {
+        self.wheelView = [[UIPickerView alloc] init];
+        self.wheelView.dataSource = self;
+        self.wheelView.delegate = self;
+        [self.contentView addSubview:self.wheelView];
+    }
+    self.wheelView.hidden = NO;
+}
 - (void)_ensureDisclosure {
     if (!self.disclosureButton) {
         self.disclosureButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -695,6 +705,21 @@ static UIView *TSFindFirstResponder(UIView *v) {
             self.datePicker.datePickerMode = UIDatePickerModeCountDownTimer;
             self.datePicker.countDownDuration = secs > 0 ? secs : 0;
         } break;
+        case TSSettingsRowTypeWheel: {
+            // 单列滚轮: 值模型与 select 相同 (currentValue = 选中选项字符串)。
+            // 复用时 reloadAllComponents 刷新候选, 再按当前值选中行。
+            [self _ensureWheelPicker];
+            if (row.options.count == 0) {
+                self.row.currentValue = nil;
+                break;
+            }
+            [self.wheelView reloadAllComponents];
+            id v = TSValueForKey(row);
+            NSInteger idx = [row.options indexOfObject:v];
+            if (idx == NSNotFound) idx = 0;
+            [self.wheelView selectRow:idx inComponent:0 animated:NO];
+            self.row.currentValue = row.options[idx];
+        } break;
         case TSSettingsRowTypeColor: {
             [self _ensureColorSwatch];
             id v = TSValueForKey(row);
@@ -747,6 +772,12 @@ static UIView *TSFindFirstResponder(UIView *v) {
         // 滚轮倒计时选择器 (compact 样式不支持 countDownTimer): 标题一行 + 下方滚轮
         self.titleLabel.frame = CGRectMake(left, 8, w - left - right, 18);
         self.datePicker.frame = CGRectMake(left, 26, w - left - right, h - 26 - 8);
+        return;
+    }
+    if (self.row.type == TSSettingsRowTypeWheel) {
+        // 单列滚轮: 标题一行 + 下方滚轮 (同 Duration 布局)
+        self.titleLabel.frame = CGRectMake(left, 8, w - left - right, 18);
+        self.wheelView.frame = CGRectMake(left, 26, w - left - right, h - 26 - 8);
         return;
     }
     if (self.row.type == TSSettingsRowTypeSlider) {
@@ -886,6 +917,22 @@ static UIView *TSFindFirstResponder(UIView *v) {
     NSInteger idx = self.segmentedView.selectedSegmentIndex;
     if (idx >= 0 && idx < (NSInteger)self.row.options.count) {
         self.row.currentValue = self.row.options[idx];
+        [self.vc refreshAfterValueChange];
+    }
+}
+#pragma mark - UIPickerView (wheel 行)
+- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)pv {
+    return 1;
+}
+- (NSInteger)pickerView:(UIPickerView *)pv numberOfRowsInComponent:(NSInteger)component {
+    return self.row.options.count;
+}
+- (NSString *)pickerView:(UIPickerView *)pv titleForRow:(NSInteger)r forComponent:(NSInteger)component {
+    return self.row.options[r] ?: @"";
+}
+- (void)pickerView:(UIPickerView *)pv didSelectRow:(NSInteger)r inComponent:(NSInteger)component {
+    if (r >= 0 && r < (NSInteger)self.row.options.count) {
+        self.row.currentValue = self.row.options[r];
         [self.vc refreshAfterValueChange];
     }
 }
@@ -1730,6 +1777,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
     if (r.type == TSSettingsRowTypeTextLong) return 110;
     if (r.type == TSSettingsRowTypeDate) return 56;
     if (r.type == TSSettingsRowTypeDuration) return 240;   // 滚轮倒计时选择器需要整行高度
+    if (r.type == TSSettingsRowTypeWheel) return 216;      // 单列滚轮 (标准 UIPickerView 高度)
     return 50;
 }
 - (TSSettingsRow *)_rowAtIndexPath:(NSIndexPath *)ip {

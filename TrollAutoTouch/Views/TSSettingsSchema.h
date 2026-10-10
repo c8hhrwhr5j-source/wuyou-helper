@@ -35,6 +35,7 @@ typedef NS_ENUM(NSInteger, TSSettingsRowType) {
     TSSettingsRowTypeInfo      = 14, // 静态说明文字
     TSSettingsRowTypeCheckbox  = 15, // 复选框 (bool, 右侧色块, 点击整行可切换)
     TSSettingsRowTypeCheckGroup = 16, // 复选框组 (多选, 每行 N 个色块按钮, 点击名字变色)
+    TSSettingsRowTypeWheel     = 17, // 单列滚轮 (UIPickerView, 候选项同 select, 值=选中字符串)
 };
 
 typedef NS_ENUM(NSInteger, TSSettingsDateMode) {
