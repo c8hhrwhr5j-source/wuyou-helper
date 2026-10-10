@@ -1524,7 +1524,7 @@ static UIView *TSFindFirstResponder(UIView *v) {
         ]];
     }
     UILabel *titleLabel = [hv.contentView viewWithTag:kTitleTag];
-    UILabel *chev = [hv.contentView viewWithTag:kChevronTag];
+    UIImageView *chev = [hv.contentView viewWithTag:kChevronTag];
     // 关键: iOS 15+ 在 dequeue UITableViewHeaderFooterView 时, 会把 titleForHeaderInSection
     // 的标题自动应用为 defaultContentConfiguration 渲染一层系统文字,
     // 与下方自定义 titleLabel 叠加形成"重影" → 每次复用都清空系统默认内容
